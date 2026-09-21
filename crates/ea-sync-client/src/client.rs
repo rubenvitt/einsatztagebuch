@@ -29,8 +29,8 @@
 use std::sync::Arc;
 mod response;
 
-use ea_archive::{ArchiveBackend, ArchiveBackendError, ArchiveSource};
-use ea_archive_fs::{LocalPathBackend, PlannedPublicationV1, PublicationQueue};
+pub use ea_archive_fs::SyncLocalArchiveV1;
+use ea_archive_fs::{PlannedPublicationV1, PublicationQueue};
 use ea_sync_protocol::{
     EntryCommitRequestV1, EntryCommitResponseV1, HttpMethod, RequestIdV1, RequestParts,
     RequestSigner, STRUCTURED_MEDIA_TYPE_V1, SignatureParametersV1, body_digest, organization_tag,
@@ -143,40 +143,6 @@ impl PushSummary {
     }
 }
 
-/// Der lokale committete Bestand, wie der Klient ihn sieht (EA-CNA-PUB-5).
-///
-/// Zwei Rollen, bewusst getrennt: die QUELLE, aus der die Warteschlange
-/// entsteht und gegen die eine Quittung verifiziert wird, und das BACKEND, in
-/// das die verifizierte Quittung per Create-if-absent gelegt wird. Für
-/// LocalPath ist beides dieselbe Wurzel. Für ein kontrolliertes Netzprofil ist
-/// die Quelle die Vereinigung aus Netzsicht und committeter lokaler
-/// Komponente (EA-CNA-SRC-2) und das Backend die lokale Komponente — nie ein
-/// `LocalPathBackend` des Netzziels.
-pub trait SyncLocalArchiveV1: Send + Sync {
-    /// Die Ablage der verifizierten Quittung: Create-if-absent, danach
-    /// `sync_file` und `sync_directory`.
-    fn backend(&self) -> &dyn ArchiveBackend;
-
-    /// Die committete Lesesicht, bei jedem Aufruf neu gebildet. Staging
-    /// gehört nie dazu.
-    ///
-    /// # Errors
-    ///
-    /// Der Fehler beim Bilden der Sicht; der Klient meldet ihn als
-    /// Archivbefund und nicht als wartendes Netzarchiv.
-    fn committed_source(&self) -> Result<Box<dyn ArchiveSource + '_>, ArchiveBackendError>;
-}
-
-impl SyncLocalArchiveV1 for LocalPathBackend {
-    fn backend(&self) -> &dyn ArchiveBackend {
-        self
-    }
-
-    fn committed_source(&self) -> Result<Box<dyn ArchiveSource + '_>, ArchiveBackendError> {
-        Ok(Box::new(self.as_archive_source()))
-    }
-}
-
 /// Alles, was EIN Klient braucht.
 ///
 /// Ein Datensatz statt zehn Stellungsargumenten: zwei Bytefolgen und zwei
@@ -220,8 +186,15 @@ impl SyncClient {
     /// # Errors
     ///
     /// [`SyncClientError::RetryStateUnreadable`], wenn die lokale Ablage die
-    /// Wiederaufnahmetabelle nicht fuehrt.
+    /// Wiederaufnahmetabelle nicht fuehrt;
+    /// [`SyncClientError::NetworkPublicationUnpaired`], wenn der Archivport
+    /// eine Netzpublikation verlangt und `network` fehlt.
     pub fn new(config: SyncClientConfigV1) -> Result<Self, SyncClientError> {
+        // Ein Netzport ohne Warteschlange übersprünge die Netzpublikation und
+        // committete direkt beim Server (EA-CNA-PUB-5): fail-closed beim Aufbau.
+        if config.backend.requires_network_publication() && config.network.is_none() {
+            return Err(SyncClientError::NetworkPublicationUnpaired);
+        }
         let retry_store = RetryStore::open(
             Arc::clone(&config.database),
             config.retry,

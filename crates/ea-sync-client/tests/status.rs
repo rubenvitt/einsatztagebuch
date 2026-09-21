@@ -244,6 +244,18 @@ struct TwoPartUnionArchive {
     visits: Arc<AtomicUsize>,
 }
 
+impl TwoPartUnionArchive {
+    /// Die Fixture ohne Bytes: nur die Paarung zählt.
+    fn empty(harness: &SyncHarness) -> Self {
+        Self {
+            backend: harness.writer().backend_handle(),
+            remote: Vec::new(),
+            local: Vec::new(),
+            visits: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
 /// Eine Besuchssicht der Vereinigung; erst die Netzsicht, dann die lokale
 /// Komponente.
 struct TwoPartUnionSource<'a> {
@@ -270,6 +282,10 @@ impl SyncLocalArchiveV1 for TwoPartUnionArchive {
 
     fn committed_source(&self) -> Result<Box<dyn ArchiveSource + '_>, ArchiveBackendError> {
         Ok(Box::new(TwoPartUnionSource { archive: self }))
+    }
+
+    fn requires_network_publication(&self) -> bool {
+        true
     }
 }
 
@@ -339,4 +355,20 @@ async fn server_commit_is_not_sent_while_network_publication_is_deferred_for_a_u
     );
     assert_eq!(harness.status(), SyncStatus::UploadPending);
     assert_eq!(harness.detail(), "Netzarchiv wartet");
+}
+
+/// Ein Netzport ohne Netzarchiv-Warteschlange wird schon beim Aufbau
+/// abgelehnt (EA-CNA-PUB-5): sonst übersprünge `push_pending` die
+/// Netzpublikation und committete direkt beim Server.
+#[tokio::test]
+async fn a_network_port_without_a_network_queue_is_refused() {
+    let mut harness = SyncHarness::new().await;
+    let port = TwoPartUnionArchive::empty(&harness);
+    harness.use_local_archive(Arc::new(port));
+    let refused = harness
+        .try_client()
+        .err()
+        .expect("ein ungepaarter Netzport darf keinen Klienten ergeben");
+    assert_eq!(refused.code(), "EA-SYNC-CLIENT-NETWORK-UNPAIRED");
+    assert_eq!(harness.server.commit_calls(), 0);
 }

@@ -528,6 +528,23 @@ impl SyncHarness {
         self.client_with_transport(Arc::clone(&self.server) as Arc<dyn SyncTransportV1>)
     }
     pub fn client_with_transport(&self, transport: Arc<dyn SyncTransportV1>) -> SyncClient {
+        self.try_client_with_transport(transport)
+            .expect("der Klient muss stehen")
+    }
+
+    /// Baut den Klienten und gibt die Ablehnung des Aufbaus zurück.
+    ///
+    /// # Errors
+    ///
+    /// Der Fehler von [`SyncClient::new`].
+    pub fn try_client(&self) -> Result<SyncClient, SyncClientError> {
+        self.try_client_with_transport(Arc::clone(&self.server) as Arc<dyn SyncTransportV1>)
+    }
+
+    fn try_client_with_transport(
+        &self,
+        transport: Arc<dyn SyncTransportV1>,
+    ) -> Result<SyncClient, SyncClientError> {
         let ArchiveBackendProfileV1::ControlledNetworkPath(profile) = controlled_network_profile()
         else {
             unreachable!("die Fixture baut ein kontrolliertes Netzprofil");
@@ -560,7 +577,6 @@ impl SyncHarness {
                 .expect("die Schranke passt in ein u16"),
             observed_now: self.observed_now(),
         })
-        .expect("der Klient muss stehen")
     }
 
     /// Ersetzt den lokalen Archivport aller folgenden Klienten — etwa durch

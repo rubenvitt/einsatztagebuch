@@ -33,8 +33,10 @@ mod profile_migration;
 mod publication_queue;
 mod sqlcipher_backend;
 mod sqlcipher_commit;
+mod sync_local_archive;
 pub use sqlcipher_backend::{SqlcipherArchiveBackend, SqlcipherCapabilityReportV1};
 pub use sqlcipher_commit::SqliteCommitStore;
+pub use sync_local_archive::SyncLocalArchiveV1;
 
 pub use bundle::{BundleExportReport, open_archive_bundle, write_archive_bundle};
 pub use controlled_network::{
