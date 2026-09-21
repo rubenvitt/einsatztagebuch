@@ -832,3 +832,4 @@ fn native_expired_writer_cannot_bypass_block_or_evidence_grade_policy() {
 }
 
 mod time_authority;
+mod network_writer;

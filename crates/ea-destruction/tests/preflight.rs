@@ -27,6 +27,104 @@ fn signed_preflight_comes_from_complete_exact_original_archive_and_native_reques
     run_local_scenario(None, false, None);
 }
 
+/// Pinnt die Beobachtung eines LocalPath-Bestands über den Trait: dieselbe
+/// Ortsdomäne über dem kanonischen Wurzelpfad wie bisher, und der Bestand
+/// umfasst weiter committete UND Staging-Objekte.
+#[test]
+fn writer_observation_of_a_local_path_backend_records_the_same_location_hash_as_before() {
+    let fixture = local_evidence_fixture();
+    let profile = ea_archive::ArchiveBackendProfileV1::LocalPath(ea_archive::LocalPathProfileV1 {
+        filesystem_row_id: "fixture-destruction-fs".into(),
+        capability_test_vector_id: "cap-v1-destruction".into(),
+    });
+    let backend = ea_archive_fs::LocalPathBackend::open(
+        fixture.native.directory.join("archive-writer-pin"),
+        profile.clone(),
+        &ea_archive::BoundArchiveProfilePolicyV1::from_policy(fixture.head.policy_fields()),
+    )
+    .unwrap();
+    let grant = backend.root().join("grants/pinned.eag");
+    std::fs::create_dir_all(grant.parent().unwrap()).unwrap();
+    std::fs::write(&grant, &fixture.original.initial_grant_bytes).unwrap();
+    let staged = backend.root().join(format!(
+        "entries/pinned.eip{}",
+        ea_archive::STAGING_SUFFIX_V1
+    ));
+    std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+    std::fs::write(&staged, &fixture.original.original_bytes).unwrap();
+
+    let observed = SqliteManagedCustody::new(fixture.native.database.clone())
+        .observe_writer_archive(
+            ea_trust::WriterRegistryHeadRef::from(&fixture.head),
+            fixture.native.certificate,
+            &backend,
+        )
+        .unwrap();
+    let canonical = std::fs::canonicalize(backend.root()).unwrap();
+    let mut preimage = b"EINSATZARCHIV-MANAGED-ARCHIVE-LOCATION-v1\0".to_vec();
+    preimage.extend_from_slice(canonical.to_str().unwrap().as_bytes());
+    let location = ea_crypto::object_hash(&preimage);
+    assert!(observed.location_id() == location);
+    assert!(observed.profile_hash() == profile.profile_hash().unwrap());
+
+    // Alle Custody-Zeilen dieses Orts: Präfix, der committete Grant und das
+    // nur gestagte Entry.
+    let mut records = std::collections::BTreeSet::new();
+    let mut after = Vec::new();
+    while let Some(row) = fixture
+        .native
+        .database
+        .query_row(
+            "SELECT record_hash,exact_bytes FROM managed_custody WHERE record_hash>?1 ORDER BY record_hash LIMIT 1",
+            &[ea_local_store::StoreValue::Blob(after.clone())],
+        )
+        .unwrap()
+    {
+        after = row.blob(0).unwrap().to_vec();
+        let bytes = row.blob(1).unwrap();
+        let mut d = minicbor::Decoder::new(bytes);
+        let arity = d.array().unwrap().unwrap();
+        let code = d.u8().unwrap();
+        if code == 0 {
+            continue;
+        }
+        d.bytes().unwrap();
+        d.bytes().unwrap();
+        d.u8().unwrap();
+        assert_eq!(d.bytes().unwrap(), observed.profile_hash().as_bytes());
+        if d.bytes().unwrap() != location.as_bytes() {
+            continue;
+        }
+        if arity == 9 {
+            let object = d.bytes().unwrap().to_vec();
+            d.bytes().unwrap();
+            records.insert((code, object, d.u8().unwrap()));
+        } else {
+            records.insert((code, Vec::new(), 0));
+        }
+    }
+    assert_eq!(
+        records,
+        std::collections::BTreeSet::from([
+            (1, Vec::new(), 0),
+            (
+                2,
+                ea_crypto::object_hash(&fixture.original.initial_grant_bytes)
+                    .as_bytes()
+                    .to_vec(),
+                ObjectTypeV1::Grant.code() as u8,
+            ),
+            (
+                2,
+                ea_crypto::object_hash(&fixture.original.original_bytes)
+                    .as_bytes()
+                    .to_vec(),
+                ObjectTypeV1::Entry.code() as u8,
+            ),
+        ])
+    );
+}
+
 #[test]
 fn local_removal_resumes_after_every_durable_boundary_with_same_job() {
     use LocalDestructionCheckpoint::*;

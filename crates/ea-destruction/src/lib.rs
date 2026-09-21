@@ -37,7 +37,10 @@ pub use barrier::{
 pub use ea_verify::DestructionStateV1 as DestructionState;
 pub use event::{VerifiedDestructionEvent, verify_event, verify_event_historical};
 pub use execution::{DestructionExecutionContext, DurableDestructionStart};
-pub use inventory::{DurableManagedInventory, ManagedArchiveRegistration, SqliteManagedCustody};
+pub use inventory::{
+    DurableManagedInventory, ManagedArchiveRegistration, ObservedArchiveHoldingV1,
+    SqliteManagedCustody,
+};
 pub use job::{DurableDestructionJob, SqliteDestructionJobs};
 pub use local::{
     LocalActionAuthorityGuard, LocalDestructionCheckpoint, LocalDestructionExecution,
