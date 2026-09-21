@@ -33,12 +33,12 @@ fn profile_json(profile: &ArchiveBackendProfileV1) -> Value {
 /// Die Desktop-Writer-`Installation` mit Netzprofil-Policy und einer
 /// Writer-Konfiguration, deren `local_commit_database_path` die eigene
 /// Datenbank der Writer-Runtime nennt.
-struct NetworkWriterInstallation {
-    base: Base,
-    writer_config: PathBuf,
+pub(super) struct NetworkWriterInstallation {
+    pub(super) base: Base,
+    pub(super) writer_config: PathBuf,
 }
 impl NetworkWriterInstallation {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::with_profile(network_profile(10_000))
     }
     fn with_profile(profile: ArchiveBackendProfileV1) -> Self {
@@ -69,7 +69,7 @@ impl NetworkWriterInstallation {
     /// Der Writer registriert seine eigene Datenbank über seine
     /// Current-Runtime und gibt sie vor dem Desktop-Start frei. Die
     /// zurückgegebene Komponente trägt keine Autorität, nur die Ablage.
-    fn register(&self) -> NativeArchiveExistingComponent {
+    pub(super) fn register(&self) -> NativeArchiveExistingComponent {
         let runtime = self.base.open_writer_runtime();
         let (outcome, component) = register_network_component(
             &runtime,
@@ -83,7 +83,7 @@ impl NetworkWriterInstallation {
         component
     }
 
-    fn try_host(
+    pub(super) fn try_host(
         &self,
         writer_config: &Path,
     ) -> Result<Arc<NativeDesktopRuntime>, ea_desktop::commands::CommandError> {
@@ -117,7 +117,7 @@ impl NetworkWriterInstallation {
     }
 
     /// Committete Zeilen der lokalen Komponente: (Pfad, Staging?).
-    fn local_paths(&self) -> Vec<(String, bool)> {
+    pub(super) fn local_paths(&self) -> Vec<(String, bool)> {
         let db = open_database(&self.base.installed.database);
         let mut paths = Vec::new();
         let mut last = String::new();
@@ -133,7 +133,7 @@ impl NetworkWriterInstallation {
         }
         paths
     }
-    fn committed_local_entries(&self) -> usize {
+    pub(super) fn committed_local_entries(&self) -> usize {
         self.local_paths()
             .iter()
             .filter(|(path, staged)| {
@@ -141,7 +141,7 @@ impl NetworkWriterInstallation {
             })
             .count()
     }
-    fn committed_local_grants(&self) -> usize {
+    pub(super) fn committed_local_grants(&self) -> usize {
         self.local_paths()
             .iter()
             .filter(|(path, staged)| {
@@ -152,7 +152,7 @@ impl NetworkWriterInstallation {
 }
 
 /// Jede Datei unter `root` mit ihren Bytes.
-fn listing(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(super) fn listing(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn walk(root: &Path, directory: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
         for entry in fs::read_dir(directory).unwrap() {
             let path = entry.unwrap().path();
@@ -198,28 +198,45 @@ fn network_writer_finalizes_into_the_local_component_and_not_the_remote() {
     native.reauthenticate(ReauthPurpose::Finalize).unwrap();
     let outcome = writer.finalize(&input, &preview).unwrap();
     assert_eq!(outcome.sequence.get(), 1, "the next chain sequence");
-    assert_eq!(state.drafts().unwrap().load_payload().unwrap(), "");
     assert_eq!(installed.committed_local_entries(), 1, "the .eip is local");
     assert!(installed.committed_local_grants() >= 1, "grants are local");
     assert!(
         installed.local_paths().iter().all(|(_, staged)| !staged),
         "no staging row remains after a completed finalize"
     );
+    // Der Writer schreibt nie ins Netzziel. Was dort seit dem Start neu ist,
+    // hat allein Schritt 12 veröffentlicht: genau die committed lokalen
+    // Objekte, byteidentisch (Task 8, EA-CNA-PUB-3).
+    let remote_after = listing(&installed.base.installed.archive);
+    let added: Vec<_> = remote_after
+        .iter()
+        .filter(|(path, bytes)| remote_before.get(*path) != Some(*bytes))
+        .collect();
+    let committed = installed.local_paths();
+    assert_eq!(added.len(), committed.len(), "{added:?}");
+    let db = open_database(&installed.base.installed.database);
+    for (path, bytes) in added {
+        let row = db
+            .query_row(
+                "SELECT exact_bytes FROM local_commit_object WHERE relative_path=?1",
+                &[StoreValue::Text(path.to_string_lossy().into_owned())],
+            )
+            .unwrap()
+            .expect("jede neue Datei ist ein committed lokales Objekt");
+        assert_eq!(row.blob(0).unwrap(), bytes.as_slice());
+    }
     assert!(
-        listing(&installed.base.installed.archive) == remote_before,
-        "the Writer never writes the remote"
+        remote_before
+            .iter()
+            .all(|(path, bytes)| remote_after.get(path) == Some(bytes)),
+        "nichts Vorhandenes wurde verändert"
     );
+    // Erst jetzt die nächste Aktion: ihre live gelesene Wiederöffnung
+    // bereinigt die veröffentlichten Zeilen (EA-CNA-SRC-5, Task 8).
+    assert_eq!(state.drafts().unwrap().load_payload().unwrap(), "");
+    assert_eq!(installed.committed_local_entries(), 0, "bereinigt");
     drop(state);
     drop(native);
-    // Ein Kaltstart sieht Netzziel ⊎ lokale Komponente und damit die nächste
-    // Sequenz; das Netzziel allein kennt sie nicht.
-    let remote_only = ea_admin::operator_runtime::OperatorArchiveSnapshot::open(
-        &installed.base.installed.archive,
-        &installed.base.installed.anchor,
-        support::live_clock(),
-    )
-    .unwrap();
-    assert_eq!(remote_only.next_sequence().get(), 1);
     let reopened = installed.try_host(&installed.writer_config).unwrap();
     reopened.login().unwrap();
     let state = reopened.desktop_state();

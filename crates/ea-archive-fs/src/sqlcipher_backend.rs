@@ -8,7 +8,8 @@ use ea_archive::{
 use ea_format::ExactObjectBytes;
 use ea_local_store::{StoreError, StoreTransaction, StoreValue};
 use std::{
-    fs::{self, File, OpenOptions},
+    collections::HashMap,
+    fs::{self, File, OpenOptions, TryLockError},
     path::PathBuf,
     sync::Arc,
 };
@@ -100,6 +101,125 @@ impl SqlcipherArchiveBackend {
             physical_flush: true,
             exclusive_writer_lock: contended && released,
         })
+    }
+    /// Nimmt den Writer-Lock dieser Datenbank, falls er frei ist.
+    ///
+    /// Anders als [`ArchiveBackend::acquire_writer_lock`] ist ein fremd
+    /// gehaltener Lock hier kein Fehler, sondern `None`: die Bereinigung beim
+    /// Öffnen (EA-CNA-SRC-5) entfällt dann ohne Fehler.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError::Io`], wenn die Lock-Datei nicht zu öffnen oder
+    /// keine gewöhnliche Datei ist oder das Sperren selbst scheitert.
+    pub fn try_writer_lock(&self) -> Result<Option<WriterLock>, ArchiveBackendError> {
+        let path = self.writer_lock_path();
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|_| ArchiveBackendError::Io)?;
+        if !fs::symlink_metadata(&path)
+            .map_err(|_| ArchiveBackendError::Io)?
+            .file_type()
+            .is_file()
+        {
+            return Err(ArchiveBackendError::Io);
+        }
+        match file.try_lock() {
+            Ok(()) => Ok(Some(WriterLock::new(Arc::new(SqlcipherWriterLock(file))))),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(_)) => Err(ArchiveBackendError::Io),
+        }
+    }
+
+    /// Entfernt committed Zeilen, deren exakte Bytes an derselben Adresse in
+    /// `remote` liegen (EA-CNA-SRC-5), und liefert ihre Zahl.
+    ///
+    /// `lock` MUSS der Writer-Lock dieser Datenbank sein (aus
+    /// [`Self::try_writer_lock`] oder [`ArchiveBackend::acquire_writer_lock`]).
+    /// Ein [`WriterLock`] trägt keine Herkunft; nachprüfbar ist hier nur, dass
+    /// die Lock-Datei dieser Datenbank gerade gehalten wird — ein zweites,
+    /// unabhängiges Handle bekommt sie nicht. Wer sie hält, garantiert der
+    /// Aufrufer.
+    ///
+    /// Staging-Adressen, Verzeichniszeilen und die Sonde werden nie berührt:
+    /// gelöscht wird nur aus `local_commit_object`, und nur eine Adresse, die
+    /// keine Staging-Adresse ist. Alle Löschungen laufen in EINER
+    /// Transaktion, deren Bytevergleich innerhalb derselben Transaktion
+    /// wiederholt wird.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError::AlreadyLocked`], wenn die Lock-Datei gerade von
+    /// niemandem gehalten wird; [`ArchiveBackendError::Io`], wenn `remote`
+    /// nicht vollständig aufzählbar ist; sonst der Fehler der Datenbank.
+    pub fn prune_published(
+        &self,
+        remote: &dyn ArchiveSource,
+        lock: &WriterLock,
+    ) -> Result<usize, ArchiveBackendError> {
+        let _ = lock;
+        let probe = OpenOptions::new()
+            .write(true)
+            .open(self.writer_lock_path())
+            .map_err(|_| ArchiveBackendError::Io)?;
+        if probe.try_lock().is_ok() {
+            // Niemand hält den Lock: der übergebene gehört nicht zu dieser
+            // Datenbank. Freigeben und ablehnen.
+            let _ = probe.unlock();
+            return Err(ArchiveBackendError::AlreadyLocked);
+        }
+        drop(probe);
+        // Die lokale Komponente ist durch die Queuegrenze klein; das
+        // Netzziel kann groß sein. Deshalb wird die lokale Seite indiziert
+        // und das Netzziel einmal durchlaufen.
+        let local: HashMap<String, Vec<u8>> = self
+            .snapshot()?
+            .into_iter()
+            .filter(|(path, _)| !ea_archive::is_staging_path(path))
+            .collect();
+        let mut identical = Vec::new();
+        remote
+            .visit_blobs(&mut |blob| {
+                if !ea_archive::is_staging_path(blob.path_hint())
+                    && local
+                        .get(blob.path_hint())
+                        .is_some_and(|bytes| bytes.as_slice() == blob.bytes())
+                {
+                    identical.push(blob.path_hint().to_owned());
+                }
+                Ok(())
+            })
+            .map_err(|_| ArchiveBackendError::Io)?;
+        if identical.is_empty() {
+            return Ok(0);
+        }
+        let removed = self.transaction(|tx| {
+            let mut removed = 0;
+            for path in &identical {
+                let params = self.store.params(path).map_err(StorageFailure)?;
+                let Some(row) = tx.query_row(
+                    "SELECT exact_bytes FROM local_commit_object WHERE namespace=?1 AND relative_path=?2",
+                    &params,
+                )?
+                else {
+                    continue;
+                };
+                if Some(row.blob(0)?) != local.get(path).map(Vec::as_slice) {
+                    continue;
+                }
+                tx.execute(
+                    "DELETE FROM local_commit_object WHERE namespace=?1 AND relative_path=?2",
+                    &params,
+                )?;
+                removed += 1;
+            }
+            Ok(removed)
+        })?;
+        self.flush()?;
+        Ok(removed)
     }
     fn writer_lock_path(&self) -> PathBuf {
         let mut name = self.database_path.as_os_str().to_os_string();

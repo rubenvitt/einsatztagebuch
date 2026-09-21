@@ -71,7 +71,8 @@ pub use entropy::{entropy_draws, reset_entropy_draws};
 pub use error::WriterError;
 pub use fault::{FinalizationFaultPoint, FinalizationPhase, FinalizationStep};
 pub use finalize::{
-    FinalizeOutcome, PreparedFinalization, ReachedState, WriterBindingV1, WriterService,
+    FinalizeOutcome, NetworkPublicationPortV1, PreparedFinalization, ReachedState, WriterBindingV1,
+    WriterService,
 };
 pub use grant_plan::build_grant_plan;
 pub use incident::FinalizationInputV1;

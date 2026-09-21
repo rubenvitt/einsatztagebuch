@@ -3,7 +3,9 @@ use super::{
 };
 use crate::{
     commands::{CommandError, PREVIEW_MISMATCH, PREVIEW_NOT_ISSUED},
-    state::{BoundWriter, StartupRecoveryPort, WriterFinalizePort, WriterPreviewPort},
+    state::{
+        BoundWriter, StartupRecoveryPort, SyncStatePort, WriterFinalizePort, WriterPreviewPort,
+    },
 };
 use ea_admin::{
     amendment::AmendmentDraftService,
@@ -12,6 +14,7 @@ use ea_admin::{
         refuse_local_path_on_registered_anchor,
     },
     native_provider::NativeSigningSlot,
+    network_publication::NetworkPublicationHost,
     operator_runtime::writer::InteractiveOperatorRuntime as OperatorRuntime,
 };
 use ea_archive::{
@@ -23,6 +26,7 @@ use ea_destruction::{ObservedArchiveHoldingV1, SqliteManagedCustody};
 use ea_draft::{IncidentNumberRegister, MasterDataRepository, OperatorProfileRepository};
 use ea_key_provider::SecretPurpose;
 use ea_operator::{OperatorSessionProof, ReauthPurpose};
+use ea_ui_contracts::SyncStateView;
 use ea_ui_contracts::{
     AmendmentInputView, CorrectionReferenceView, FinalizationPreviewView, FinalizeOutcomeView,
     IncidentInputView,
@@ -31,7 +35,15 @@ use ea_writer::{
     FinalizationPreview, RecoveryOutcome, StaleRegistryAcknowledgement, StaleRegistryStore,
     WriterBindingV1, WriterError, WriterService,
 };
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 
 /// Die Ablage, in die der Writer committet: LocalPath wie bisher, für ein
 /// Netzprofil ausschließlich die lokale SQLCipher-Komponente (EA-CNA-WRT-1).
@@ -56,10 +68,103 @@ impl WriterArchive {
     }
 }
 
+/// Der Publikationshost eines Netz-Writers samt seinem Hostlauf
+/// (EA-CNA-PUB-8 (c)).
+///
+/// Ein einziger `std::thread` ruft `run_once` im Backoff des Profils, bis
+/// `next_delay` `None` liefert oder der Wirt endet. Beim Abbau wird das
+/// Haltesignal gesetzt und auf den Thread gewartet; ein hängender Mount hält
+/// den Abbau deshalb bis zum Ende seines laufenden Aufrufs auf (bekannte
+/// Grenze der Warteschlange aus Task 6).
+pub(super) struct NetworkPublication {
+    host: Arc<NetworkPublicationHost>,
+    stop: Arc<AtomicBool>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+impl NetworkPublication {
+    fn start(host: Arc<NetworkPublicationHost>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let host = host.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                // Der Startlauf ist schon synchron gelaufen; der Hostlauf
+                // beginnt deshalb mit der Wartezeit.
+                while let Some(delay) = host.next_delay() {
+                    if !sleep_unless_stopped(delay, &stop) {
+                        return;
+                    }
+                    host.run_once();
+                }
+            })
+        };
+        Self {
+            host,
+            stop,
+            worker: Mutex::new(Some(worker)),
+        }
+    }
+    pub(super) fn host(&self) -> &Arc<NetworkPublicationHost> {
+        &self.host
+    }
+    pub(super) fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(worker) = worker {
+            let _ = worker.join();
+        }
+    }
+}
+impl Drop for NetworkPublication {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Schläft `delay` in kurzen Schritten; `false`, sobald angehalten wurde.
+fn sleep_unless_stopped(delay: Duration, stop: &AtomicBool) -> bool {
+    let until = Instant::now() + delay;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= until {
+            return true;
+        }
+        std::thread::sleep((until - now).min(Duration::from_millis(50)));
+    }
+}
+
+/// Der Sync-Zustand eines Netz-Writers aus seinem Publikationshost
+/// (EA-CNA-PUB-4).
+pub(super) struct NetworkSyncState(pub(super) Arc<NetworkPublicationHost>);
+impl SyncStatePort for NetworkSyncState {
+    fn sync_state(&self) -> Result<SyncStateView, ArchiveBackendError> {
+        let (status, detail_cause) = self.0.sync_state();
+        Ok(SyncStateView {
+            status,
+            detail_cause,
+        })
+    }
+}
+
 pub(super) struct WriterResources {
     archive: WriterArchive,
     timezone: String,
     profile_hash: ea_types::Hash32,
+    /// Nur für ein Netzprofil. Das Feld steht nach `archive`, der Host hält
+    /// aber ohnehin eine eigene Lesesicht der Komponente.
+    publication: Option<NetworkPublication>,
+}
+impl WriterResources {
+    pub(super) fn publication(&self) -> Option<&NetworkPublication> {
+        self.publication.as_ref()
+    }
 }
 impl WriterResources {
     pub(super) fn open(path: &Path, runtime: &OperatorRuntime) -> Result<Self, CommandError> {
@@ -72,6 +177,7 @@ impl WriterResources {
             .profile_hash()
             .map_err(|error| CommandError::new(error.code()))?;
         let policy = BoundArchiveProfilePolicyV1::from_policy(runtime.head().policy_fields());
+        let mut network_host = None;
         let archive = match &profile {
             ArchiveBackendProfileV1::LocalPath(local) => {
                 // EA-CNA-REG-10 vor jeder I/O: sonst schriebe der Writer vom
@@ -111,17 +217,24 @@ impl WriterResources {
                 )
                 .map_err(|error| CommandError::new(error.code()))?;
                 // EA-CNA-WRT-3/4: SQLCipher- und Netzziel-Capability vor dem
-                // ersten Writer-Dienst. Ein fremd gehaltener Writer-Lock oder
-                // ein nicht belegter Flush ist eine fehlende Eigenschaft.
-                component
-                    .require_capabilities(&runtime.config().archive_directory, &policy)
-                    .map_err(|error| match error {
-                        NativeArchiveOpenError::Capability
-                        | NativeArchiveOpenError::Backend(
-                            ArchiveBackendError::AlreadyLocked | ArchiveBackendError::FlushFailed,
-                        ) => CommandError::new("EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS"),
-                        other => CommandError::new(other.code()),
-                    })?;
+                // ersten Writer-Dienst. Der Publikationshost führt genau diese
+                // Zulassung selbst aus und entsteht nur, wenn sie besteht —
+                // ein nie qualifiziertes Netzziel bekommt keinen Host. Ein
+                // fremd gehaltener Writer-Lock oder ein nicht belegter Flush
+                // ist eine fehlende Eigenschaft.
+                let host = NetworkPublicationHost::new(
+                    &component,
+                    &runtime.config().archive_directory,
+                    &policy,
+                )
+                .map_err(|error| match error {
+                    NativeArchiveOpenError::Capability
+                    | NativeArchiveOpenError::Backend(
+                        ArchiveBackendError::AlreadyLocked | ArchiveBackendError::FlushFailed,
+                    ) => CommandError::new("EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS"),
+                    other => CommandError::new(other.code()),
+                })?;
+                network_host = Some(Arc::new(host));
                 WriterArchive::Network(Box::new(component))
             }
         };
@@ -132,10 +245,18 @@ impl WriterResources {
                 archive.holding(),
             )
             .map_err(|error| CommandError::new(error.code()))?;
+        // EA-CNA-PUB-8 (b): was ein früherer Prozess committed, aber nicht
+        // veröffentlicht hat, wird beim Start aus den Bytes neu abgeleitet
+        // und veröffentlicht; danach übernimmt der Hostlauf.
+        let publication = network_host.map(|host: Arc<NetworkPublicationHost>| {
+            host.run_once();
+            NetworkPublication::start(host)
+        });
         Ok(Self {
             archive,
             timezone: config.timezone,
             profile_hash,
+            publication,
         })
     }
 }
@@ -267,6 +388,12 @@ impl NativeDesktopRuntime {
             StaleRegistryStore::new(runtime.database().clone())
                 .map_err(|error| CommandError::new(error.code()))?,
         );
+        // Schritt 12 eines Netzprofils: der Host veröffentlicht die eben
+        // committed Bytes (EA-CNA-PUB-8 (a)).
+        let service = match &resources.publication {
+            Some(publication) => service.with_network_publication(publication.host.as_ref()),
+            None => service,
+        };
         let amendments = AmendmentDraftService::new(&service, runtime.anchor());
         let observed = now()?;
         let clock = || observed;
@@ -453,6 +580,10 @@ impl StartupRecoveryPort for NativeDesktopRuntime {
             Ok(WriterResult::finished(()))
         })
         .map_err(|_| WriterError::ReauthRequired)?;
+        // EA-CNA-PUB-8 (b): nach der Start-Wiederherstellung.
+        if let Some(publication) = self.writer.as_ref().and_then(WriterResources::publication) {
+            publication.host.run_once();
+        }
         operation.expect("the guarded action completed")
     }
 }

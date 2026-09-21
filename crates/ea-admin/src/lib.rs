@@ -89,6 +89,7 @@ pub mod bootstrap_store;
 pub mod genesis;
 pub mod native_archive;
 pub mod native_provider;
+pub mod network_publication;
 pub mod operator_authority;
 pub mod operator_ceremony;
 pub mod operator_exchange;

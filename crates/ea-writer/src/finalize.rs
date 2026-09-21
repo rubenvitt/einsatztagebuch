@@ -166,6 +166,19 @@ pub struct WriterService<'a> {
     operator_profiles: OperatorProfileRepository,
     pub(crate) binding: WriterBindingV1,
     pub(crate) stale_store: Option<crate::StaleRegistryStore>,
+    network_publication: Option<&'a dyn NetworkPublicationPortV1>,
+}
+
+/// Der Publikationsport von Schritt 12 für ein kontrolliertes Netzprofil
+/// (EA-CNA-PUB-8 (a)).
+///
+/// Der Writer kennt weder das Netzziel noch die Warteschlange: er meldet nur,
+/// dass ein lokaler Commit vorliegt. Ableitung, Reihenfolge und
+/// Byte-Identität liegen beim Host dahinter.
+pub trait NetworkPublicationPortV1: Send + Sync {
+    /// Wird einmal nach Schritt 11 gerufen. Lässt die Finalisierung nie
+    /// scheitern; der Ausgang wird nur berichtet.
+    fn publish_committed(&self) -> ea_archive_fs::PublicationOutcomeV1;
 }
 
 /// Alles, was diese Finalisierung an das gebundene Geraet knuepft.
@@ -287,7 +300,16 @@ impl<'a> WriterService<'a> {
             operator_profiles,
             binding,
             stale_store: None,
+            network_publication: None,
         }
+    }
+
+    /// Hängt den Publikationsport eines kontrollierten Netzprofils an
+    /// (Schritt 12). Ohne Port bleibt Schritt 12 der LocalPath-Abschluss.
+    #[must_use]
+    pub fn with_network_publication(mut self, port: &'a dyn NetworkPublicationPortV1) -> Self {
+        self.network_publication = Some(port);
+        self
     }
 
     /// Attach the encrypted durable receipt store of this Writer installation.
@@ -2094,9 +2116,17 @@ impl WriterService<'_> {
         // Beim LOKALEN Profil ist dieser Schritt vollstaendig und ohne
         // Publikation abgeschlossen: es gibt kein entferntes Archivziel, und
         // `lokal gesichert` IST der Endzustand (`design.md` §9.3 Schritt 12
-        // gilt „bei einem kontrollierten Netzlaufwerkprofil"). Der
-        // Netzprofilweg gehoert zu den offengelegten Auslassungen dieses
-        // Tasks.
+        // gilt „bei einem kontrollierten Netzlaufwerkprofil").
+        //
+        // Beim Netzprofil ist ein Publikationsport angehängt (EA-CNA-PUB-8
+        // (a)). Er wird genau einmal gerufen, nachdem das `.eip` in Schritt
+        // 11 lokal committed ist. Sein Ausgang steuert hier NICHTS: der
+        // fachliche Abschluss ist nach Schritt 11 `lokal gesichert`, ein
+        // nicht erreichbares Netzziel ist ein Sync-Zustand und kein Fehler
+        // der Finalisierung. Phase und Schrittmarke bleiben unverändert.
+        if let Some(port) = self.network_publication {
+            let _reported_only = port.publish_committed();
+        }
         state.phase = FinalizationPhase::NetworkArchivePublished;
         state.reached_step = Some(FinalizationStep::PublishToNetworkArchive);
         if stop.ends_after(FinalizationStep::PublishToNetworkArchive) {

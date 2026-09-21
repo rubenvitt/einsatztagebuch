@@ -447,6 +447,10 @@ enum ComponentStorage {
         /// Kanonischer Pfad der eigenen SQLCipher-Datei: Ort der Verwahrung
         /// (EA-CNA-WRT-7).
         database_path: PathBuf,
+        /// Datenbank und Namensraum, aus denen der Publikationshost eine
+        /// eigene committed Lesesicht derselben Komponente öffnet.
+        database: Arc<EncryptedDatabase>,
+        namespace: Hash32,
         _component: ControlledNetworkLocalComponentV1,
     },
 }
@@ -509,6 +513,44 @@ impl NativeArchiveExistingComponent {
             ComponentStorage::Local(_) => None,
             ComponentStorage::Network { backend, .. } => Some(backend),
         }
+    }
+
+    /// Das Netzprofil dieser Komponente; für LocalPath keines.
+    pub(crate) fn network_profile(&self) -> Option<&ea_archive::ControlledNetworkProfileV1> {
+        match &self.profile {
+            ArchiveBackendProfileV1::ControlledNetworkPath(profile) => Some(profile),
+            ArchiveBackendProfileV1::LocalPath(_) => None,
+        }
+    }
+
+    /// Eine EIGENE committed Lesesicht derselben lokalen Komponente, die ihr
+    /// Besitzer unabhängig von diesem Griff halten darf (Publikationshost).
+    /// Sie liest nur; Staging bleibt wie bei jedem `ArchiveSource` draußen.
+    ///
+    /// # Errors
+    ///
+    /// `Config` für LocalPath; sonst der Fehler beim Öffnen des Namensraums.
+    pub(crate) fn committed_reader(
+        &self,
+    ) -> Result<SqlcipherArchiveBackend, NativeArchiveOpenError> {
+        let (
+            ComponentStorage::Network {
+                database,
+                namespace,
+                ..
+            },
+            ArchiveBackendProfileV1::ControlledNetworkPath(profile),
+        ) = (&self.storage, &self.profile)
+        else {
+            return Err(NativeArchiveOpenError::Config);
+        };
+        let store = SqliteCommitStore::open_existing(
+            database.clone(),
+            *namespace,
+            profile.queue_max_objects,
+            profile.queue_max_bytes,
+        )?;
+        Ok(SqlcipherArchiveBackend::open(store)?)
     }
 
     /// Misst die Capabilities, die ein Verbraucher vor seinem ersten Dienst
@@ -657,6 +699,8 @@ impl NativeArchiveExistingComponent {
             storage: ComponentStorage::Network {
                 backend,
                 database_path: actual,
+                database: database.clone(),
+                namespace,
                 _component: component,
             },
             profile: config.profile,
