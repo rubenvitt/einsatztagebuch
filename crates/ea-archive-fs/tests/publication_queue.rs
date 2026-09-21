@@ -55,7 +55,7 @@ fn a_hard_target_failure_keeps_the_whole_plan_pending() {
     // Erreichbarkeit, sonst prueefte der Test den alten Pfad weiter.
     assert_eq!(
         queue.resume().unwrap_err().code(),
-        "EA-ARCHIVE-FLUSH-FAILED"
+        "EA-ARCHIVE-BYTE-CONFLICT"
     );
     assert_eq!(
         target.published_order().len(),
@@ -68,7 +68,7 @@ fn a_hard_target_failure_keeps_the_whole_plan_pending() {
     // obwohl zwei Objekte nie ankamen.
     assert_eq!(
         queue.resume().unwrap_err().code(),
-        "EA-ARCHIVE-FLUSH-FAILED",
+        "EA-ARCHIVE-BYTE-CONFLICT",
         "der Plan MUSS aufgeschoben geblieben sein"
     );
 
@@ -100,7 +100,7 @@ fn a_hard_target_failure_keeps_a_freshly_accepted_plan_pending() {
     // Task 11.
     assert_eq!(
         queue.publish(planned.clone()).unwrap_err().code(),
-        "EA-ARCHIVE-FLUSH-FAILED"
+        "EA-ARCHIVE-BYTE-CONFLICT"
     );
     assert_eq!(
         target.published_order().len(),
@@ -510,4 +510,178 @@ fn two_threads_publishing_while_disconnected_both_survive_in_acceptance_order() 
         "beide Pläne müssen vollständig und ungebrochen erscheinen: {order:?}"
     );
     assert_eq!(order.len(), first.order().len() + second.order().len());
+}
+
+#[test]
+fn resume_waits_for_an_in_flight_connected_drain_instead_of_reporting_nothing_pending() {
+    let (_guard, _root) = support::temp_root("queue-drain-blocks-resume");
+    let arrived = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let plan = support::two_grants_and_one_entry();
+
+    let (queue, _target) = support::queue_with_blocking_target(
+        true,
+        Some("grants/b.eag".to_owned()),
+        std::sync::Arc::clone(&arrived),
+        std::sync::Arc::clone(&release),
+    );
+    let queue = std::sync::Arc::new(queue);
+
+    let publisher = {
+        let queue = std::sync::Arc::clone(&queue);
+        let plan = plan.clone();
+        std::thread::spawn(move || queue.publish(plan))
+    };
+
+    // Warten, bis der Drain WIRKLICH mitten im zweiten Objekt hängt.
+    arrived.wait();
+
+    let resumer_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let resumer = {
+        let queue = std::sync::Arc::clone(&queue);
+        let done = std::sync::Arc::clone(&resumer_done);
+        std::thread::spawn(move || {
+            let state = queue.resume();
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            state
+        })
+    };
+
+    // `resume` MUSS auf die Drain-Sperre warten: es darf in dieser kurzen
+    // Beobachtungsspanne nicht fertig geworden sein, während der Drain noch
+    // mitten im Plan hängt. Die eigentliche Garantie kommt vom Mutex selbst
+    // (resume kann `drain_lock` nicht nehmen, solange `publisher` ihn hält)
+    // — die Schlafzeit dient nur der Beobachtung.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(
+        !resumer_done.load(std::sync::atomic::Ordering::SeqCst),
+        "resume() ist fertig, obwohl der Drain noch mitten im Plan hängt — es hat NICHT gewartet"
+    );
+
+    release.wait();
+
+    let publish_state = publisher
+        .join()
+        .expect("Publisher-Thread darf nicht paniken")
+        .expect("die Publikation muss gelingen");
+    assert_eq!(
+        publish_state.outcome(),
+        PublicationOutcomeV1::PublishedCompletely
+    );
+
+    let resume_state = resumer
+        .join()
+        .expect("Resume-Thread darf nicht paniken")
+        .expect("resume darf nicht fehlschlagen");
+    assert_eq!(resume_state.outcome(), PublicationOutcomeV1::NothingPending);
+}
+
+#[test]
+fn two_concurrent_connected_publishes_never_interleave_and_keep_the_global_order() {
+    let (_guard, _root) = support::temp_root("queue-concurrent-connected-publish");
+    let arrived = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let pending_plan = support::two_grants_and_one_entry();
+    let plan_a = support::second_disjoint_plan();
+    let plan_b = support::third_disjoint_plan();
+
+    // Block auf der LETZTEN Adresse von `plan_a`: die Vereinigung
+    // `pending_plan ⊎ plan_a` hat bis dahin schon alles Vorherige unblockiert
+    // durchlaufen lassen.
+    let block_on = plan_a
+        .order()
+        .last()
+        .cloned()
+        .expect("plan_a ist nicht leer");
+    let (queue, target) = support::queue_with_blocking_target(
+        false,
+        Some(block_on),
+        std::sync::Arc::clone(&arrived),
+        std::sync::Arc::clone(&release),
+    );
+
+    // Der ausstehende Plan wird angenommen, WÄHREND das Ziel noch getrennt
+    // ist — die "pending-first"-Hälfte der Zusage.
+    let deferred = queue.publish(pending_plan.clone()).unwrap();
+    assert_eq!(deferred.outcome(), PublicationOutcomeV1::Deferred);
+
+    let queue = std::sync::Arc::new(queue);
+    let _ = queue.reconnect();
+
+    let thread_a = {
+        let queue = std::sync::Arc::clone(&queue);
+        let plan = plan_a.clone();
+        std::thread::spawn(move || queue.publish(plan))
+    };
+
+    // Warten, bis A wirklich mitten im LETZTEN eigenen Objekt hängt — der
+    // ausstehende Plan UND alle vorherigen Objekte von A sind zu diesem
+    // Zeitpunkt schon durch.
+    arrived.wait();
+    let observed_before_b = target.published_order();
+
+    // B versucht JETZT gleichzeitig zu publizieren. Ohne die Drain-Sperre
+    // liefe B's eigener Drain PARALLEL zu A's und würde dessen Adressen
+    // unterbrechen oder überholen.
+    let thread_b = {
+        let queue = std::sync::Arc::clone(&queue);
+        let plan = plan_b.clone();
+        std::thread::spawn(move || queue.publish(plan))
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(
+        target.published_order(),
+        observed_before_b,
+        "B darf WÄHREND A's Drain hängt noch KEIN einziges Objekt am Ziel abgelegt haben"
+    );
+
+    release.wait();
+
+    let state_a = thread_a
+        .join()
+        .expect("Thread A darf nicht paniken")
+        .expect("Publikation A muss gelingen");
+    let state_b = thread_b
+        .join()
+        .expect("Thread B darf nicht paniken")
+        .expect("Publikation B muss gelingen");
+
+    assert_eq!(state_a.outcome(), PublicationOutcomeV1::PublishedCompletely);
+    assert_eq!(state_b.outcome(), PublicationOutcomeV1::PublishedCompletely);
+
+    let mut expected_order = pending_plan.order();
+    expected_order.extend(plan_a.order());
+    expected_order.extend(plan_b.order());
+    assert_eq!(
+        target.published_order(),
+        expected_order,
+        "die GESAMTE Ankunftsreihenfolge am Ziel muss ausstehend, dann A, dann B sein — nie verschachtelt"
+    );
+}
+
+#[test]
+fn a_write_failure_from_an_otherwise_reachable_target_is_treated_as_lost_connectivity() {
+    let (_guard, _root) = support::temp_root("queue-io-write-failure");
+    let (queue, target) = support::queue_with_an_unwritable_but_connected_target();
+    let plan = support::two_grants_and_one_entry();
+
+    let state = queue
+        .publish(plan.clone())
+        .expect("ein präsenter, aber unbeschreibbarer Mount ist ein ZUSTAND und kein Fehler");
+    assert_eq!(state.outcome(), PublicationOutcomeV1::Deferred);
+    assert_eq!(
+        state.detail_cause(),
+        Some(DetailCause::NetworkArchiveWaiting)
+    );
+    assert!(
+        target.published_order().is_empty(),
+        "vor der Reparatur darf am Ziel NICHTS angekommen sein"
+    );
+
+    target.repair();
+    let resumed = queue.resume().unwrap();
+    assert_eq!(resumed.outcome(), PublicationOutcomeV1::PublishedCompletely);
+    assert_eq!(resumed.published_bytes(), plan.exact_bytes());
+    assert_eq!(resumed.published_order(), plan.order());
 }

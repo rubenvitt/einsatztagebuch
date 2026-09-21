@@ -381,11 +381,40 @@ impl PublicationStateV1 {
 }
 
 /// Die Warteschlange vor einem Publikationsziel.
+///
+/// # Sperrreihenfolge: ERST `drain_lock`, DANN `pending`
+///
+/// Zwei getrennte Sperren, weil sie zwei verschiedene Dinge schützen:
+/// `pending` ist nur der Platz selbst (kurz gehalten, auch für einen blinden
+/// `take`/`store`), `drain_lock` ist die Zusage „höchstens EIN Drain läuft
+/// gerade". `publish` und `resume` nehmen `drain_lock` deshalb ZUERST — vor
+/// jedem Blick auf `pending` — und halten sie über den GESAMTEN Aufruf,
+/// einschließlich eines etwaigen `drain`. Ohne das könnte ein gleichzeitiger
+/// `resume` mitten in einem laufenden Drain einen GERADE GELEERTEN Platz
+/// sehen und fälschlich [`PublicationOutcomeV1::NothingPending`] melden,
+/// während der genommene Plan noch veröffentlicht wird — und
+/// `ProfileMigrator::finish_pending` läse das als „nichts mehr offen" und
+/// öffnete das Wechselgatter, obwohl der Plan noch unterwegs ist. Ebenso
+/// könnte ein zweiter gleichzeitiger `publish` sonst PARALLEL zum ersten
+/// drainen: beide Ziel-I/Os liefen verschachtelt, und EA-CNA-PUB-7s
+/// „erst der ausstehende, dann neue Adressen" wäre nur noch eine Zusage über
+/// die REIHENFOLGE INNERHALB eines Plans, nicht mehr über die tatsächliche
+/// Ankunft am Ziel.
+///
+/// Eine Kehrseite, bewusst in Kauf genommen und nicht wegoptimiert: ein
+/// hängender Mount (ein `is_connected`- oder `publish_one`-Aufruf, der nie
+/// zurückkehrt) blockiert unter dieser Sperre JEDEN weiteren `publish`- und
+/// `resume`-Aufruf auf derselben Warteschlange, nicht nur den eigenen. Die
+/// Warteschlange erzwingt dafür keine Zeitschranke; das bleibt Aufgabe des
+/// Ziels (siehe `PublicationTargetV1`-Implementierungen) und des Aufrufers.
 pub struct PublicationQueue {
     target: Box<dyn PublicationTargetV1>,
     max_objects: u64,
     max_bytes: u64,
     pending: Mutex<Option<PlannedPublicationV1>>,
+    /// Serialisiert JEDEN Drain gegen jeden anderen `publish`/`resume`-Aufruf.
+    /// Siehe die Typdokumentation oben.
+    drain_lock: Mutex<()>,
 }
 
 impl PublicationQueue {
@@ -411,6 +440,7 @@ impl PublicationQueue {
             max_objects,
             max_bytes,
             pending: Mutex::new(None),
+            drain_lock: Mutex::new(()),
         })
     }
 
@@ -425,15 +455,9 @@ impl PublicationQueue {
     /// VEREINIGUNG geprüft; sprengt sie die Grenze, wird NUR die Vereinigung
     /// abgelehnt und der zuvor angenommene Plan bleibt bestehen.
     ///
-    /// Die Entscheidung — Vereinigung, Grenzprüfung und ob sofort
-    /// veröffentlicht oder aufgeschoben wird — läuft UNTER EINER EINZIGEN
-    /// Sperrhaltung. Ohne das könnten zwei gleichzeitige Aufrufe je einen
-    /// eigenen Plan „annehmen" und sich beim Ablegen gegenseitig
-    /// überschreiben: der zuletzt schreibende Aufruf gewänne, der andere Plan
-    /// wäre verloren, ohne dass irgendein Aufrufer einen Fehler sähe. Nur die
-    /// eigentliche Netz-I/O (`drain`) läuft OHNE diese Sperre — sie könnte
-    /// sonst über ihren eigenen erneuten Sperrversuch blockieren, siehe
-    /// [`Self::restore`].
+    /// `drain_lock` wird ZUERST genommen (siehe Typdokumentation) und für den
+    /// GESAMTEN Aufruf gehalten, einschließlich eines etwaigen `drain` — kein
+    /// gleichzeitiger `publish` oder `resume` kann währenddessen laufen.
     ///
     /// Ein ANGENOMMENER Plan geht nicht mehr verloren: sowohl die verlorene
     /// Erreichbarkeit als auch ein Hartfehler des Ziels lassen ihn
@@ -452,6 +476,11 @@ impl PublicationQueue {
         &self,
         planned: PlannedPublicationV1,
     ) -> Result<PublicationStateV1, ArchiveBackendError> {
+        // Sperrreihenfolge: `drain_lock` VOR `pending` — siehe Typdokumentation.
+        let _drain_guard = self
+            .drain_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut guard = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let existing = guard.take();
         let merged = match &existing {
@@ -489,8 +518,9 @@ impl PublicationQueue {
                 published_order: Vec::new(),
             });
         }
-        // Ab hier läuft Netz-I/O: die Sperre wird bewusst freigegeben, sonst
-        // hielte `drain` beim Aufschieben denselben Mutex ein zweites Mal.
+        // Ab hier läuft Netz-I/O: `pending` wird freigegeben (sie ist nur der
+        // Platz, nicht die Serialisierung — die trägt weiterhin
+        // `_drain_guard`, bis diese Funktion zurückkehrt).
         drop(guard);
         self.drain(merged)
     }
@@ -521,29 +551,51 @@ impl PublicationQueue {
         Ok(PlannedPublicationV1::new(merged))
     }
 
-    /// Legt einen aufgeschobenen oder hart fehlgeschlagenen Plan wieder ab —
-    /// NIEMALS blind überschreibend.
+    /// Legt den gerade gedrainten Plan zurück.
     ///
-    /// `drain` läuft ohne die `pending`-Sperre (siehe [`Self::publish`]):
-    /// während seiner Netz-I/O kann ein GLEICHZEITIGER `publish`-Aufruf
-    /// bereits einen ANDEREN Plan abgelegt haben. Eine blinde Zuweisung
-    /// würde den verlieren. Liegt dort schon etwas, wird deshalb VEREINIGT —
-    /// der eigene, länger wartende Plan zuerst, der gleichzeitig eingetroffene
-    /// danach.
+    /// # Warum der Platz hier IMMER leer sein muss
     ///
-    /// Ein Bytekonflikt zwischen beiden ist nur denkbar, wenn zwei Aufrufer
-    /// unabhängig dieselbe Adresse mit verschiedenen Bytes einreichen —
-    /// EA-CNA-PUB-7 hält höchstens EINEN Prozessplan, eine verlustfreie
-    /// Auflösung ist an dieser Stelle also gar nicht mehr möglich. Der eigene
-    /// Plan hat in diesem Fall Vorrang und bleibt vollständig erhalten; der
-    /// neu hinzugekommene wird verworfen.
-    fn restore(&self, plan: PlannedPublicationV1) {
+    /// `publish` und `resume` nehmen `drain_lock` VOR `pending` und halten
+    /// sie für den GESAMTEN Aufruf einschließlich `drain` (siehe
+    /// Typdokumentation von [`PublicationQueue`]). Der Aufrufer DIESER
+    /// Methode hält `drain_lock` deshalb durchgehend seit dem `take`, das den
+    /// hier übergebenen Plan aus `pending` herausgenommen hat — kein anderer
+    /// `publish`- oder `resume`-Aufruf kann in der Zwischenzeit an `pending`
+    /// herangekommen sein, ohne zuerst selbst an `drain_lock` zu hängen. Der
+    /// Platz MUSS an dieser Stelle also leer sein.
+    ///
+    /// Ein belegter Platz wäre deshalb kein normaler Ausgang mehr, sondern
+    /// ein Bruch genau dieser Sperrreihenfolge — ein Programmierfehler, nicht
+    /// ein Wettlauf, den die Anwendung im Normalbetrieb je sieht. Er wird
+    /// trotzdem NICHT blind überschrieben: bytegleiche Adressen werden
+    /// vereinigt, eine abweichende Adresse liefert den Bytekonflikt an den
+    /// Aufrufer zurück, statt eine Seite stillschweigend zu verwerfen — der
+    /// gedrainte Plan bleibt dabei in jedem Fall erhalten.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveBackendError::ByteConflict`], wenn der Platz ENTGEGEN der
+    /// Sperrreihenfolge doch belegt war und mit abweichenden Bytes.
+    fn restore(&self, plan: PlannedPublicationV1) -> Result<(), ArchiveBackendError> {
         let mut guard = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        let merged = match guard.take() {
-            None => plan,
-            Some(concurrent) => Self::merge(&plan, &concurrent).unwrap_or(plan),
-        };
-        *guard = Some(merged);
+        match guard.take() {
+            None => {
+                *guard = Some(plan);
+                Ok(())
+            }
+            Some(unexpected) => match Self::merge(&plan, &unexpected) {
+                Ok(merged) => {
+                    *guard = Some(merged);
+                    Ok(())
+                }
+                Err(error) => {
+                    // Der gedrainte Plan bleibt WENIGSTENS erhalten; der
+                    // Konflikt wird gemeldet statt verschluckt.
+                    *guard = Some(plan);
+                    Err(error)
+                }
+            },
+        }
     }
 
     /// Stellt die Verbindung wieder her und gibt die Warteschlange zurueck.
@@ -556,6 +608,13 @@ impl PublicationQueue {
     /// Setzt die aufgeschobene Publikation fort — BYTEIDENTISCH und in
     /// derselben Reihenfolge.
     ///
+    /// `drain_lock` wird ZUERST genommen (siehe Typdokumentation) und für den
+    /// GESAMTEN Aufruf gehalten: läuft gerade ein anderer Drain, WARTET
+    /// `resume`, statt einen mitten in der Veröffentlichung geleerten Platz
+    /// zu sehen und fälschlich [`PublicationOutcomeV1::NothingPending`] zu
+    /// melden — genau die Verwechslung, die `ProfileMigrator::finish_pending`
+    /// als „Gatter offen" läse, während der Plan noch unterwegs ist.
+    ///
     /// Ein Hartfehler des Ziels laesst den Plan aufgeschoben; ein weiterer
     /// `resume` nimmt ihn deshalb WIEDER auf.
     /// [`PublicationOutcomeV1::NothingPending`] heisst genau eines: es lag
@@ -567,6 +626,11 @@ impl PublicationQueue {
     ///
     /// Der Fehler des Ziels. Der Plan bleibt in diesem Fall aufgeschoben.
     pub fn resume(&self) -> Result<PublicationStateV1, ArchiveBackendError> {
+        // Sperrreihenfolge: `drain_lock` VOR `pending` — siehe Typdokumentation.
+        let _drain_guard = self
+            .drain_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let planned = self
             .pending
             .lock()
@@ -593,6 +657,10 @@ impl PublicationQueue {
     /// meldete [`PublicationOutcomeV1::NothingPending`] und ein Profilwechsel
     /// liefe durch, ohne dass die geplanten Objekte je beim Ziel angekommen
     /// sind.
+    ///
+    /// Nur `publish`/`resume` rufen diese Methode, und beide halten
+    /// `drain_lock` bereits durchgehend (siehe dort und die Typdokumentation
+    /// von [`PublicationQueue`]) — `drain` selbst nimmt keine Sperre.
     fn drain(
         &self,
         planned: PlannedPublicationV1,
@@ -606,7 +674,7 @@ impl PublicationQueue {
                 // dieselben — deshalb wird der GANZE Plan aufbewahrt und beim
                 // Wiederanlauf von vorn durchlaufen; Create-if-absent macht das
                 // idempotent.
-                self.restore(planned);
+                self.restore(planned)?;
                 return Ok(PublicationStateV1 {
                     outcome: PublicationOutcomeV1::Deferred,
                     detail_cause: Some(DetailCause::NetworkArchiveWaiting),
@@ -616,13 +684,31 @@ impl PublicationQueue {
                 });
             }
             if let Err(error) = self.target.publish_one(path, bytes) {
+                if indicates_lost_connectivity(&error) {
+                    // Erreichbar laut `is_connected`, aber der Schreib- oder
+                    // Lesevorgang selbst scheitert mit `Io`/`FlushFailed`
+                    // (EA-CNA-PUB-4, Fund B): ein vorhandener, aber
+                    // UNBENUTZBARER Mount (Mount-Stub, ein Share, der erst
+                    // beim Schreiben scheitert) macht sich oft erst HIER
+                    // bemerkbar, nicht schon an `is_connected`. Das ist
+                    // dieselbe VERLORENE Erreichbarkeit wie oben und kein
+                    // Hartfehler.
+                    self.restore(planned)?;
+                    return Ok(PublicationStateV1 {
+                        outcome: PublicationOutcomeV1::Deferred,
+                        detail_cause: Some(DetailCause::NetworkArchiveWaiting),
+                        fell_back: false,
+                        published_bytes,
+                        published_order,
+                    });
+                }
                 // HARTFEHLER, keine verlorene Erreichbarkeit: das Ziel ist
                 // erreichbar und lehnt ab. Der GANZE Plan bleibt aufgeschoben
                 // — dieselbe Aufbewahrung wie oben und aus demselben Grund,
                 // denn ein Wiederanlauf ist ueber Create-if-absent idempotent.
                 // Der Fehler des Ziels wird trotzdem gemeldet: aufbewahrt ist
                 // nicht behoben.
-                self.restore(planned);
+                self.restore(planned)?;
                 return Err(error);
             }
             published_bytes.push(bytes.clone());
@@ -636,4 +722,18 @@ impl PublicationQueue {
             published_order,
         })
     }
+}
+
+/// Ob ein Zielfehler auf eine VERLORENE Verbindung hindeutet statt auf einen
+/// reinen Datenbefund (EA-CNA-PUB-4, Fund B der Review).
+///
+/// `ByteConflict` (das Ziel ist erreichbar und lehnt eine ANDERE Bytefolge an
+/// derselben Adresse ab), `Format` (kein gültiges Archivobjekt) und
+/// `ProfileNotAllowed` bleiben AUSSERHALB — sie sind Datenbefunde, keine
+/// Verbindungsstörung.
+pub(crate) fn indicates_lost_connectivity(error: &ArchiveBackendError) -> bool {
+    matches!(
+        error,
+        ArchiveBackendError::Io | ArchiveBackendError::FlushFailed
+    )
 }

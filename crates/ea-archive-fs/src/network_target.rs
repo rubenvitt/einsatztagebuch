@@ -20,7 +20,9 @@ use ea_archive::{
     BoundArchiveProfilePolicyV1,
 };
 
-use crate::{LocalPathBackend, PublicationTargetV1};
+use crate::{
+    LocalPathBackend, PublicationTargetV1, publication_queue::indicates_lost_connectivity,
+};
 
 /// Das Netzarchiv als Publikationsziel.
 ///
@@ -66,20 +68,6 @@ impl NetworkArchiveTargetV1 {
             self.network_root.clone(),
             self.profile.clone(),
             &self.policy,
-        )
-    }
-
-    /// Ob ein Fehler von [`Self::publish_via_backend`] auf eine VERLORENE
-    /// Verbindung hindeutet, statt auf einen reinen Datenbefund.
-    ///
-    /// `ByteConflict` bleibt hier bewusst draußen: das Ziel ist erreichbar und
-    /// lehnt eine ANDERE Bytefolge an derselben Adresse ab — der gehaltene
-    /// Griff ist deshalb weiterhin gültig, ein Verwerfen wäre nur teurer
-    /// Leerlauf beim nächsten Aufruf.
-    fn indicates_lost_connectivity(error: &ArchiveBackendError) -> bool {
-        matches!(
-            error,
-            ArchiveBackendError::Io | ArchiveBackendError::FlushFailed
         )
     }
 
@@ -150,12 +138,15 @@ impl PublicationTargetV1 for NetworkArchiveTargetV1 {
 
         let result = Self::publish_via_backend(backend, relative, bytes);
         if let Err(error) = &result
-            && Self::indicates_lost_connectivity(error)
+            && indicates_lost_connectivity(error)
         {
             // Verbindung mitten in der Operation verloren: der Cache darf
             // kein totes Handle überleben lassen — sonst hielte der nächste
             // Aufruf einen Griff auf ein Verzeichnis, das nicht mehr
-            // erreichbar ist.
+            // erreichbar ist. Dieselbe Klassifikation wie in
+            // `PublicationQueue::drain` (Fund B, Task-6-Review): `ByteConflict`
+            // bleibt draußen, das Ziel ist dabei weiterhin erreichbar und
+            // lehnt nur eine ANDERE Bytefolge an derselben Adresse ab.
             *held = None;
         }
         result
