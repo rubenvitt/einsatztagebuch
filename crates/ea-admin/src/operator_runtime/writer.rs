@@ -70,6 +70,7 @@ impl InteractiveOperatorRuntime {
             acquisition::AcquisitionTime::Explicit(now),
             native,
             posture,
+            None,
         )
     }
     fn acquire_using(
@@ -78,10 +79,11 @@ impl InteractiveOperatorRuntime {
         time: acquisition::AcquisitionTime,
         native: Arc<NativeOperatorProvider>,
         posture: Arc<dyn DevicePostureProvider>,
+        baseline: Option<Arc<FsArchiveSource>>,
     ) -> Result<Self, OperatorRuntimeError> {
         let path = config.database_path.clone();
         acquisition::acquire(&path, time, |now| {
-            Self::open_without_acquisition(config, anchor, now, native, posture)
+            Self::open_without_acquisition(config, anchor, now, native, posture, baseline)
         })
     }
     fn open_without_acquisition(
@@ -90,6 +92,7 @@ impl InteractiveOperatorRuntime {
         now: UnixMillis,
         native: Arc<NativeOperatorProvider>,
         posture: Arc<dyn DevicePostureProvider>,
+        baseline: Option<Arc<FsArchiveSource>>,
     ) -> Result<Self, OperatorRuntimeError> {
         match OperatorRuntime::open_without_acquisition(
             config.clone(),
@@ -98,6 +101,7 @@ impl InteractiveOperatorRuntime {
             false,
             |_| Ok(native.clone()),
             posture.clone(),
+            baseline.clone(),
         ) {
             Ok(current) => Ok(Self::Current(current)),
             Err(
@@ -107,7 +111,7 @@ impl InteractiveOperatorRuntime {
                 && config.purpose.is_writer_purpose()
                 && !config.authority =>
             {
-                StaleWriterRuntime::open_using(config, anchor, now, native, posture)
+                StaleWriterRuntime::open_using(config, anchor, now, native, posture, baseline)
                     .map(Self::StaleWriter)
             }
             Err(error) => Err(error),
@@ -162,6 +166,12 @@ impl InteractiveOperatorRuntime {
             Self::StaleWriter(r) => r.resources.snapshot.next_sequence(),
         }
     }
+    pub fn archive_snapshot(&self) -> &OperatorArchiveSnapshot {
+        match self {
+            Self::Current(r) => r.archive_snapshot(),
+            Self::StaleWriter(r) => &r.resources.snapshot,
+        }
+    }
     pub fn ensure_current(&self) -> Result<(), OperatorRuntimeError> {
         match self {
             Self::Current(r) => r.ensure_current(),
@@ -180,6 +190,8 @@ impl InteractiveOperatorRuntime {
             acquisition::AcquisitionTime::FreshWallClock,
             self.native().clone(),
             posture.clone(),
+            // EA-CNA-SRC-4: nur die Wiederöffnung erbt die Grundlinie.
+            self.archive_snapshot().remote_baseline().cloned(),
         )
     }
     pub fn refresh_for_action(&mut self) -> Result<(), OperatorRuntimeError> {
@@ -246,6 +258,7 @@ impl StaleWriterRuntime {
         now: UnixMillis,
         native: Arc<NativeOperatorProvider>,
         posture: Arc<dyn DevicePostureProvider>,
+        baseline: Option<Arc<FsArchiveSource>>,
     ) -> Result<Self, OperatorRuntimeError> {
         if config.role != OperatorRoleV1::Writer
             || !config.purpose.is_writer_purpose()
@@ -253,7 +266,15 @@ impl StaleWriterRuntime {
         {
             return Err(OperatorRuntimeError::Config);
         }
-        let mut resources = open_resources(config, anchor, now, false, |_| Ok(native), posture)?;
+        let mut resources = open_resources(
+            config,
+            anchor,
+            now,
+            false,
+            |_| Ok(native),
+            posture,
+            baseline,
+        )?;
         let key = TrustStateKey {
             organization_id: resources.snapshot.anchor().organization_id(),
             device_id: resources.device_id,
@@ -329,6 +350,7 @@ impl StaleWriterRuntime {
             acquisition::AcquisitionTime::FreshWallClock,
             r.native.clone(),
             r.posture.clone(),
+            None,
         )?;
         fresh.ensure_current()?;
         let expected = self.head.as_writer();

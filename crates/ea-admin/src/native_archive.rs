@@ -317,6 +317,66 @@ fn anchor_registered(
         .is_some())
 }
 
+/// Die Registrierung eines Ankers, wie der Start sie braucht (EA-CNA-SRC-1/2):
+/// Namensraum und die beiden gepinnten Grenzen der lokalen Komponente.
+///
+/// Das Profil selbst wird nicht dekodiert. Der Start prüft bewusst keine
+/// Policy (EA-CNA-SRC-2); was er braucht, bindet die Zeile über
+/// `profile_hash = archive_profile_digest(exact_profile)` und den daraus
+/// abgeleiteten Namensraum.
+pub(crate) struct RegisteredNetworkComponent {
+    pub(crate) namespace: Hash32,
+    pub(crate) object_limit: u64,
+    pub(crate) byte_limit: u64,
+}
+
+/// Liest die Registrierung für `anchor` in einer Transaktion, ohne zu
+/// schreiben. Ohne Migration 26 gibt es keine Registrierung.
+///
+/// # Errors
+///
+/// `Store` für Datenbankfehler; `Archive`, wenn Profilhash, Namensraum oder
+/// Scope-Zeile nicht zueinander passen.
+pub(crate) fn registered_component(
+    database: &Arc<EncryptedDatabase>,
+    anchor: Hash32,
+) -> Result<Option<RegisteredNetworkComponent>, OperatorRuntimeError> {
+    if !database.has_migration(26)? {
+        return Ok(None);
+    }
+    database.transaction::<_, OperatorRuntimeError>(|tx| {
+        let Some(row) = tx.query_row(
+            "SELECT profile_hash,namespace,exact_profile FROM native_archive_component WHERE anchor_hash=?1",
+            &[StoreValue::Blob(anchor.as_bytes().to_vec())],
+        )?
+        else {
+            return Ok(None);
+        };
+        let profile_hash = ea_crypto::archive_profile_digest(row.blob(2)?);
+        let namespace = ea_crypto::native_archive_component_namespace(anchor, profile_hash);
+        if row.blob(0)? != profile_hash.as_bytes() || row.blob(1)? != namespace.as_bytes() {
+            return Err(OperatorRuntimeError::Archive);
+        }
+        let scope = tx
+            .query_row(
+                "SELECT object_limit,byte_limit FROM local_commit_scope WHERE namespace=?1",
+                &[StoreValue::Blob(namespace.as_bytes().to_vec())],
+            )?
+            .ok_or(OperatorRuntimeError::Archive)?;
+        let limit = |value: i64| {
+            u64::try_from(value)
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or(OperatorRuntimeError::Archive)
+        };
+        Ok(Some(RegisteredNetworkComponent {
+            namespace,
+            object_limit: limit(scope.integer(0)?)?,
+            byte_limit: limit(scope.integer(1)?)?,
+        }))
+    })
+}
+
 /// An existing local storage handle, never an active-profile pointer, complete
 /// archive source, signature authority or permission to publish to a target.
 /// The measured network carrier remains private: reconnect requires a separate

@@ -146,7 +146,7 @@ impl ClockRepairRuntime {
             |now| {
                 Ok((|| -> Result<Self, ClockRepairRuntimeError> {
                     let mut resources =
-                        open_resources(config, anchor, now, false, open_native, posture)?;
+                        open_resources(config, anchor, now, false, open_native, posture, None)?;
                     let authority = prepare_authority(
                         &resources.snapshot,
                         &mut resources.store,
