@@ -516,7 +516,9 @@ impl AdministrationPort for NativeDesktopRuntime {
             let result=if let Some(path)=&resources.key_inventory {
                 let inventory=ea_recovery::KeyInventory::parse(&read_public(path,1024*1024)?)
                     .map_err(|error| CommandError::new(error.code()))?;
-                let mut service=ea_admin::recovery_test_runtime::RecoveryTestRuntime::new(fresh,resources.profile.clone())
+                let archive_config=ea_admin::native_archive::NativeArchiveConfig::for_runtime_database(
+                    resources.profile.clone(),&fresh.config().database_path);
+                let mut service=ea_admin::recovery_test_runtime::RecoveryTestRuntime::with_archive_config(fresh,archive_config)
                     .map_err(|error| CommandError::new(error.code()))?;
                 service.evaluate_current_go_live(Some(&inventory), |runtime, proof| {
                     capture_projection(&mut projection_error, runtime, proof)

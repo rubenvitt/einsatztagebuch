@@ -26,6 +26,20 @@ pub struct NativeArchiveConfig {
     pub profile: ArchiveBackendProfileV1,
     pub local_commit_database_path: Option<PathBuf>,
 }
+impl NativeArchiveConfig {
+    /// Die Aufruferform: ein Netzprofil bindet die lokale Komponente in der
+    /// eigenen Datenbank der Laufzeit, LocalPath trägt keinen Datenbankpfad.
+    #[must_use]
+    pub fn for_runtime_database(profile: ArchiveBackendProfileV1, database_path: &Path) -> Self {
+        let local_commit_database_path =
+            matches!(profile, ArchiveBackendProfileV1::ControlledNetworkPath(_))
+                .then(|| database_path.to_owned());
+        Self {
+            profile,
+            local_commit_database_path,
+        }
+    }
+}
 
 /// Errors retain the authority/backend boundary without disclosing host paths.
 #[derive(Debug)]

@@ -10,7 +10,7 @@ use ea_archive::ArchivePath;
 
 /// Die Kettenadressen des Epochenschritts, den `historical=true` als höchste
 /// Sequenz ins Netzziel legt.
-const MOVED: [(&str, &str); 2] = [
+pub(super) const MOVED: [(&str, &str); 2] = [
     ("grants/", "000000000001_epoch.eag"),
     ("entries/", "000000000001_epoch.eip"),
 ];
@@ -47,7 +47,7 @@ fn code<T>(result: Result<T, OperatorRuntimeError>) -> &'static str {
 /// Grant aus dem Netzziel in die lokale Komponente: Grants zuerst, `.eip`
 /// zuletzt, jeweils dauerhaft, bevor die Netzkopie verschwindet. Das Netzziel
 /// behält den Eintrag der Sequenz 0.
-fn register_and_move_head(installed: &RecoveryInstallation) -> ChainSequence {
+pub(super) fn register_and_move_head(installed: &RecoveryInstallation) -> ChainSequence {
     let runtime = installed.open();
     let with_both_in_remote = runtime.next_sequence();
     let (_, component) =

@@ -93,12 +93,34 @@ pub(crate) fn run_with_runtime_opener(
 ) -> ExitCode {
     use ea_admin::{
         operator_runtime::OperatorRuntimeConfig,
-        recovery_test_runtime::{RecoveryTestRuntime, parse_recovery_archive_profile},
+        recovery_test_runtime::{
+            RecoveryTestRuntime, is_network_archive_profile, parse_recovery_archive_profile,
+        },
     };
     let result = (|| -> Result<(), CommandFailure> {
         let anchor = load_trust_anchor(&invocation.anchor)?;
-        let source = ea_recovery::FsArchiveSource::open(archive)?;
-        ea_recovery::RecoveryArchiveProbe::verify(&source, &anchor, now).map_err(test_failure)?;
+        // Ein Netzprofil hat ohne den Export keine vollständige Quelle: die
+        // Vorprüfung liest nie das Netzziel allein. Seine Sonde prüft die
+        // Capture über dieselbe Vereinigung aus Netzziel und Export, bevor sie
+        // etwas bindet (EA-CNA-REC-3). Ein unlesbares Profil nimmt den
+        // bisherigen Weg und scheitert unten wie bisher.
+        let network = read(&runtime.profile, 65536)
+            .ok()
+            .and_then(|exact| parse_recovery_archive_profile(&exact).ok())
+            .is_some_and(|profile| is_network_archive_profile(&profile));
+        // Netzprofil nur mit Export, LocalPath nie mit Export.
+        if let crate::args::recovery::RecoveryRuntimeAction::Capture {
+            component_export, ..
+        } = &runtime.action
+            && network != component_export.is_some()
+        {
+            return Err(test_failure(ea_recovery::RecoveryTestError::Source));
+        }
+        if !network {
+            let source = ea_recovery::FsArchiveSource::open(archive)?;
+            ea_recovery::RecoveryArchiveProbe::verify(&source, &anchor, now)
+                .map_err(test_failure)?;
+        }
         ea_recovery::output_file_is_free(output)?;
         let inventory = ea_recovery::KeyInventory::parse(&read(key_inventory, 1024 * 1024)?)
             .map_err(|_| test_failure(ea_recovery::RecoveryTestError::Inventory))?;
@@ -108,15 +130,27 @@ pub(crate) fn run_with_runtime_opener(
             return Err(test_failure(ea_recovery::RecoveryTestError::Source));
         }
         let profile = parse_recovery_archive_profile(&read(&runtime.profile, 65536)?)?;
-        let mut service =
-            RecoveryTestRuntime::new(open(config, &invocation.anchor, now)?, profile)?;
+        let archive_config = ea_admin::native_archive::NativeArchiveConfig::for_runtime_database(
+            profile,
+            &config.database_path,
+        );
+        let mut service = RecoveryTestRuntime::with_archive_config(
+            open(config, &invocation.anchor, now)?,
+            archive_config,
+        )?;
         match &runtime.action {
             crate::args::recovery::RecoveryRuntimeAction::Capture {
                 snapshot,
                 passphrase,
+                component_export,
             } => {
                 let phrase = ea_recovery::read_secret_file(passphrase)?;
-                let captured = service.capture_inventory(&inventory, snapshot, &phrase)?;
+                let captured = match component_export {
+                    Some(export) => service.capture_inventory_with_component_export(
+                        &inventory, snapshot, &phrase, export,
+                    )?,
+                    None => service.capture_inventory(&inventory, snapshot, &phrase)?,
+                };
                 write_new(output, captured.exact_envelope())?;
             }
             crate::args::recovery::RecoveryRuntimeAction::Import { source, report } => {
