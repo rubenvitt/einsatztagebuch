@@ -6,12 +6,17 @@ use crate::{
     state::{BoundWriter, StartupRecoveryPort, WriterFinalizePort, WriterPreviewPort},
 };
 use ea_admin::{
-    amendment::AmendmentDraftService, native_provider::NativeSigningSlot,
+    amendment::AmendmentDraftService,
+    native_archive::{NativeArchiveConfig, NativeArchiveExistingComponent, NativeArchiveOpenError},
+    native_provider::NativeSigningSlot,
     operator_runtime::writer::InteractiveOperatorRuntime as OperatorRuntime,
 };
-use ea_archive::{ArchiveBackendProfileV1, BoundArchiveProfilePolicyV1};
+use ea_archive::{
+    ArchiveBackend, ArchiveBackendError, ArchiveBackendProfileV1, ArchiveSource,
+    BoundArchiveProfilePolicyV1,
+};
 use ea_archive_fs::{CapabilityTestVectorV1, LocalPathBackend};
-use ea_destruction::SqliteManagedCustody;
+use ea_destruction::{ObservedArchiveHoldingV1, SqliteManagedCustody};
 use ea_draft::{IncidentNumberRegister, MasterDataRepository, OperatorProfileRepository};
 use ea_key_provider::SecretPurpose;
 use ea_operator::{OperatorSessionProof, ReauthPurpose};
@@ -25,8 +30,31 @@ use ea_writer::{
 };
 use std::path::Path;
 
+/// Die Ablage, in die der Writer committet: LocalPath wie bisher, für ein
+/// Netzprofil ausschließlich die lokale SQLCipher-Komponente (EA-CNA-WRT-1).
+/// Beide Varianten liegen auf dem Heap: sie sind groß und ungleich groß,
+/// und die Umleitung entsteht einmal je Writer-Start.
+enum WriterArchive {
+    Local(Box<LocalPathBackend>),
+    Network(Box<NativeArchiveExistingComponent>),
+}
+impl WriterArchive {
+    fn holding(&self) -> &dyn ObservedArchiveHoldingV1 {
+        match self {
+            Self::Local(backend) => backend.as_ref(),
+            Self::Network(component) => component.as_ref(),
+        }
+    }
+    fn backend(&self) -> &dyn ArchiveBackend {
+        match self {
+            Self::Local(backend) => backend.as_ref(),
+            Self::Network(component) => component.local_backend(),
+        }
+    }
+}
+
 pub(super) struct WriterResources {
-    backend: LocalPathBackend,
+    archive: WriterArchive,
     timezone: String,
     profile_hash: ea_types::Hash32,
 }
@@ -40,38 +68,68 @@ impl WriterResources {
         let profile_hash = profile
             .profile_hash()
             .map_err(|error| CommandError::new(error.code()))?;
-        let vector_id = match &profile {
-            ArchiveBackendProfileV1::LocalPath(profile) => {
-                profile.capability_test_vector_id.clone()
+        let policy = BoundArchiveProfilePolicyV1::from_policy(runtime.head().policy_fields());
+        let archive = match &profile {
+            ArchiveBackendProfileV1::LocalPath(local) => {
+                let vector_id = local.capability_test_vector_id.clone();
+                let backend = LocalPathBackend::open(
+                    runtime.config().archive_directory.clone(),
+                    profile,
+                    &policy,
+                )
+                .map_err(|error| CommandError::new(error.code()))?;
+                let vector =
+                    CapabilityTestVectorV1::new(&vector_id, b"EINSATZARCHIV-NATIVE-CAPABILITY-v1")
+                        .map_err(|error| CommandError::new(error.code()))?;
+                if !backend
+                    .run_capability_test(&vector)
+                    .map_err(|error| CommandError::new(error.code()))?
+                    .all_proven()
+                {
+                    return Err(CommandError::new("EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS"));
+                }
+                WriterArchive::Local(Box::new(backend))
             }
             ArchiveBackendProfileV1::ControlledNetworkPath(_) => {
-                return Err(CommandError::new("EA-DESKTOP-NETWORK-COMMIT-UNAVAILABLE"));
+                // Registrierung, Profilzeile, Policy und die eigene Datenbank
+                // prüft die Komponente selbst (EA-CNA-WRT-2).
+                let component = NativeArchiveExistingComponent::open_writer(
+                    runtime,
+                    NativeArchiveConfig {
+                        profile,
+                        local_commit_database_path: config.local_commit_database_path,
+                    },
+                )
+                .map_err(|error| CommandError::new(error.code()))?;
+                if component.profile_hash() != profile_hash {
+                    return Err(CommandError::new(
+                        NativeArchiveOpenError::ProfileMismatch.code(),
+                    ));
+                }
+                // EA-CNA-WRT-3/4: SQLCipher- und Netzziel-Capability vor dem
+                // ersten Writer-Dienst. Ein fremd gehaltener Writer-Lock oder
+                // ein nicht belegter Flush ist eine fehlende Eigenschaft.
+                component
+                    .require_capabilities(&runtime.config().archive_directory, &policy)
+                    .map_err(|error| match error {
+                        NativeArchiveOpenError::Capability
+                        | NativeArchiveOpenError::Backend(
+                            ArchiveBackendError::AlreadyLocked | ArchiveBackendError::FlushFailed,
+                        ) => CommandError::new("EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS"),
+                        other => CommandError::new(other.code()),
+                    })?;
+                WriterArchive::Network(Box::new(component))
             }
         };
-        let backend = LocalPathBackend::open(
-            runtime.config().archive_directory.clone(),
-            profile,
-            &BoundArchiveProfilePolicyV1::from_policy(runtime.head().policy_fields()),
-        )
-        .map_err(|error| CommandError::new(error.code()))?;
-        let vector = CapabilityTestVectorV1::new(&vector_id, b"EINSATZARCHIV-NATIVE-CAPABILITY-v1")
-            .map_err(|error| CommandError::new(error.code()))?;
-        if !backend
-            .run_capability_test(&vector)
-            .map_err(|error| CommandError::new(error.code()))?
-            .all_proven()
-        {
-            return Err(CommandError::new("EA-ARCHIVE-HEALTH-FILESYSTEM-SEMANTICS"));
-        }
         SqliteManagedCustody::new(runtime.database().clone())
             .observe_writer_archive(
                 runtime.head(),
                 runtime.config().device_certificate_hash,
-                &backend,
+                archive.holding(),
             )
             .map_err(|error| CommandError::new(error.code()))?;
         Ok(Self {
-            backend,
+            archive,
             timezone: config.timezone,
             profile_hash,
         })
@@ -156,7 +214,7 @@ impl NativeDesktopRuntime {
             .observe_writer_archive(
                 runtime.head(),
                 runtime.config().device_certificate_hash,
-                &resources.backend,
+                resources.archive.holding(),
             )
             .map_err(|error| CommandError::new(error.code()))?;
         let public = runtime
@@ -164,12 +222,28 @@ impl NativeDesktopRuntime {
             .public_key(NativeSigningSlot::Writer)
             .map_err(|error| CommandError::new(error.code()))?
             .ok_or_else(|| CommandError::new(WriterError::ReauthRequired.code()))?;
-        let source = resources.backend.as_archive_source();
+        // LocalPath liest wie bisher die eigene Wurzel; ein Netzprofil die
+        // Vereinigung aus der Netzsicht der aktuellen Aktion und der live
+        // gelesenen lokalen Komponente (EA-CNA-WRT-5).
+        let local_source;
+        let network_source;
+        let source: &dyn ArchiveSource = match &resources.archive {
+            WriterArchive::Local(backend) => {
+                local_source = backend.as_archive_source();
+                &local_source
+            }
+            WriterArchive::Network(component) => {
+                network_source = component
+                    .writer_source(runtime.archive_snapshot())
+                    .map_err(|error| CommandError::new(error.code()))?;
+                &network_source
+            }
+        };
         let service = WriterService::new_for_writer(
             repository(&inner),
             runtime.signing_provider().clone(),
-            &resources.backend,
-            &source,
+            resources.archive.backend(),
+            source,
             runtime.head(),
             &[],
             IncidentNumberRegister::new(runtime.database().clone()),

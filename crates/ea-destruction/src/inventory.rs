@@ -1,15 +1,96 @@
 //! Monotone operational custody; it never confers signing authority.
 use crate::{DestructionError as Error, ResumedDestruction};
-use ea_archive::{ArchiveBackend as _, ArchiveInventory};
+use ea_archive::{
+    ArchiveBackend as _, ArchiveBackendError, ArchiveBlob, ArchiveError, ArchiveInventory,
+    ArchiveSource, WriterLock,
+};
 use ea_crypto::object_hash;
 use ea_format::{CertificateKindV1, ObjectTypeV1, ParsedArchiveObject};
 use ea_local_store::{EncryptedDatabase, StoreTransaction, StoreValue};
 use ea_trust::SelectedRegistryHead;
 use ea_types::{CertificateHash, DeviceId, EntryHash, Hash32, ObjectHash, OrganizationId};
 use minicbor::{Decoder, Encoder};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 const MAX_RECORDS: usize = 10_000;
+
+/// Ein physischer Bestand, den die Verwahrung beobachtet (EA-CNA-WRT-7).
+///
+/// Nur Lesen und die exklusive Writer-Sperre; der Trait verleiht weder
+/// Schreib- noch Vernichtungsrecht. `canonical_location` geht unverändert in
+/// die Domäne `EINSATZARCHIV-MANAGED-ARCHIVE-LOCATION-v1` ein.
+pub trait ObservedArchiveHoldingV1 {
+    fn profile_hash(&self) -> Result<Hash32, ArchiveBackendError>;
+    fn acquire_writer_lock(&self) -> Result<WriterLock, ArchiveBackendError>;
+    /// Der kanonische Ort: Wurzelverzeichnis bzw. Datenbankdatei.
+    fn canonical_location(&self) -> Result<PathBuf, ArchiveBackendError>;
+    /// Die committete Sicht ohne Staging.
+    fn visit_committed(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError>;
+    /// Nur die Staging-Objekte. Sie sind kein Kettenfortschritt, aber
+    /// verwaltete physische Daten und gehören deshalb in den Bestand.
+    fn visit_staged(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError>;
+}
+
+impl ObservedArchiveHoldingV1 for ea_archive_fs::LocalPathBackend {
+    fn profile_hash(&self) -> Result<Hash32, ArchiveBackendError> {
+        ea_archive_fs::LocalPathBackend::profile_hash(self)
+    }
+    fn acquire_writer_lock(&self) -> Result<WriterLock, ArchiveBackendError> {
+        ea_archive::ArchiveBackend::acquire_writer_lock(self)
+    }
+    fn canonical_location(&self) -> Result<PathBuf, ArchiveBackendError> {
+        std::fs::canonicalize(self.root()).map_err(|_| ArchiveBackendError::Io)
+    }
+    fn visit_committed(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError> {
+        self.as_archive_source().visit_blobs(visitor)
+    }
+    fn visit_staged(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError> {
+        let staged = self.staged_paths().map_err(|_| ArchiveError::Unavailable)?;
+        if staged.len() > ea_archive::MAX_ARCHIVE_BLOBS_V1 {
+            return Err(ArchiveError::BlobLimit);
+        }
+        let mut staged_size = 0u64;
+        for path in staged {
+            let absolute = self.root().join(&path);
+            staged_size = staged_size
+                .checked_add(
+                    std::fs::metadata(&absolute)
+                        .map_err(|_| ArchiveError::Unavailable)?
+                        .len(),
+                )
+                .ok_or(ArchiveError::TotalByteLimit)?;
+            if staged_size > ea_archive::MAX_TOTAL_ARCHIVE_BYTES_V1 as u64 {
+                return Err(ArchiveError::TotalByteLimit);
+            }
+            let bytes = std::fs::read(absolute).map_err(|_| ArchiveError::Unavailable)?;
+            visitor(ArchiveBlob::new(&path, &bytes))?;
+        }
+        Ok(())
+    }
+}
+
+/// Die committete Sicht eines beobachteten Bestands als `ArchiveSource`.
+struct Committed<'a>(&'a dyn ObservedArchiveHoldingV1);
+impl ArchiveSource for Committed<'_> {
+    fn visit_blobs(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError> {
+        self.0.visit_committed(visitor)
+    }
+}
 pub struct SqliteManagedCustody {
     database: Arc<EncryptedDatabase>,
 }
@@ -63,7 +144,7 @@ impl SqliteManagedCustody {
         &self,
         head: ea_trust::WriterRegistryHeadRef<'_>,
         certificate: CertificateHash,
-        backend: &ea_archive_fs::LocalPathBackend,
+        archive: &dyn ObservedArchiveHoldingV1,
     ) -> Result<ManagedArchiveRegistration, Error> {
         if head.current_writer_certificate_hash() != Some(certificate)
             || head
@@ -72,7 +153,7 @@ impl SqliteManagedCustody {
         {
             return Err(Error::Registry);
         }
-        self.observe_archive(head, certificate, backend)
+        self.observe_archive(head, certificate, archive)
     }
     /// Called at actual host profile opening and immediately before publication.
     /// Records physical holdings and a durable location obligation, not authority.
@@ -82,13 +163,17 @@ impl SqliteManagedCustody {
         certificate: CertificateHash,
         backend: &ea_archive_fs::LocalPathBackend,
     ) -> Result<ManagedArchiveRegistration, Error> {
-        self.observe_archive(head.into(), certificate, backend)
+        self.observe_archive(
+            head.into(),
+            certificate,
+            backend as &dyn ObservedArchiveHoldingV1,
+        )
     }
     fn observe_archive(
         &self,
         head: ea_trust::WriterRegistryHeadRef<'_>,
         certificate: CertificateHash,
-        backend: &ea_archive_fs::LocalPathBackend,
+        backend: &dyn ObservedArchiveHoldingV1,
     ) -> Result<ManagedArchiveRegistration, Error> {
         let (_, fields) = head
             .known_certificate_fields()
@@ -106,13 +191,12 @@ impl SqliteManagedCustody {
             return Err(Error::Registry);
         }
         let _lock = backend.acquire_writer_lock().map_err(|_| Error::Storage)?;
-        let root = std::fs::canonicalize(backend.root()).map_err(|_| Error::Storage)?;
+        let root = backend.canonical_location().map_err(|_| Error::Storage)?;
         let root = root.to_str().ok_or(Error::Storage)?;
         let mut location_preimage = b"EINSATZARCHIV-MANAGED-ARCHIVE-LOCATION-v1\0".to_vec();
         location_preimage.extend_from_slice(root.as_bytes());
         let location = object_hash(&location_preimage);
-        let archive =
-            ArchiveInventory::build(&backend.as_archive_source()).map_err(|_| Error::Storage)?;
+        let archive = ArchiveInventory::build(&Committed(backend)).map_err(|_| Error::Storage)?;
         if !archive.format_errors().is_empty() {
             return Err(Error::Storage);
         }
@@ -133,42 +217,35 @@ impl SqliteManagedCustody {
         }
         // Staging is intentionally excluded from the public archive source,
         // but remains managed physical data and must enter this obligation.
-        let staged = backend.staged_paths().map_err(|_| Error::Storage)?;
-        if staged.len() > ea_archive::MAX_ARCHIVE_BLOBS_V1 {
-            return Err(Error::Storage);
-        }
-        let mut staged_size = 0u64;
-        for path in staged {
-            let absolute = backend.root().join(path);
-            staged_size = staged_size
-                .checked_add(
-                    std::fs::metadata(&absolute)
-                        .map_err(|_| Error::Storage)?
-                        .len(),
-                )
-                .ok_or(Error::Storage)?;
-            if staged_size > ea_archive::MAX_TOTAL_ARCHIVE_BYTES_V1 as u64 {
-                return Err(Error::Storage);
-            }
-            let bytes = std::fs::read(absolute).map_err(|_| Error::Storage)?;
-            match ea_format::decode_exact_object(&bytes)? {
-                ParsedArchiveObject::Entry(entry) => {
+        let mut decode_error = None;
+        let visited = backend.visit_staged(&mut |blob| {
+            match ea_format::decode_exact_object(blob.bytes()) {
+                Ok(ParsedArchiveObject::Entry(entry)) => {
                     holdings.insert((
                         entry.object_hash(),
                         entry.value().entry_hash(),
                         ObjectTypeV1::Entry.code() as u8,
                     ));
                 }
-                ParsedArchiveObject::Grant(grant) => {
+                Ok(ParsedArchiveObject::Grant(grant)) => {
                     holdings.insert((
                         grant.object_hash(),
                         grant.value().grant_body().fields().entry_hash,
                         ObjectTypeV1::Grant.code() as u8,
                     ));
                 }
-                _ => {}
+                Ok(_) => {}
+                Err(error) => {
+                    decode_error = Some(Error::from(error));
+                    return Err(ArchiveError::Unavailable);
+                }
             }
+            Ok(())
+        });
+        if let Some(error) = decode_error {
+            return Err(error);
         }
+        visited.map_err(|_| Error::Storage)?;
         let prefix = |e: &mut Encoder<&mut Vec<u8>>, code, arity| -> Result<(), Error> {
             e.array(arity)
                 .map_err(|_| Error::Format)?

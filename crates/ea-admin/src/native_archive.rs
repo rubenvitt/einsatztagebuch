@@ -1,20 +1,24 @@
 //! Native local storage admission. Paths are not authority or evidence.
 use crate::operator_runtime::{
-    OperatorRuntime, OperatorRuntimeError, writer::InteractiveOperatorRuntime,
+    OperatorArchiveSnapshot, OperatorRuntime, OperatorRuntimeError,
+    writer::InteractiveOperatorRuntime,
 };
 use ea_archive::{
-    ArchiveBackend, ArchiveBackendError, ArchiveBackendProfileV1, BoundArchiveProfilePolicyV1,
+    ArchiveBackend, ArchiveBackendError, ArchiveBackendProfileV1, ArchiveBlob, ArchiveError,
+    ArchiveSource, BoundArchiveProfilePolicyV1, WriterLock,
 };
 use ea_archive_fs::{
     CapabilityTestVectorV1, ControlledNetworkBackend, ControlledNetworkLocalComponentV1,
     LocalCommitComponentV1, LocalPathBackend, SqlcipherArchiveBackend, SqliteCommitStore,
 };
 use ea_audit::{AuditActorProof, SqliteLocalAuditRepository, TypedLocalAuditEvent};
+use ea_destruction::ObservedArchiveHoldingV1;
 use ea_format::{
     ArchiveProfileMigrationContextV1, LocalAuditActionV1, LocalAuditOutcomeV1, OperatorRoleV1,
 };
 use ea_local_store::{EncryptedDatabase, StoreError, StoreTransaction, StoreValue};
 use ea_operator::ReauthPurpose;
+use ea_recovery::FsArchiveSource;
 use ea_types::Hash32;
 use std::{
     path::{Path, PathBuf},
@@ -423,6 +427,9 @@ enum ComponentStorage {
     Local(LocalPathBackend),
     Network {
         backend: SqlcipherArchiveBackend,
+        /// Kanonischer Pfad der eigenen SQLCipher-Datei: Ort der Verwahrung
+        /// (EA-CNA-WRT-7).
+        database_path: PathBuf,
         _component: ControlledNetworkLocalComponentV1,
     },
 }
@@ -622,17 +629,110 @@ impl NativeArchiveExistingComponent {
         let backend = SqlcipherArchiveBackend::open(store)?;
         let component = ControlledNetworkBackend::open_local_component(
             archive_directory.to_owned(),
-            Some(LocalCommitComponentV1::new(actual, Box::new(measurement))),
+            Some(LocalCommitComponentV1::new(
+                actual.clone(),
+                Box::new(measurement),
+            )),
             config.profile.clone(),
             &policy,
         )?;
         Ok(Self {
             storage: ComponentStorage::Network {
                 backend,
+                database_path: actual,
                 _component: component,
             },
             profile: config.profile,
             profile_hash,
+        })
+    }
+}
+
+impl ObservedArchiveHoldingV1 for NativeArchiveExistingComponent {
+    fn profile_hash(&self) -> Result<Hash32, ArchiveBackendError> {
+        Ok(self.profile_hash)
+    }
+    fn acquire_writer_lock(&self) -> Result<WriterLock, ArchiveBackendError> {
+        self.local_backend().acquire_writer_lock()
+    }
+    /// LocalPath: die kanonische Wurzel wie bisher; Netzprofil: der
+    /// kanonische Datenbankpfad der lokalen Komponente, nie das Netzziel.
+    fn canonical_location(&self) -> Result<PathBuf, ArchiveBackendError> {
+        match &self.storage {
+            ComponentStorage::Local(backend) => backend.canonical_location(),
+            ComponentStorage::Network { database_path, .. } => Ok(database_path.clone()),
+        }
+    }
+    fn visit_committed(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError> {
+        match &self.storage {
+            ComponentStorage::Local(backend) => backend.visit_committed(visitor),
+            ComponentStorage::Network { backend, .. } => backend.visit_blobs(visitor),
+        }
+    }
+    fn visit_staged(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError> {
+        match &self.storage {
+            ComponentStorage::Local(backend) => backend.visit_staged(visitor),
+            ComponentStorage::Network { backend, .. } => backend.visit_managed_blobs(&mut |blob| {
+                if ea_archive::is_staging_path(blob.path_hint()) {
+                    visitor(blob)
+                } else {
+                    Ok(())
+                }
+            }),
+        }
+    }
+}
+
+/// Die Lesesicht des Netz-Writers (EA-CNA-WRT-5): die committete Netzsicht
+/// des verifizierten Snapshots (live gelesen oder Grundlinie, EA-CNA-SRC-4)
+/// vereinigt mit der LIVE gelesenen committeten lokalen Komponente, bei
+/// jedem Besuch neu gebildet. So sieht Schritt 1 den Kettenkopf und die
+/// Publikationsprüfung der Schritte 10/11 die eigenen lokalen Commits.
+pub struct NetworkWriterSourceV1<'a> {
+    baseline: &'a FsArchiveSource,
+    local: &'a SqlcipherArchiveBackend,
+}
+impl ArchiveSource for NetworkWriterSourceV1<'_> {
+    fn visit_blobs(
+        &self,
+        visitor: &mut dyn FnMut(ArchiveBlob<'_>) -> Result<(), ArchiveError>,
+    ) -> Result<(), ArchiveError> {
+        // Ein Konflikt oder eine unvollständige Aufzählung verwirft die ganze
+        // Vereinigung; es gibt keinen Vorrang einer Seite.
+        self.baseline
+            .committed_view()
+            .with_exact_component(self.local)
+            .map_err(|_| ArchiveError::Unavailable)?
+            .visit_blobs(visitor)
+    }
+}
+
+impl NativeArchiveExistingComponent {
+    /// Die Lesequelle eines Netz-Writers über der Netzsicht von `snapshot`.
+    ///
+    /// # Errors
+    ///
+    /// `Config` für eine LocalPath-Komponente oder einen Snapshot ohne
+    /// Netzsicht (also ohne Registrierung beim Öffnen).
+    pub fn writer_source<'a>(
+        &'a self,
+        snapshot: &'a OperatorArchiveSnapshot,
+    ) -> Result<NetworkWriterSourceV1<'a>, NativeArchiveOpenError> {
+        let ComponentStorage::Network { backend, .. } = &self.storage else {
+            return Err(NativeArchiveOpenError::Config);
+        };
+        let baseline = snapshot
+            .remote_baseline()
+            .ok_or(NativeArchiveOpenError::Config)?;
+        Ok(NetworkWriterSourceV1 {
+            baseline,
+            local: backend,
         })
     }
 }
