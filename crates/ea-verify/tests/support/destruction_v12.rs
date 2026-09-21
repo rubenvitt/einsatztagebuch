@@ -268,3 +268,200 @@ pub fn fixture(same_subject: bool, not_after: i64, privacy: bool) -> Fixture {
         authorization,
     }
 }
+
+/// Web-Reader-Design §3 (`docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md`:47-68):
+/// ein Bestand mit ZWEI Vernichtungsvorgaengen unter DEMSELBEN
+/// Autorisierungskopf.
+///
+/// Beide Uebergaenge tragen ein Root-zertifiziertes
+/// `deletionAttest`-Zertifikat, beide Signaturen rechnen nach, beide
+/// Autorisierungen tragen zwei verschiedene `destructionApprove`-Subjekte.
+/// Sie unterscheiden sich AUSSCHLIESSLICH im Geraet, auf dem das signierende
+/// Zertifikat sitzt: beim ersten haelt dasselbe Geraet zusaetzlich ein
+/// Reader-Zertifikat. Damit ist das Reader-Geraet die EINZIGE Variable
+/// zwischen Befund und Positivkontrolle.
+pub struct ReaderSignerFixture {
+    pub source: ArchiveFixture,
+    pub anchor: TrustAnchorV1,
+    /// Der Uebergang, dessen Signierergeraet ein Reader-Zertifikat traegt.
+    pub reader_event_object_hash: ObjectHash,
+    pub reader_destruction_id: DestructionId,
+    /// Der Uebergang der Positivkontrolle: dasselbe in Gruen, ohne
+    /// Reader-Zertifikat auf dem Geraet.
+    pub control_event_object_hash: ObjectHash,
+    pub control_destruction_id: DestructionId,
+}
+
+/// Baut [`ReaderSignerFixture`].
+///
+/// `reader_revoked` widerruft das Reader-Zertifikat VOR der
+/// `authorizationSequence`. Es verschwindet damit aus
+/// `active_certificate_fields`, bleibt aber in `known_certificate_fields` —
+/// genau die Unterscheidung, auf der `device_holds_reader_certificate` steht,
+/// und dieselbe Fixturgestalt wie in
+/// `crates/ea-destruction/tests/transitions.rs`.
+#[must_use]
+pub fn reader_signer_fixture(reader_revoked: bool) -> ReaderSignerFixture {
+    let reader_device = ea_types::DeviceId::try_from(&[0xa5; 16][..]).unwrap();
+    let mut line = trust_support::RegistryLineBuilder::new();
+    line.push(policy_action(), trust_support::HeadOptions::default());
+    let approvers: [CertificateHash; 2] = [0x71, 0x72].map(|marker| {
+        let head = line.push(
+            trust_support::ActionSpec::Device {
+                kind: CertificateKindV1::KeyApprover,
+                marker,
+                effective_from: None,
+            },
+            trust_support::HeadOptions {
+                authority_subject_id_override: Some(
+                    SubjectId::try_from(&[marker; 16][..]).unwrap(),
+                ),
+                certificate_capabilities_override: Some(vec!["destructionApprove".into()]),
+                ..Default::default()
+            },
+        );
+        CertificateHash::from(head.direct_object_hash.unwrap())
+    });
+    let reader_head = line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::Reader,
+            marker: 0x65,
+            effective_from: None,
+        },
+        trust_support::HeadOptions {
+            device_id_override: Some(reader_device),
+            ..Default::default()
+        },
+    );
+    let reader_certificate_object_hash = reader_head.direct_object_hash.unwrap();
+    let reader_certificate = CertificateHash::from(reader_certificate_object_hash);
+    if reader_revoked {
+        line.push(
+            trust_support::ActionSpec::Revoke {
+                target_kind: 0,
+                object_hash: reader_certificate_object_hash,
+            },
+            trust_support::HeadOptions::default(),
+        );
+    }
+    // Das `deletionAttest`-Zertifikat des Readers: seine Cache-Attestierung
+    // ist ausdruecklich vorgesehen (Ruling 2026-09-13, DRK-250), der
+    // Zustandsuebergang ausdruecklich nicht.
+    let reader_deletion = CertificateHash::from(
+        line.push(
+            trust_support::ActionSpec::Device {
+                kind: CertificateKindV1::DeletionAttest,
+                marker: 0x66,
+                effective_from: None,
+            },
+            trust_support::HeadOptions {
+                device_id_override: Some(reader_device),
+                ..Default::default()
+            },
+        )
+        .direct_object_hash
+        .unwrap(),
+    );
+    let head = line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::DeletionAttest,
+            marker: 0x67,
+            effective_from: None,
+        },
+        trust_support::HeadOptions::default(),
+    );
+    let control_deletion = CertificateHash::from(head.direct_object_hash.unwrap());
+    let sequence = head.effective_from.get();
+
+    // Fixturbeleg statt Fixturhoffnung: das Reader-Zertifikat ist am
+    // Autorisierungskopf bekannt, und GENAU DANN aktiv, wenn es nicht
+    // widerrufen wurde.
+    let authority = {
+        let trust = line.verified_with_floor(
+            trust_support::Pin::Exact(head.version, head.object_hash),
+            UnixMillis::new(FIXTURE_OS_WALL_CLOCK_V1),
+        );
+        ea_trust::verify_historical_registry_authority(
+            &trust,
+            head.version,
+            head.object_hash,
+            ChainSequence::new(sequence),
+        )
+        .unwrap()
+    };
+    assert!(
+        authority
+            .known_certificate_fields()
+            .any(|(hash, _)| hash == reader_certificate),
+        "das Reader-Zertifikat muss am Autorisierungskopf bekannt sein",
+    );
+    assert_eq!(
+        authority
+            .active_certificate_fields(reader_certificate)
+            .is_none(),
+        reader_revoked,
+        "das Reader-Zertifikat ist genau dann inaktiv, wenn es widerrufen wurde",
+    );
+    for certificate in [reader_deletion, control_deletion] {
+        assert!(
+            authority.active_certificate_fields(certificate).is_some(),
+            "beide Loeschzeugenzertifikate sind am Autorisierungskopf aktiv",
+        );
+    }
+
+    let mut source = ArchiveFixture::new();
+    push_trust_objects(&mut source, &line);
+    let mut build = |marker: u8, certificate: CertificateHash| {
+        let id = DestructionId::try_from(&[marker; 16][..]).unwrap();
+        let payload = TrustPayloadV1::destruction_authorization(DestructionAuthorizationFieldsV1 {
+            destruction_id: id,
+            organization_id: trust_support::organization(),
+            registry_version: head.version,
+            registry_head_hash: Hash32::try_from(head.object_hash.as_bytes().as_slice()).unwrap(),
+            authorization_sequence: sequence,
+            targets: vec![DestructionTargetV1::new([marker; 32], 0)],
+            scope_code: 0,
+            legal_reason_code: 0,
+        })
+        .unwrap();
+        let signatures = approvers
+            .into_iter()
+            .map(|cert| {
+                trust_support::authorized_device_signer()
+                    .sign_destruction_approval_digest(cert, payload.exact_digest_input())
+                    .unwrap()
+            })
+            .collect();
+        let authorization = encode_trust(&TrustObjectV1::new(payload, signatures).unwrap())
+            .unwrap()
+            .into_vec();
+        source.push_exact_bytes(
+            &format!("destructions/{marker:02x}/authorization.etb"),
+            authorization.clone(),
+        );
+        let event = destruction_transition_bytes(
+            &authorization,
+            id,
+            object_hash(&authorization),
+            EventId::try_from(&[marker; 16][..]).unwrap(),
+            None,
+            None,
+            0,
+            certificate,
+        );
+        let event_object_hash = object_hash(&event);
+        source.push_exact_bytes(&format!("destructions/{marker:02x}/events/0.etb"), event);
+        (id, event_object_hash)
+    };
+    let (reader_destruction_id, reader_event_object_hash) = build(0x81, reader_deletion);
+    let (control_destruction_id, control_event_object_hash) = build(0x82, control_deletion);
+
+    ReaderSignerFixture {
+        source,
+        anchor: decode_trust_anchor(line.exact_anchor_bytes()).unwrap(),
+        reader_event_object_hash,
+        reader_destruction_id,
+        control_event_object_hash,
+        control_destruction_id,
+    }
+}

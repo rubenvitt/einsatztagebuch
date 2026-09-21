@@ -60,6 +60,31 @@ pub async fn execute_server(
     {
         return Err(Error::Conflict);
     }
+    // design.md §16.3: "Kein Schritt darf fuer ein blosz erneut gesendetes
+    // Ereignis zweimal ausgefuehrt ... werden." Derselbe Vorgang kommt bei
+    // jedem Fortsetzen erneut an — als exakter Job-POST oder als erneut
+    // gesendetes Ereignis. Sobald die eigene dauerhafte Messung dieses
+    // Servers Ergebnis 0 ueber den vollstaendig entfernten eingefrorenen
+    // Bestand meldet, traegt eine weitere Ausfuehrung keine neue Information:
+    // sie liefe ueber denselben Bestand, faende dasselbe Nichts und
+    // unterschriebe eine zweite Attestierung derselben Tatsache.
+    // Der eingefrorene Bestand ist unveraenderlich, deshalb ist das eine
+    // Eigenschaft des Vorgangs, nicht nur des einzelnen `event_hash`, den die
+    // Messzeile mitfuehrt. Gemessen wird weiterhin neu, solange keine Messung
+    // vorliegt, die letzte gescheitert ist oder ihr Ergebnis 1/2 einen Rest
+    // ausweist — genau die gewollten Neumessungen in Zustand 2 und 4.
+    // :1557 (append-only) bleibt unberuehrt: nichts wird umgeschrieben,
+    // es wird nur nichts Neues geschrieben. Geprueft wird genau das
+    // Praedikat, das `accept_event` schon heute fuer `completeManagedScope`
+    // verlangt: der Server misst, solange und nur solange seine eigene
+    // physische Pflicht nicht nachweislich erfuellt ist.
+    if ports
+        .destructions
+        .server_removal_measured(org, id, ports.clock.now())
+        .await?
+    {
+        return destruction_status(org, id, ports).await;
+    }
     let progress = ports
         .chain_heads
         .committed_chain_head(org, job.chain_id())

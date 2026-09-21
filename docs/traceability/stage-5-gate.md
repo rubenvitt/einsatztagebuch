@@ -118,8 +118,11 @@ Zeugenflaeche: `apps/cli/tests/operator_destruction/`,
 
 **Einzelzusagen aus Plan Task 14 Step 3.** Der Plan buendelt sie in zwei
 Systemzielen, `tests/ea-system-tests/tests/e2e_organization_lifecycle.rs` und
-`e2e_recovery_fresh_machine.rs`, die es NICHT gibt (siehe `## Dokumentierte
-Grenzen`). Die Einzelzusagen haben folgende Zeugen:
+`e2e_recovery_fresh_machine.rs`. Beide sind mit DRK-427 gebaut und lesen je
+1/0/0 (0,4 s beziehungsweise 1,0 s Testzeit, ohne Netzdienste). Sie fuehren
+KEINE neue Zusage ein: jeder ihrer Abschnitte ruft dieselbe Fassade wie der
+Einzelzeuge in der Tabelle unten, und was sie nicht buendeln koennen, steht in
+`## Dokumentierte Grenzen`. Die Einzelzusagen haben folgende Zeugen:
 
 | Zusage aus Step 3 | Zeuge | Messung |
 |---|---|---|
@@ -373,13 +376,42 @@ Leser fuer das Sperrbit. `administration_runtime/authorization.rs:118/:310`
 verwerfen Autorisierungsfenster, keine Bedienersitzung, und buchen deshalb
 keinen Ablauf.
 
-**Zwei buendelnde Systemziele aus Plan Task 14 nicht gebaut — besitzendes
-Ticket DRK-427 (S5-F9).** `tests/ea-system-tests/tests/e2e_organization_lifecycle.rs`
-und `e2e_recovery_fresh_machine.rs` (siehe Abschnitt 3) gibt es nicht. Jede
-ihrer Einzelzusagen hat einen der dort aufgefuehrten Zeugen; es fehlt der EINE
-Lauf, der sie in einer Organisation bzw. auf einer frischen Maschine
-nacheinander ausfuehrt. Im Plan bleiben Task 14 Step 3 und Step 4 deshalb
-offen.
+**Geschlossen mit DRK-427: die zwei buendelnden Systemziele aus Plan Task
+14.** `tests/ea-system-tests/tests/e2e_organization_lifecycle.rs` (Einrichtung
+bis zur Recovery-Bereitschaft, ausstehende Geraeteaktivierung, Widerrufsgrenze,
+Lease/Rueckrollen/Gabelung/Ueberalterung, Uhrfreigabe, Writer-Uebergang,
+Nachtrag, Vernichtung) und `e2e_recovery_fresh_machine.rs`
+(Offline-Schluesselquelle, Recovery auf frischer Maschine, Urteil des
+gefuehrten Recovery-Tests ueber genau diese Messung, Schluesselinventar,
+Re-Grant) laufen je 1/0/0, rein dateisystem- und prozessintern und ohne
+`xtask integration up`.
+
+Was sie AUSDRUECKLICH nicht buendeln, und warum:
+
+- Beide laufen ueber mehrere Kulissen, nicht ueber eine. Die
+  Einrichtungszeremonie lebt vor der Registrierungslinie, der
+  Writer-Uebergang verlangt zwei Geraete mit eigenem Schluesselspeicher, die
+  Vernichtung eine Policy mit `destructionEnabled` und zwei
+  `destructionApprove`-Zertifikate, und die Bestandsfixture hat keine
+  Zeremonie. Jede Naht ist im jeweiligen Zeugen benannt.
+- Schritt 12 der Zeremonie und die gemessene Recovery-Probe laufen auf zwei
+  Organisationen. Gebuendelt ist das URTEIL:
+  `ea_admin::verify_fresh_machine_recovery_test` bewertet die WIRKLICH
+  gemessene Probe (Medien, Anker, Abdruck, Lesbarkeit, Sample kommen aus dem
+  Lauf), und dieselbe Funktion fuehrt die Organisation der Zeremonie nach
+  `Ready`.
+- Die Reader-Haelfte des Nachtragszeugen (mehrere verkettete Nachtraege an
+  einem Faden) bleibt bei
+  `crates/ea-admin/tests/amendment.rs`; die Uebergangskulisse fuehrt den
+  oeffenbaren Wiederherstellungsempfaenger statt eines oeffenbaren Readers.
+- Die physischen Vernichtungszweige (sofort, backup-pending, unerreichbar,
+  Fortsetzen) und der NATIVE gefuehrte Recovery-Test bleiben bei ihren
+  nativen Zeugen in `apps/cli`; sie verlangen einen gemessenen Wirt
+  beziehungsweise eine echte Fremdmaschine (AK 30, AK 52).
+
+Im Plan sind Task 14 Step 3 und Step 4 damit im Umfang dieser beiden Ziele
+belegt; die nativen und dienstgebundenen Teile von Step 4 bleiben bei den
+Kommandos, die der Plan dort nennt.
 
 **Geschlossen mit den Folgetickets DRK-319, DRK-321, DRK-324 und DRK-326.**
 Den nativen Erzeuger der Kante `incompleteUnreachableReplica` nach
@@ -412,16 +444,48 @@ endgueltig und korrekt abgebildet. Das ist eine Umfangsentscheidung und keine
 offene Produkthaelfte; AK 30 bleibt davon unberuehrt, weil alle erlaubten
 Zustaende korrekt abgebildet sind.
 
-**Server-Mehrfachausfuehrung — besitzendes Ticket DRK-430.** Der Server fuehrt
-bei jedem erneuten Job-POST neu aus und attestiert neu. Das ist vorbestehend
-und nicht durch den Retry entstanden; der Replay-Zeuge in
-`.../transport/server/retry.rs` nimmt es mit Verweis auf DRK-430 hin.
+**Server-Mehrfachausfuehrung — besitzendes Ticket DRK-430, erledigt.** Der
+Server fuehrte bei jedem erneuten Job-POST neu aus und attestierte neu; das
+war vorbestehend und nicht durch den Retry entstanden. Seit DRK-430 fuehrt
+`execute_server` nur noch aus, solange die eigene dauerhafte Messung dieses
+Servers die physische Pflicht noch nicht erfuellt meldet — genau das
+Praedikat, das die Vollendung ohnehin verlangt. Der Replay-Zeuge in
+`.../transport/server/retry.rs` pinnt jetzt genau eine Messung statt fuenf,
+und `repeated_job_post_in_state_one_returns_the_single_existing_attestation`
+in `apps/server/tests/destruction_jobs_api.rs` haelt die Grenze fest.
 
-**Reichweite von R1 — besitzende Tickets DRK-431 und DRK-432.** R1 wirkt
-lokal in `ea-destruction` und `ea-reader`. Der Offline-Bericht von `ea-verify`
-wendet die Regel noch nicht an (DRK-431). R1 setzt voraus, dass kein
-Controller-, Writer- oder Admin-Geraet ein Reader-Zertifikat traegt; diese
-Registry-Invariante erzwingt heute niemand (DRK-432, Prioritaet hoch).
+**Reichweite von R1 — DRK-431 geschlossen, besitzendes Ticket DRK-432.** R1
+wirkt lokal in `ea-destruction` und `ea-reader` und seit DRK-431 auch im
+Offline-Bericht von `ea-verify`: ein Vernichtungsuebergang, dessen
+Signierergeraet am Autorisierungskopf ein Reader-Zertifikat traegt — auch ein
+widerrufenes —, ist ein `signatureErrors`-Eintrag mit
+`EA-VERIFY-DESTRUCTION-READER-DEVICE-SIGNER` und nimmt an der Kettenauswertung
+gar nicht teil. Zeugen: `crates/ea-verify/tests/destruction_reader_signer.rs`.
+Die Loeschattestierung DESSELBEN Geraets bleibt zulaessig (Web-Reader-Design
+§3, Ruling 2026-09-13, DRK-250); die Regel greift ausschliesslich an der
+Unterart `destructionTransition`.
+
+**Einordnung offen — Entscheidung Ruben.** Der neue Befund ist als
+VERSCHAERFUNG INNERHALB VON v1 umgesetzt, ohne Profil-Versionssprung, und das
+ruht auf genau einem Befund: kein Konformitaetsvektor unter `vectors/`
+enthaelt ueberhaupt einen Vernichtungsuebergang (die Familien sind crypto,
+evidence, grants, local-audit, receipts, reports/import-report-v1, trust,
+web-bundle; `accepted-destruction.bin` ist eine lokale Auditzeile,
+`destruction-evidence.hex` eine Payload), und der einzige Systemtest mit
+Uebergaengen — `tests/ea-system-tests/tests/task9_verification_report.rs`
+ueber die Fixtures in `crates/ea-verify/tests/support/mod.rs` — fuehrt in
+seinen Registrierungslinien kein einziges Reader-Zertifikat. Es bricht also
+kein eingefrorenes v1-Artefakt. Was sich sehr wohl aendert: der signierte
+Preflight-Kern verlangt leere `signatureErrors`
+(`crates/ea-verify/src/preflight_report.rs`:36-47), also laesst sich ueber
+einem Bestand mit einem solchen Uebergang kein Preflight-Kern mehr bilden —
+fail-closed und gewollt, aber eine Verhaltensaenderung an v1-Archiven. Ob das
+eine Profilrevision waere, bleibt Rubens Entscheidung; die Umsetzung hat sie
+nur vorbereitet, nicht getroffen.
+
+R1 setzt weiter voraus, dass kein Controller-, Writer- oder Admin-Geraet ein
+Reader-Zertifikat traegt; diese Registry-Invariante erzwingt heute niemand
+(DRK-432, Prioritaet hoch).
 
 **Der Stufe 7 vorbehalten.** Vier Dinge bleiben ausdruecklich ausserhalb dieser
 Stufe: die nativen Minimal- und Maximalfaelle, die quartalsweise Uebung, die
