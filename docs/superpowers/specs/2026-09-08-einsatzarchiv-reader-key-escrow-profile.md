@@ -1,35 +1,118 @@
-# Reader key escrow v1.1 profile
+# Reader-Key-Escrow — das v1.1-Profil
 
-Status: proposed profile for independent specification/security review. No codec or production emission is authorized by the existence of this draft alone. The DRK-250 implementation remains in progress.
+**Status: verbindlich.** Ruling vom 2026-09-22 (DRK-318). Dieses Profil löst den Entwurf vom
+2026-09-08 (Status „proposed") ab. Grundlage ist das unabhängige normative und Security-Review
+gegen HEAD `3257385` (Anhang `drk-318-escrow-review.md` an DRK-318); die zwölf offenen Fragen sind
+in Abschnitt 1 entschieden. Die Umsetzung folgt TDD und dem Cutover aus Abschnitt 9; die Existenz
+dieses Profils autorisiert für sich genommen keine Emission.
 
-## Scope and fixed decisions
+Kurzformen: `PLAN5` = `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-5-administration-recovery.md`,
+`WEBREADER` = `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md`,
+`DESIGN` = `docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-design.md`,
+`ADDENDUM` = `docs/superpowers/specs/2026-08-13-einsatzarchiv-v0-1-wire-format-addendum.md`.
 
-This profile implements the two Stage-5 additions in the main plan's Global Constraints and Web-Reader design §§6.6–7. It adds exactly two Trust subtypes: `readerKeyEscrow` and `readerKeyEscrowRecoveryAuthorization`. It preserves every existing v1 encoding, the fifteen positions and single signature of `organizationAdminAuthorization`, and its seven action codes. Old parsers continue to reject unknown subtypes; they never skip them.
+## 1. Die zwölf Entscheidungen
 
-The escrow is an ordinary content-addressed Root-signed `trust/` object, replicated and exported with the archive. Its only private plaintext is one 32-byte X25519 KEM key. Ed25519 device/audit keys, native instance keys, OS account material, profile salts, names and authentication credentials are excluded.
+| # | Frage | Entscheidung |
+| --- | --- | --- |
+| 1 | GC:33 | `PLAN5:42` und `DESIGN:201` werden korrigiert. Wortlaut in Abschnitt 2. |
+| 2 | Publikationsfreigabe | **Eigene dritte Trust-Familie** `readerKeyEscrowApproval`, nicht eingebettet, nicht Aktion 7, nicht Root-only. |
+| 3 | `reader-subject-id` | **(a) Erzwungene Eindeutigkeit** von `(organizationId, readerSubjectId)` über alle gültigen Escrows. |
+| 4 | Öffnungsfrist | **Getrennt:** Publikationsfreigabe 300 000 ms, Öffnungsautorisierung 900 000 ms. |
+| 5 | Zweitescrow | **Verboten.** Genau ein gültiges Escrow je Reader-Zertifikat. Ersatz ist ein benannter Vorgang. |
+| 6 | Dauerhaftes Ergebnis | **Löschung nach der ersten erfolgreichen Abholung**, zusätzlich harte Höchsthaltedauer 86 400 000 ms. |
+| 7 | Transport-Schlüssel | **Flüchtig in geteiltem Rust** (WASM-Speicher), nie persistiert, keine WebCrypto-Ablage. |
+| 8 | Capability | **Wiederverwendung von `historicalGrantApprove`.** Keine achte Capability. |
+| 9 | Cutover-Vorbedingung | **Ja.** Aktive `webBundleRelease` eines v1.1-Bundles ist Vorbedingung der ersten Publikation. |
+| 10 | Randsemantik | **Inklusiv** wie der Bestand: abgelaufen ist `now > expiresAt`. |
+| 11 | Vektorort | **Eigene Vektorfamilien** außerhalb `vectors/trust/v1/`. |
+| 12 | HPKE-Kontexte | **Hausform** `hpke_info`/`hpke_aad`, Suite-Literal im CBOR, Extension-Slot in der AAD. |
 
-The existing Reader certificate has no Reader `authoritySubjectId`: that field is reserved for Admin and Key Approver certificates. Therefore the new escrow binds its pseudonymous Reader subject explicitly under both Admin and Root signatures. The server's credential database cannot supply this authority. The enrollment administrator verifies that subject in the same external enrollment ceremony as the certificate and bundle fingerprints.
+### 1.1 Warum Entscheidung 2 so und nicht anders
 
-## Publication authority and alternatives
+Der Escrow-Gegenstand verleiht für sich genommen keine Fähigkeit: Root allein kann kein gültiges
+Chiffrat erzeugen (dafür braucht es den privaten Reader-KEM im Browser), ein gefälschtes scheitert
+beim Öffnen an der Gegenprobe des abgeleiteten Public Keys, ein umgehängtes an der AEAD-AAD. Die
+Freigabe trägt deshalb **nicht** das Argument „zwei Schlüssel sind besser als einer", sondern ein
+anderes: das Escrow ist das einzige Objekt im gesamten Bestand, das eine **Person** an ein
+Reader-Zertifikat bindet (Feld `reader-subject-id`), und zwei Approver entscheiden später genau
+über diese Bindung. Eine Behauptung, auf der eine Zweipersonenfreigabe fußt, darf nicht von einem
+einzelnen Schlüssel stammen — und sie gehört in ein eigenes, einzeln auffindbares, einzeln
+auditierbares Objekt statt als COSE-Struktur in eine fremde Nutzlast.
 
-The old blanket statement that each post-bootstrap Root ceremony references an `organizationAdminAuthorization` conflicts with a new escrow target while its old target/action table must remain frozen. A Root-only escrow exception would remove the independent exact-core approval. Widening the old action table or pretending a certificate authorization covers subsequently generated ciphertext would contradict the fixed decisions or fail to bind exact bytes.
+Verworfen:
 
-The proposed resolution is a narrowly scoped **embedded Admin approval**, present only in the new escrow payload. It is one purpose-specific COSE signature over a fresh, exact-core-bound publication approval. Root signs the payload including that approval. It creates no third Trust subtype, no Registry change kind, and no new action in the old authorization family. Its active Admin certificate, Operator binding, native presence, validity and durable one-use checks mirror the existing Admin ceremony. The separate recovery authorization retains two distinct active Key Approvers.
+- **Eingebettete Freigabe** (der Entwurf): zahlt den höchsten Preis aller Varianten — dritte
+  Payload-Gestalt, zweite Fassung des Einmal-Speichers, neuer `ContentType`, und eine
+  Schichtumkehr, weil `ea-format` im Payload-Validator COSE prüfen müsste
+  (`validate_trust_signature` behandelt heute ausschließlich die Einträge des Signaturarrays,
+  `crates/ea-format/src/etb.rs:670-711`).
+- **Aktion 7**: die Golden Vectors stehen dem *nicht* entgegen — der Aktionscode-Negativvektor
+  trägt bewusst `200`. Im Weg steht die Paarung Aktion ↔ Registry-Wirkung
+  (`schemas/archive/v1/trust.cddl:100-111`, `crates/ea-trust/src/admin_authorization.rs:445-452`,
+  `PLAN5:62-72`). Ein Escrow hat keine Registry-Wirkung; eine Aktion ohne Registry-Wirkung ist in
+  `verify_authorized_trust_target` eine neue Gestalt.
+- **Root-only**: gäbe die Zweischlüssel-Kontrolle über die Subjektbehauptung auf. Das wäre nur
+  unter Entscheidung 3(b) richtig gewesen.
 
-Before implementation, independent review must confirm that this explicit v1.1 specialization preserves the intended Admin/Root separation. The main design and Web-Reader §7.5 must be aligned in the same profile/codec commit; no implementation chooses between contradictory normative texts.
+### 1.2 Eine Korrektur am Review selbst
 
-## Exact envelopes and cryptographic contexts
+Das Review schlug vor, das Escrow in der bestehenden Zwei-Element-Gestalt
+`authorized-trust-payload-v1<T>` zu führen und `root_trust_bindings` nur um Allowlist-Einträge zu
+erweitern. **Am Baum trägt das nicht.** `authorized-trust-payload-v1<T>` ist
+`[core, organization-admin-authorization-object-hash]` (`schemas/archive/v1/trust.cddl:216-219`),
+und `root_trust_bindings` verlangt das Autorisierungsobjekt unbedingt, löst es auf und prüft
+`authorization_bindings.target_subtype != subtype` (`crates/ea-crypto/src/cose.rs:2481-2589`);
+`target-trust-subtype` ist eine geschlossene Sechserliste (`trust.cddl:94-95`). Ein zusätzlicher
+Allowlist-Eintrag ohne Erweiterung dieser Liste ist also nicht implementierbar — und ihre
+Erweiterung *wäre* Aktion 7.
 
-Both objects retain the existing EA1 `.etb` envelope, outer format version 1 and empty critical extensions. Their body is `[subtype, payload, signatures]`.
+Daraus folgt die tatsächliche Gestalt: **alle drei Familien sind direkte Familien** nach dem
+Vorbild `webBundleRelease` (`crates/ea-crypto/src/cose.rs:1612-1659`,
+`schemas/archive/v1/trust.cddl:195-199`). `root_trust_bindings` wird **nicht angefasst**.
 
-`readerKeyEscrow` has exactly one Root signature. Its payload is exactly:
+## 2. Der korrigierte Satz zur Root-Zeremonie (Entscheidung 1)
+
+`PLAN5:42` und `DESIGN:201` sind seit `webBundleRelease` unzutreffend, unabhängig vom Escrow.
+Beide lauten künftig:
+
+> Jede Root-Zeremonie, die **registrywirksamen** Trust-Zustand ändert, bindet eine gültige
+> `organizationAdminAuthorization`; Root-only und Admin-only sind dort ungültig. Direkte,
+> wurzelsignierte Objektarten **ohne** Registry-Wirkung sind abschließend aufgezählt:
+> `webBundleRelease`, `webBundleRevocation`, `readerKeyEscrow`. Sie sind kein zulässiges
+> `target-trust-subtype`, tragen keinen Arm in `registry-change-v1` und sind kein Gegenstand des
+> Registrierungsabschlusses. Die Anfangsausnahme bleibt auf das unabhängig gepinnte
+> Root-Zertifikat und mindestens zwei exakt gepaarte Admin-Zertifikat/Operator-Bindungs-Paare
+> beschränkt.
+
+## 3. Die drei Trust-Familien
+
+Alle drei behalten die bestehende EA1-`.etb`-Hülle, äußere Formatversion 1 und leere kritische
+Erweiterungen. Ihr Körper ist `[subtype, payload, signatures]`. Keine bestehende v1-Kodierung
+ändert sich; `organizationAdminAuthorization` bleibt bei fünfzehn Positionen, einer Signatur und
+sieben Aktionscodes.
 
 ```cddl
+; Ergänzung zu trust-subtype-v1 (heute dreizehn Arme):
+;   / "readerKeyEscrow" / "readerKeyEscrowApproval"
+;   / "readerKeyEscrowRecoveryAuthorization"
+
+; Ergänzung zu etb-body-v1:
+;   ["readerKeyEscrow", reader-key-escrow-payload-v1, [cose-sign1-v1]] /
+;   ["readerKeyEscrowApproval", reader-key-escrow-approval-core-v1,
+;    [cose-sign1-v1]] /
+;   ["readerKeyEscrowRecoveryAuthorization",
+;    reader-key-escrow-recovery-authorization-core-v1, [2* cose-sign1-v1]]
+
+; Die Nutzlast ist zweielementig, aber NICHT authorized-trust-payload-v1<T>:
+; das zweite Element nennt die Publikationsfreigabe dieses Profils, nicht eine
+; organizationAdminAuthorization. Die Trennung ist beabsichtigt — sie hält
+; root_trust_bindings und die eingefrorene Aktionstabelle unberührt.
 reader-key-escrow-payload-v1 = [
   reader-key-escrow-core-v1,
-  reader-key-escrow-admin-approval-core-v1,
-  #6.18(COSE-Sign1)
+  reader-key-escrow-approval-object-hash: bstr .size 32
 ]
+
 reader-key-escrow-core-v1 = [
   1, organization-id: bstr .size 16,
   reader-certificate-object-hash: bstr .size 32,
@@ -41,49 +124,24 @@ reader-key-escrow-core-v1 = [
   recovery-kem-key-thumbprint: bstr .size 32,
   encapsulated-key: bstr .size 32,
   encrypted-reader-kem-key: bstr .size 48,
-  issued-at: int, []
+  issued-at: int, root-key-thumbprint: bstr .size 32, []
 ]
-reader-key-escrow-admin-approval-core-v1 = [
-  1, organization-id: bstr .size 16,
+
+reader-key-escrow-approval-core-v1 = [
+  1, authorization-id: bstr .size 16, organization-id: bstr .size 16,
   registry-version: uint, registry-head-hash: bstr .size 32,
   authorization-sequence: uint,
+  admin-key-thumbprint: bstr .size 32,
   admin-certificate-object-hash: bstr .size 32,
   admin-operator-binding-object-hash: bstr .size 32,
   escrow-core-hash: bstr .size 32,
-  issued-at: int, expires-at: int, nonce: bstr .size 32, []
-]
-```
-
-These cores have respectively 13 and 12 positions. `escrow-core-hash` is SHA-256 over ASCII `EINSATZARCHIV-READER-KEY-ESCROW-CORE-v1` concatenated with the exact deterministic CBOR core. No reserialization is used during verification. The embedded Admin COSE payload is the 32-byte SHA-256 of ASCII `EINSATZARCHIV-READER-KEY-ESCROW-ADMIN-v1` concatenated with its exact deterministic CBOR approval core. Its registered content type is `application/vnd.einsatzarchiv.reader-key-escrow-admin-digest`; certificate-bound protected headers follow the existing normal Ed25519 profile. The signer must be the named active `OrganizationAdmin` certificate with `organizationAdminApprove`, paired with the named active native Operator binding and same authority subject. It cannot be substituted by a Root or Approver signature.
-
-The Root signature uses the existing Trust digest of `["readerKeyEscrow", payload]`, including the exact embedded Admin approval and its COSE bytes. The authorizing and escrow heads, sequences and organizations must agree. Require `issuedAt <= effectiveNow < expiresAt`, `issuedAt <= escrow.issuedAt < expiresAt`, and a maximum approval lifetime of 300000 ms. Head/sequence authority comes from the selected verified Registry, not payload claims. The Root line must be valid at publication's Registry version.
-
-The Recovery certificate must be active at enrollment, of kind `RecoveryRecipient`, carry an X25519 KEM public key whose canonical thumbprint equals the core field, and have the existing Recovery-recipient capability. The Reader certificate must be the exact already Root/Admin-authorized, Registry-activated Reader certificate with X25519 and Ed25519 public keys. Both certificate hashes resolve from the ordinary verified Trust inventory.
-
-HPKE uses the existing Suite-1 RFC 9180 Base Mode. Its `info` is ASCII `EINSATZARCHIV-READER-KEY-ESCROW-HPKE-v1`. Its AAD is exact deterministic CBOR:
-
-```cddl
-reader-key-escrow-aad-v1 = [
-  1, organization-id: bstr .size 16,
   reader-certificate-object-hash: bstr .size 32,
   reader-subject-id: bstr .size 16,
-  enrollment-registry-version: uint,
-  enrollment-registry-head-hash: bstr .size 32,
-  recovery-certificate-object-hash: bstr .size 32,
-  recovery-kem-key-thumbprint: bstr .size 32
+  issued-at: int, expires-at: int, nonce: bstr .size 32, []
 ]
-```
 
-The browser derives the public key of the private KEM it is sealing and requires equality with the verified Reader certificate before producing ciphertext. Root never receives plaintext. A complete Recovery test opens the escrow and independently repeats this public-key comparison, detecting an inconsistent escrow even if otherwise well signed.
-
-## Separate two-Approver opening authorization
-
-`readerKeyEscrowRecoveryAuthorization` has at least two COSE signatures with the existing total-order and duplicate-signature constraints. Its payload is a closed 17-position core:
-
-```cddl
-reader-key-escrow-recovery-authorization-v1 = [
-  1, authorization-id: bstr .size 16,
-  organization-id: bstr .size 16,
+reader-key-escrow-recovery-authorization-core-v1 = [
+  1, authorization-id: bstr .size 16, organization-id: bstr .size 16,
   registry-version: uint, registry-head-hash: bstr .size 32,
   authorization-sequence: uint,
   escrow-object-hash: bstr .size 32,
@@ -97,30 +155,315 @@ reader-key-escrow-recovery-authorization-v1 = [
 ]
 ```
 
-Purpose 0 means replacement of all lost Reader authenticators. No free text or broader operation code exists. The Trust digest includes the new subtype and exact core. Its dedicated verification context requires `KeyApprover` and a new explicit `readerKeyEscrowApprove` capability. Two certificates for one `authoritySubjectId` are one person and do not satisfy the threshold. Existing Approver certificates gain no capability implicitly; adding it follows ordinary Admin/Root certificate and Registry activation.
+Die Arität ist Vertrag: 14, 16 und 17 Positionen. `encrypted-reader-kem-key` ist 32 Byte
+Schlüssel plus 16 Byte AEAD-Tag. `purpose: 0` bedeutet Ersatz aller verlorenen
+Reader-Authenticators; ein Freitext- oder breiterer Operationscode existiert nicht.
 
-Every signature must be valid and active at the current authorization sequence. Authorization requires the exact current selected head, non-stale Registry authority, `issuedAt <= effectiveNow < expiresAt`, and a lifetime at most 300000 ms. All target fields must match one fully verified escrow. The actual target transport public key must be canonical X25519 and match the authorized fingerprint before accessing the Recovery provider. Ed25519, foreign organization, changed identity, a substituted escrow, stale enrollment binding, same-person approvals, excess or duplicate unverified signatures and expired authority release nothing.
+**Keine Zirkularität.** Die Freigabe bindet `escrow-core-hash` — den Hash über den **Core**, nicht
+über die Nutzlast. Die Nutzlast bindet danach den Objekthash der Freigabe. Die Reihenfolge ist
+damit eindeutig: Core → Freigabe → Root-Signatur über die Nutzlast.
 
-Opening uses a dedicated native `ReaderKeyEscrowRecovery` reauth purpose binding the exact authorization object hash and target transport fingerprint. The Recovery source uses the same non-exporting provider port as historical re-grant. The service verifies the decrypted X25519 key against the escrow's Reader certificate, then immediately HPKE-seals it to the new browser transport key. The only returned value is the encrypted envelope.
+### 3.1 Prüfregeln je Familie
 
-The output `info` is ASCII `EINSATZARCHIV-READER-KEY-ESCROW-RESTORE-v1`; AAD is exact deterministic CBOR `[1, organizationId, authorizationObjectHash, escrowObjectHash, readerCertificateObjectHash, readerSubjectId, targetTransportKeyThumbprint]`. All hashes are 32-byte byte strings and IDs are 16-byte byte strings. The response contains this public binding, a 32-byte encapsulated key and a 48-byte ciphertext. Its authenticity comes from HPKE plus the exact verified authorization; it is not a new Trust family.
+**`readerKeyEscrow`** — genau eine Root-Signatur. Geprüft wird sie durch eine eigene Funktion nach
+dem Vorbild `verify_web_bundle_trust_signature`: eine Signatur, ein gepinnter Anker, keine
+Kettenauflösung, kein `VerificationContext`, kein Katalog. Zusätzlich MUSS gelten:
 
-## Durable state, audit and failure
+- `reader-key-escrow-approval-object-hash` löst auf ein vollständig geprüftes
+  `readerKeyEscrowApproval` desselben `organization-id` auf, dessen `escrow-core-hash` exakt dem
+  Hash dieses Cores entspricht, und dessen `reader-certificate-object-hash` und
+  `reader-subject-id` feldgleich sind.
+- Das Reader-Zertifikat ist das exakte, bereits Root/Admin-autorisierte, Registry-aktivierte
+  Zertifikat mit X25519- und Ed25519-Public-Key.
+- Das Recovery-Zertifikat ist zum Enrollment aktiv, von der Art `RecoveryRecipient`, trägt einen
+  X25519-KEM-Public-Key, dessen kanonischer Abdruck dem Corefeld gleicht, und hat die bestehende
+  Recovery-Recipient-Capability.
+- **Enrollment-Bindung (MUSS):** `enrollment-registry-version`, `enrollment-registry-head-hash`
+  und `enrollment-sequence` sind gleich dem Registry-Zustand, in dem das genannte
+  Reader-Zertifikat aktiv wurde. Eine selbst gewählte Zahl in der AAD verhindert kein
+  Zurückspielen, sie dokumentiert es nur.
+- **Eindeutigkeit (MUSS, Entscheidung 3a):** `(organization-id, reader-subject-id)` ist über alle
+  gültigen Escrows eindeutig. Ein zweites Escrow zu derselben Subject-ID mit abweichendem
+  Reader-Zertifikat ist ungültig, ebenso ein zweites Escrow zu demselben Reader-Zertifikat mit
+  abweichender Subject-ID.
+- **Kein Zweitescrow (MUSS, Entscheidung 5):** zu einem Reader-Zertifikat existiert höchstens ein
+  gültiges Escrow. Ein exakt byte-gleiches Objekt ist idempotent. Ein Ersatz nach erneutem
+  Enrollment ist ein eigener, benannter Vorgang mit eigener Freigabe; er schreibt das alte Objekt
+  nie um (append-only).
 
-Publication consumes the embedded Admin approval nonce and digest in an encrypted append-only repository, atomically with its signed audit and prepared exact escrow bytes, before returning the Root ceremony result. Exact replay can return the same already published bytes; it cannot authorize another core. Conflicting material for the same authorization fails. Independently verifiable ciphertexts may coexist for a certificate; they do not replace or overwrite earlier objects, and an opening always names one exact hash.
+**`readerKeyEscrowApproval`** — genau eine Signatur des benannten aktiven
+`OrganizationAdmin`-Zertifikats mit `organizationAdminApprove`, gepaart mit der benannten aktiven
+nativen Operator-Bindung und demselben Autoritätssubjekt. Eine Root- oder Approver-Signatur
+ersetzt sie nicht. Kopf, Sequenz und Organisation kommen aus der gewählten geprüften Registry, nie
+aus Nutzlastbehauptungen. Höchstdauer 300 000 ms; abgelaufen ist `now > expires-at`
+(Entscheidung 10). `authorization-id` und `nonce` gehen unverändert in den bestehenden
+zweidimensionalen Einmal-Speicher (`crates/ea-trust/src/state.rs:165-203`), `authorization-id`
+zuerst.
 
-Opening atomically consumes `(organizationId, authorizationId)` and `(organizationId, nonce)` with a signed local audit before private-provider access. The audit action and context get their own closed additive profile carrying authorization, escrow and target-key hashes only. The service checks native-session invalidation before secret access and before output publication. No public report contains a PIN, path, private plaintext or key label.
+**`readerKeyEscrowRecoveryAuthorization`** — mindestens zwei COSE-Signaturen mit den bestehenden
+Totalordnungs- und Duplikatsregeln, gezählt über `distinct_authority_subjects` mit Schwelle 2
+nach dem Vorbild `crates/ea-trust/src/grant_authorization.rs:100-130`. Verlangt werden
+`KeyApprover`-Zertifikate mit **`historicalGrantApprove`** (Entscheidung 8). Zwei Zertifikate zu
+einer `authoritySubjectId` sind eine Person und erfüllen die Schwelle nicht. Höchstdauer
+900 000 ms (Entscheidung 4); abgelaufen ist `now > expires-at`. Alle Zielfelder müssen zu **einem**
+vollständig geprüften Escrow passen. Der tatsächliche Ziel-Transport-Public-Key MUSS kanonisches
+X25519 sein und dem autorisierten Abdruck gleichen, **bevor** der Recovery-Provider angesprochen
+wird.
 
-A crash after consumption and before durable encrypted output requires a fresh two-Approver authorization; the old authorization never runs again. A durable encrypted result may be retrieved idempotently by its exact authorization after fresh native reauthentication; retrieval cannot re-encrypt to a different key. Invalid/torn audit or output state remains an explicit failure. Never reset a consumption row to make a retry succeed.
+Alle drei Familien sind vom Registrierungsabschluss ausgenommen
+(`crates/ea-trust/src/admission.rs:230-240`, künftig fünf statt zwei Arme mit
+`TrustError::ActionMismatch`), sind kein zulässiges `target-trust-subtype` und tragen keinen Arm
+in `registry-change-v1`. `organization_of` im Server MUSS alle drei kennen
+(`crates/ea-sync-server/src/trust.rs:416-439`); heute antwortet es für unbekannte Subtypen `None`
+und würde ein Escrow ohne Organisationsprüfung indizieren.
 
-The browser opens the response only with its live transport private key, checks every AAD field and the recovered KEM public fingerprint, generates a **new Ed25519 key**, and creates a new Vault with two confirmed independent authenticators. It obtains a new normally authorized Reader certificate for the recovered KEM and new Ed25519 key. Existing old grants remain bound to their original certificates and are usable by matching the recovered KEM; new requests and audit use the new certificate. Losing the browser transport key before successful import requires a new opening authorization. All transient private values zero on success, lock and error.
+### 3.2 Warum `historicalGrantApprove` und keine achte Capability
 
-Certificate continuity does not rewrite a grant's original recipient certificate. Offline verification still validates that exact certificate and, for a historical grant, its original exact authorization and expiry. Server delivery authenticates the new active Reader signing certificate, then compares its canonical KEM thumbprint against the fully verified recipient certificate of the old grant. Equal KEM public keys establish the same content capability; a different KEM, an inactive new request signer or an unresolved original grant certificate is refused. No server credential-subject row replaces this public-key proof. Acceptance must cover restored Reader access through both ordinary and historical old grants, plus different-KEM and changed-certificate substitution failures.
+`CertificateCapability` ist eine geschlossene Siebener-Allowlist, und `TryFrom<&str>` ist
+fail-closed (`crates/ea-crypto/src/cose.rs:1811-1856`); angewandt wird sie beim Parsen **jedes**
+Signiererzertifikats (`:1962-1972`). Ein `KeyApprover`-Zertifikat mit einem neuen Literal würde von
+jedem v1-Konsumenten als Ganzes mit `SignerMismatch` abgewiesen — die Capability zöge also
+`deviceCertificate`, eine v1-Familie, in den Cutover. Der Baum kennt die Regel bereits in
+umgekehrter Richtung: ein neuer Content-Type erzeugt ausdrücklich **keine** achte Capability
+(`crates/ea-crypto/src/cose.rs:48-50`). Inhaltlich passt die bestehende: `PLAN5:52` weist
+`historicalGrantApprove` denselben Personen zu, und `WEBREADER:287-291` nennt das Escrow selbst
+als Ersatz des Historical Re-grant. Eine achte Capability wäre teurer und begründete nichts.
 
-## Cutover and acceptance
+## 4. Kryptografische Kontexte
 
-The authoritative CDDL, codec, crypto contexts, admission verifier, offline archive verifier, CLI, server transport/replication, browser WASM and Root-signed Reader bundle must ship together before enabling escrow emission. A deployment that cannot prove the complete profile support remains explicitly enrollment-blocked. No server-only switch can waive bundle/CLI support, and no compatibility parser ignores the new subtypes. Existing golden bytes and semantic results must be unchanged.
+`escrow-core-hash` ist SHA-256 über ASCII `EINSATZARCHIV-READER-KEY-ESCROW-CORE-v1` gefolgt vom
+exakten deterministischen CBOR des Cores. Bei der Prüfung wird nie reserialisiert.
 
-Acceptance includes independent golden vectors and malformed/arity/context negatives for both subtypes and the embedded approval; real browser generation and import; actual native publication/opening with signed durable SQLCipher audit; actual module-backed Recovery opening; complete offline verification without server data; live server admission plus replicate/export/import; a new Reader enrolled after original entries; target-key substitution; same-person approvals under two certificates; stale/current Registry separation; replay/concurrency/restart faults; canary scans through files/reports/DOM; and the complete fresh-machine Recovery/lifecycle gate. Browser bridge fakes are UI evidence only. Physical custody and installed minimum/maximum release cases remain Stage 7.
+HPKE bleibt Suite 1, RFC 9180 Base Mode. `info` und AAD werden **beide** in der Hausform gebildet
+— `hpke_info(cbor)` und `hpke_aad(cbor)` aus `crates/ea-crypto/src/digest.rs:263-276` — und der
+Familienunterschied steht als Suite-Literal **im CBOR**, genau wie bei `grant-context-v1`
+(`schemas/archive/v1/archive.cddl:24-35`). Es entsteht keine neue Domänenkonstante.
 
-Review must separately assess the embedded Admin specialization, pseudonymous identity authority, certificate continuity after audit-key replacement, and whether the capability/cutover gates can be bypassed through direct API or offline CLI paths.
+```cddl
+reader-key-escrow-hpke-context-v1 = [
+  1, organization-id: bstr .size 16,
+  reader-certificate-object-hash: bstr .size 32,
+  reader-subject-id: bstr .size 16,
+  enrollment-registry-version: uint,
+  enrollment-registry-head-hash: bstr .size 32,
+  recovery-certificate-object-hash: bstr .size 32,
+  recovery-kem-key-thumbprint: bstr .size 32,
+  "EINSATZARCHIV-READER-KEY-ESCROW-1", []
+]
+
+reader-key-escrow-restore-context-v1 = [
+  1, organization-id: bstr .size 16,
+  authorization-object-hash: bstr .size 32,
+  escrow-object-hash: bstr .size 32,
+  reader-certificate-object-hash: bstr .size 32,
+  reader-subject-id: bstr .size 16,
+  target-transport-key-thumbprint: bstr .size 32,
+  "EINSATZARCHIV-READER-KEY-ESCROW-RESTORE-1", []
+]
+```
+
+Der leere Extension-Slot ist Pflicht: eine AAD ohne ihn ist bei der nächsten Feldergänzung ein
+Bruch. Die Antwort der Öffnung trägt diese öffentliche Bindung, einen 32-Byte-Encapsulated-Key und
+ein 48-Byte-Chiffrat. Ihre Echtheit kommt aus HPKE plus der exakt geprüften Autorisierung; sie ist
+**keine** neue Trust-Familie.
+
+## 5. Zeremonie A — Publikation beim Enrollment
+
+Reihenfolge, als Ergänzung von `WEBREADER` §6.6 Schritt 5:
+
+1. Root signiert das Reader-Zertifikat; der Browser erhält den Zertifikatshash.
+2. Der Browser leitet den Public Key des privaten KEM ab, den er versiegelt, und verlangt
+   Gleichheit mit dem geprüften Reader-Zertifikat, **bevor** er ein Chiffrat erzeugt. Root erhält
+   nie Klartext.
+3. Der Browser bildet den Core und legt `escrow-core-hash` vor.
+4. Der Administrator signiert die `readerKeyEscrowApproval` über genau diesen Corehash.
+5. Root signiert die Escrow-Nutzlast, die den Objekthash der Freigabe nennt.
+
+Die Publikation verbraucht `authorization-id` und `nonce` der Freigabe in einem verschlüsselten
+append-only Repository, atomar mit ihrem signierten Audit und den vorbereiteten exakten
+Escrow-Bytes, bevor das Ergebnis der Root-Zeremonie zurückkehrt. Ein exakter Wiedereinspielversuch
+darf dieselben bereits publizierten Bytes zurückgeben; er darf keinen anderen Core autorisieren.
+Widersprüchliches Material zu derselben Autorisierung scheitert.
+
+**Cutover-Vorbedingung (MUSS, Entscheidung 9):** Vor der ersten Escrow-Publikation einer
+Organisation MUSS eine aktive `webBundleRelease` eines v1.1-fähigen Bundles gelten, deren
+`effective-from-registry-version` nicht größer ist als die Registry-Version der Publikation. Die
+Zeremonie hält diese Vorbedingung im Audit fest. Der Mechanismus liegt fertig da
+(`schemas/archive/v1/trust.cddl:200-205`, `crates/ea-reader/src/bundle_release.rs`,
+`WEBREADER` §4.2); ohne ihn ist das erste Escrow ein Verfügbarkeitskliff für jeden älteren
+Verifizierer, der am gesamten Trust-Store scheitert.
+
+## 6. Zeremonie B — Öffnung mit zwei Approvern
+
+Voraussetzung ist der Verlust **aller** Authenticators eines Readers (`WEBREADER` §7.5).
+
+1. Der Browser erzeugt ein flüchtiges X25519-Transport-Schlüsselpaar (Abschnitt 7) und zeigt
+   dessen Fingerprint.
+2. Zwei verschiedene Key Approver signieren die `readerKeyEscrowRecoveryAuthorization` über
+   Ziel-Identität, Zweck und diesen Fingerprint.
+3. Die Öffnung verlangt eine frische native Reauthentifizierung mit dem eigenen Zweck
+   `ReaderKeyEscrowRecovery`, gebunden an den exakten Autorisierungs-Objekthash und den
+   Transport-Fingerprint.
+4. Die Öffnung verbraucht `(organizationId, authorizationId)` und `(organizationId, nonce)` atomar
+   mit einem signierten lokalen Audit, **bevor** der private Provider angesprochen wird.
+5. Der Recovery-Schlüssel entkapselt das Escrow. Der Dienst prüft den entschlüsselten X25519-
+   Schlüssel gegen das Reader-Zertifikat des Escrows und versiegelt ihn unmittelbar per HPKE an
+   den Ziel-Transport-Key. Der einzige Rückgabewert ist der verschlüsselte Umschlag.
+6. Der Browser öffnet die Antwort nur mit seinem lebenden privaten Transport-Schlüssel, prüft
+   jedes AAD-Feld und den wiederhergestellten KEM-Fingerprint, erzeugt einen **neuen
+   Ed25519-Schlüssel** und einen neuen Vault mit zwei bestätigten unabhängigen Authenticators.
+
+Der Recovery-Port braucht dafür eine **zweite getypte Operation**: `RecoveryKem` ist heute auf
+`GrantV1` typisiert (`crates/ea-recovery/src/historical_grant.rs:62-66`), und ein Escrow ist kein
+`GrantV1`. Der PKCS#11-Unterbau trägt bereits generisch
+(`crates/ea-recovery/src/pkcs11_provider.rs:100-119`), das Routing liegt an einer Stelle
+(`crates/ea-recovery/src/resolved_key.rs:40`).
+
+Ed25519 statt X25519, fremde Organisation, geänderte Identität, ein ausgetauschtes Escrow, eine
+veraltete Enrollment-Bindung, Freigaben derselben Person, überzählige oder doppelte ungeprüfte
+Signaturen und abgelaufene Autorität geben nichts heraus.
+
+## 7. Der Transport-Schlüssel (Entscheidung 7)
+
+Die Zeremonie setzt voraus, dass alle Authenticators verloren sind. Der Vault-Wrap über
+WebAuthn-PRF (`WEBREADER` §6.2) steht damit **per Definition** nicht zur Verfügung. Das Review
+schlug einen nicht-extrahierbaren WebCrypto-Schlüssel vor; **am Baum trägt das nicht**: der
+Web-Reader benutzt `crypto.subtle` nirgends, jede Schlüsseloperation liegt in geteiltem Rust, und
+`apps/web/src/vault/webauthn-prf.ts` ist ausdrücklich die einzige Stelle des Bündels, durch die
+überhaupt ein Klartext-Schlüsselbaustein durch JavaScript läuft. Ein WebCrypto-Schlüssel wäre
+entweder nicht benutzbar (HPKE öffnet in WASM) oder verlangte eine neue Krypto-Naht an der
+sensibelsten Stelle des Systems.
+
+Normativ gilt deshalb:
+
+- Das Transport-Schlüsselpaar entsteht in geteiltem Rust und lebt als `SecretBytes<32>` im
+  linearen WASM-Speicher — dieselbe Ablage wie der Reader-KEM selbst
+  (`crates/ea-reader/src/vault.rs`).
+- Es wird **nie** persistiert: kein OPFS, kein IndexedDB, kein `localStorage`, kein Vault.
+- Es gilt für **genau eine** Zeremonie. Ein Neuladen der Seite vernichtet es und erzwingt eine
+  neue Autorisierung. Das ist kein Mangel, sondern die Frist.
+- Es wird bei Erfolg, Sperrung und Fehler genullt (`zeroize`), wie jeder andere flüchtige
+  Geheimwert des Readers.
+- Sein Fingerprint wird angezeigt und den Approvern vor der Signatur außerhalb des Systems
+  vorgelegt.
+- Es entsteht ausschließlich im aktivierten, Root-signierten, gepinnten Bundle (`WEBREADER` §4.2).
+
+Daraus folgt die Frist aus Entscheidung 4: 300 s zwingen zwei Menschen an Offline-Schlüsselmedien
+innerhalb von fünf Minuten zur Signatur, während die Seite offen bleiben muss. 900 s sind
+durchführbar, und die Replay-Härte kommt ohnehin aus dem dauerhaften Verbrauch, der
+Fingerprint-Bindung und der nativen Reauthentifizierung, nicht aus der Frist.
+
+## 8. Dauerhafter Zustand, Audit und Fehlerfälle
+
+Das Auditprofil ist keine additive Kleinigkeit, sondern eine Erweiterung dreier gekoppelter
+Stellen (`schemas/reports/v1/local-audit.cddl:3`, `:47-61`, `:64-76`, Kopie in `ADDENDUM:518-531`,
+Rust-Typ `crates/ea-format/src/local_audit.rs:772-789`). Festgeschrieben:
+
+```cddl
+local-audit-action-v1 = 0..14          ; 13 Publikation, 14 Öffnung
+
+reader-key-escrow-context-v1 = [
+  escrow-object-hash: bstr .size 32,
+  authorization-object-hash: bstr .size 32,
+  target-transport-key-thumbprint: (bstr .size 32) / null
+]
+reader-key-escrow-audit-context-v1 = [9, reader-key-escrow-context-v1]
+
+; local-audit-event-core-v1 wächst um:
+;   local-audit-event-core-for-v1<13, reader-key-escrow-audit-context-v1> /
+;   local-audit-event-core-for-v1<14, reader-key-escrow-audit-context-v1>
+```
+
+Aktion 13 trägt bei `target-transport-key-thumbprint` `null`; Aktion 14 trägt den Abdruck. Der
+Kontext trägt ausschließlich Hashes — kein PIN, kein Pfad, kein Klartext, kein Schlüssellabel.
+
+**Ergebnis und Verfall (Entscheidung 6).** Ein dauerhaftes verschlüsseltes Ergebnis darf durch
+seine exakte Autorisierung nach frischer nativer Reauthentifizierung idempotent abgeholt werden.
+Es wird nach der **ersten erfolgreichen Abholung gelöscht**; unabhängig davon verfällt es
+spätestens nach 86 400 000 ms. Beides steht im Audit. Ohne diese Regel ist die Idempotenz ein
+dauerhafter Nebenspeicher für Schlüsselmaterial.
+
+Ein Absturz nach dem Verbrauch und vor dem dauerhaften verschlüsselten Ergebnis verlangt eine
+frische Zwei-Approver-Autorisierung; die alte läuft nie wieder. Eine Abholung darf nie an einen
+anderen Schlüssel umverschlüsseln. Ungültiger oder zerrissener Audit- oder Ausgabezustand bleibt
+ein ausdrücklicher Fehlschlag. Eine Verbrauchszeile wird **nie** zurückgesetzt, damit ein Versuch
+gelingt.
+
+## 9. Cutover (GC:26)
+
+Gemeinsam umzuschalten sind Grammatik, Codec, Kryptokontexte, Admission-Verifizierer, Offline-
+Archivverifizierer, CLI, Server-Transport und -Replikation, Browser-WASM und das Root-signierte
+Reader-Bundle. Ein Deployment, das die vollständige Unterstützung nicht nachweisen kann, bleibt
+ausdrücklich enrollment-blockiert. Kein Server-Schalter hebt die Bundle- oder CLI-Unterstützung
+auf, und kein Kompatibilitätsparser überspringt die neuen Subtypen. Bestehende Golden Bytes und
+semantische Ergebnisse bleiben unverändert.
+
+Die vollständige Stellenliste steht im Review-Anhang von DRK-318, Abschnitt D. Über den Entwurf
+hinaus gehören ausdrücklich dazu:
+
+- `deviceCertificate` **nicht** — Entscheidung 8 hält die Capability-Allowlist unberührt.
+- `crates/ea-operator/src/session.rs:93-145`: zwölfter `ReauthPurpose`, `ALL: [Self; 12]`, Label.
+  Der Doc-Kommentar dort spricht heute von „elf Zwecke" und „ein elfter Zweck"; er zieht mit.
+- `crates/ea-sync-server/src/trust.rs:15-20`: der Kopfkommentar zählt „heute elf Arme", der Baum
+  hat dreizehn und bekommt sechzehn.
+- `DESIGN:953` (elf signierte Subtypen) und `ADDENDUM:301-304` (`trust-subtype-v1` mit elf Armen)
+  sind **schon vor diesem Ticket falsch** und werden unabhängig vom Escrow korrigiert.
+- `WEBREADER:339-341` verlangt für die Öffnung eine „`organizationAdminAuthorization`, signiert
+  von zwei verschiedenen Approvern". Das ist seit der Entscheidung vom 2026-08-17 überholt und
+  mit der Kardinalität 1 unvereinbar; der Satz wird auf die eigene Familie umgestellt.
+- `WEBREADER:325-329` nennt eine AAD aus drei Feldern; verbindlich sind die sieben aus
+  Abschnitt 4.
+- `WEBREADER` §6.6 Schritt 5 und §7.6 ziehen mit (Zweitescrow-Verbot, zweites Restrisiko).
+
+**Vektoren (Entscheidung 11).** Die Reserved-Pins sind Substring-Prüfungen über den gesamten
+Manifesttext (`tests/ea-system-tests/tests/conformance_golden_vectors.rs:2033`, `:2439-2446`;
+`crates/ea-testkit/src/lib.rs:7605-7612`), und alle drei neuen Namen enthalten das Literal
+`readerKeyEscrow`. Jeder Eintrag unter `vectors/trust/v1/` dreht beide Tests rot. Die
+Vektorfamilien liegen deshalb daneben — `vectors/reader-key-escrow/v1/`,
+`vectors/reader-key-escrow-approval/v1/` und `vectors/reader-key-escrow-recovery/v1/` — nach dem
+gebauten Vorbild `vectors/web-bundle/v1/` (`tools/xtask/src/main.rs:2135-2142`, `:2234`).
+Eintragsnamen kebab-case ohne die Literale; die Literale stehen ausschließlich in den hex-kodierten
+Objektbytes.
+
+## 10. Benannte Restrisiken
+
+1. **Zielgerät während der Zeremonie** (neu, ergänzt `WEBREADER` §7.6): der private
+   Transport-Schlüssel liegt ohne Authenticator-Schutz im Browser, weil der Vault per Definition
+   der Zeremonie nicht zur Verfügung steht. Ein in diesem Fenster kompromittiertes Browsergerät
+   erhält den privaten Reader-KEM und damit dauerhaften stillen Zugriff auf jeden Inhalt, für den
+   dieser Reader je einen Grant hatte. Gemindert durch Flüchtigkeit (Abschnitt 7), die
+   Ergebnislöschung (Entscheidung 6) und das gepinnte Bundle; technisch nicht ausschließbar.
+2. **Zurechenbarkeit nach der Wiederherstellung**: Zertifikatskontinuität läuft über Gleichheit
+   der KEM-Public-Keys. Ein Zugriffsangriff trägt darüber nicht — die Grants sind an diesen Public
+   Key gekapselt, und offline ordnet der Verifizierer ohnehin ausschließlich über den KEM-Abdruck
+   zu (`crates/ea-verify/src/recipient.rs:1-35`). Was bleibt, ist eine Auditlücke: der neue Reader
+   ist für den Altbestand nicht von der alten Person unterscheidbar. Das Öffnungsaudit ist die
+   einzige Brücke.
+3. **Böswilliger Custodian mit zwei kooperierenden Approvern** — unverändert `WEBREADER` §7.6.
+
+## 11. Abnahme
+
+Unabhängige Golden Vectors sowie Negativvektoren für Fehlform, Arität und Kontext für alle drei
+Subtypen; echte Browser-Erzeugung und -Einfuhr; echte native Publikation und Öffnung mit
+signiertem dauerhaftem SQLCipher-Audit; echte modulgestützte Recovery-Öffnung; vollständige
+Offline-Verifikation ohne Serverdaten; Live-Server-Admission samt Replikation, Export und Import;
+ein nach den ersten Einträgen neu enrollter Reader; Ziel-Schlüssel-Austausch; Freigaben derselben
+Person unter zwei Zertifikaten; Trennung veralteter und aktueller Registry; Replay-, Nebenläufigkeits-
+und Neustartfehler; Kanarienvogelsuche durch Dateien, Berichte und DOM; und das vollständige
+Fresh-Machine-Recovery-/Lebenszyklus-Gate. Zusätzlich verlangt dieses Profil ausdrücklich
+Negativzeugen für: eine abweichende Enrollment-Version, ein zweites Escrow zu derselben
+Subject-ID, ein zweites Escrow zu demselben Reader-Zertifikat, eine Publikation ohne aktive
+v1.1-`webBundleRelease`, eine Freigabe genau auf dem Randwert `expiresAt`, und ein Escrow mit
+fremder `organizationId` gegen `organization_of`.
+
+Browser-Bridge-Fakes sind ausschließlich UI-Beleg. Physische Verwahrung sowie installierte
+Mindest- und Höchstversionsfälle bleiben Stufe 7.
+
+## 12. Ledger
+
+`WR-075` (`docs/traceability/v0.1-requirements.csv:158`) bewegt sich erst, wenn die
+Fingerprint-Bindung aus Abschnitt 6 mit Zeugen steht; bis dahin bleibt die Zeile `planned` und
+wird im Stufe-5-Gate als dokumentierte Grenze geführt (`docs/traceability/stage-5-gate.md:341-348`,
+Pin-Tabelle `tools/xtask/tests/stage_gate.rs:554`, `:736-745`). Die Transport-Fingerprint-Anteile
+von `AK-47` und `AK-53` hängen an derselben Zusage. Jeder Statuswechsel zieht durch
+`tools/xtask/src/main.rs:1988`, `:2485-2506`, `:3408`, `:4148`.
