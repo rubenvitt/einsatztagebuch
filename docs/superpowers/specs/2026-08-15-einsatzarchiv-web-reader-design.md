@@ -268,7 +268,11 @@ Verpflichtende Gegenmaßnahmen:
 3. Die Anwendung zeigt Schlüssel-Fingerprint und Bundle-Fingerprint.
 4. Der Administrator vergleicht beide in der Desktop-Anwendung und autorisiert.
    Root signiert das Reader-Zertifikat.
-5. Im selben Vorgang entsteht das Escrow-Objekt nach Abschnitt 7.
+5. Im selben Vorgang entsteht das Escrow-Objekt nach Abschnitt 7 — **genau eines**.
+   Ein zweites gültiges Escrow zu demselben Reader-Zertifikat ist ungültig; ein
+   Ersatz nach erneutem Enrollment ist ein eigener benannter Vorgang. Die
+   Publikation verlangt zusätzlich eine `readerKeyEscrowApproval` und eine aktive
+   `webBundleRelease` eines v1.1-fähigen Bundles.
 6. Für Einträge vor dem Enrollment greift unverändert der reguläre Historical
    Re-grant nach Design §6.5.
 
@@ -322,23 +326,32 @@ Stufe 5 als v1.1 im selben Cutover wie die 2-of-N-Familie nach Abschnitt 7.5.
 
 ### 7.4 Bindung
 
-Das HPKE-Chiffrat bindet als AAD:
+Das HPKE-Chiffrat bindet als AAD mindestens:
 
 - Hash des Reader-Zertifikats,
 - pseudonyme `subjectId` des Readers,
 - Registry-Version zum Zeitpunkt des Enrollments.
 
-Damit ist ein Escrow-Blob weder auf eine andere Identität umhängbar noch in einen
-älteren Registry-Stand zurückspielbar.
+Damit ist ein Escrow-Blob nicht auf eine andere Identität umhängbar. Gegen das
+Zurückspielen in einen älteren Registry-Stand trägt die AAD allein **nicht** — eine
+selbst gewählte Zahl dokumentiert es nur. Verbindlich ist deshalb zusätzlich, dass
+die Enrollment-Felder dem Registry-Zustand gleichen, in dem das Reader-Zertifikat
+aktiv wurde. Die vollständige, siebenfeldrige AAD und ihre Hausform stehen im
+Escrow-Profil
+(`docs/superpowers/specs/2026-09-08-einsatzarchiv-reader-key-escrow-profile.md`,
+Abschnitt 4); diese drei Felder sind ihre Untermenge, nicht ihre Definition.
 
 ### 7.5 Öffnungszeremonie
 
 Die Öffnung erfordert:
 
 - physischen Zugriff auf den Recovery-KEM-Schlüssel,
-- eine `organizationAdminAuthorization`, signiert von zwei verschiedenen
-  Approvern, über die konkrete Ziel-Identität, den Zweck **und den Fingerprint
-  des Ziel-Transport-Public-Keys**,
+- eine `readerKeyEscrowRecoveryAuthorization`, signiert von zwei verschiedenen
+  Key Approvern, über die konkrete Ziel-Identität, den Zweck **und den Fingerprint
+  des Ziel-Transport-Public-Keys** (eigene 2-of-N-Familie nach der Entscheidung vom
+  2026-08-17; `organizationAdminAuthorization` bleibt bei Kardinalität 1, hart
+  indiziert in `crates/ea-trust/src/admin_authorization.rs:146-148`, und kann diese
+  Bindung nicht ausdrücken),
 - ein lokales Audit-Ereignis.
 
 Die Bindung des Transport-Public-Keys ist verpflichtend und folgt derselben Logik
@@ -369,6 +382,17 @@ tatsächlich alle Beteiligten kooperieren müssen und die ausführende Person al
 nicht genügt. Darüber hinaus gelten die organisatorischen Maßnahmen, die das
 Design ohnehin fordert: getrennte Personen, physisch kontrollierte
 Schlüsselmedien, Audit, geführter Recovery-Test.
+
+**Zweites Restrisiko: das Zielgerät.** Die Zeremonie greift per Definition erst,
+wenn alle Authenticators verloren sind — der Vault-Wrap aus Abschnitt 6.2 steht
+also nicht zur Verfügung, und der private Transport-Schlüssel liegt ohne
+Authenticator-Schutz im Browser. Ein in diesem Fenster kompromittiertes Browsergerät
+erhält den privaten Reader-KEM-Schlüssel und damit stillen Dauerzugang zu jedem
+Inhalt, für den dieser Reader je einen Grant hatte. Gemindert wird das durch drei
+MUSS-Regeln des Escrow-Profils: der Transport-Schlüssel ist flüchtig und wird
+niemals persistiert, das dauerhafte Öffnungsergebnis wird nach der ersten Abholung
+gelöscht, und die Zeremonie läuft ausschließlich im aktivierten, Root-signierten
+Bundle nach Abschnitt 4.2. Technisch ausschließbar ist es nicht.
 
 ## 8. Lokaler Index, Suche und Export
 

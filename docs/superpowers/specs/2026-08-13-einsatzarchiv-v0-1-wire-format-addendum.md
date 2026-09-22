@@ -328,8 +328,14 @@ etb-body-v1 =
   ["deletionAttestation", deletion-attestation-core-v1, [+ cose-sign1-v1]]
 ```
 
-`schemas/archive/v1/trust.cddl` fixiert die Arraypositionen aller elf Core-Typen
-und wird hier vollständig normativ einbezogen. Die Integerregister sind:
+`schemas/archive/v1/trust.cddl` fixiert die Arraypositionen dieser Core-Typen und
+wird hier vollständig normativ einbezogen. **Stand dieser Aufzählung ist v1.** Der
+Baum trägt seit Stufe 4 zusätzlich `webBundleRelease` und `webBundleRevocation` in
+der direkten, wurzelsignierten Gestalt; der v1.1-Cutover fügt `readerKeyEscrow`,
+`readerKeyEscrowApproval` und `readerKeyEscrowRecoveryAuthorization` hinzu
+(`docs/superpowers/specs/2026-09-08-einsatzarchiv-reader-key-escrow-profile.md`).
+Die hier eingefrorenen v1-Bytes ändern sich dadurch nicht; maßgeblich für den
+aktuellen Umfang von `trust-subtype-v1` ist die Schemadatei. Die Integerregister sind:
 
 - `certificate-kind-v1`: 0 writer, 1 reader, 2 organizationAdmin,
   3 keyApprover, 4 recoveryRecipient, 5 historicalGrantAuthority,
