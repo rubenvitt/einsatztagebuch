@@ -35,6 +35,22 @@
 
   **Beide Vorentscheidungen sind getroffen** (Pre-flight in `docs/superpowers/plans/2026-08-16-einsatzarchiv-web-reader-stage-1-prerequisites.md`): erstens die Form der Zwei-Approver-Autorisierung — ENTSCHIEDEN 2026-08-17: eigene 2-of-N-Familie als v1.1, `organizationAdminAuthorization` bleibt bei Kardinalität 1; zweitens der Ablageort des Escrow-Chiffrats — ENTSCHIEDEN 2026-08-28 (DRK-213): Root-signiertes Trust-Objekt `readerKeyEscrow` in `trust/` des Archivs, repliziert und exportiert wie jedes Trust-Objekt; der Begriff „Administrationszone" ist aus Spec §7.3 gestrichen. Begründung dort: das Chiffrat öffnet nur der Recovery-KEM-Schlüssel, der jeden replizierten Recovery-Grant ohnehin entkapselt — die Replikation schafft keine neue Fähigkeit. Beide neuen Objektarten kommen in DIESEM Stage im selben v1.1-Cutover. Reihenfolge beim Enrollment: Root signiert das Reader-Zertifikat, der Browser erhält den Zertifikat-Hash, versiegelt den X25519-Schlüssel per HPKE mit der AAD nach §7.4, und Root signiert danach das `readerKeyEscrow`-Objekt.
 
+  **ENTSCHIEDEN — das Escrow-v1.1-Profil.** Die menschliche Entscheidung vom 2026-09-22 (DRK-318)
+  legt fest, nach unabhängigem normativem und Security-Review des Entwurfs vom 2026-09-08: es
+  entstehen **drei** direkte Trust-Familien — `readerKeyEscrow` (Root-signiert),
+  `readerKeyEscrowApproval` (die Publikationsfreigabe eines Administrators als eigenes,
+  adressierbares Objekt) und `readerKeyEscrowRecoveryAuthorization` (2-of-N Key Approver). Die
+  eingebettete Admin-Freigabe des Entwurfs ist VERWORFEN; ebenso Aktion 7 und Root-only.
+  `root_trust_bindings` und die eingefrorene Aktionstabelle bleiben unberührt, weil keine der drei
+  Familien `authorized-trust-payload-v1<T>` benutzt. Die Zwei-Approver-Signatur trägt
+  `historicalGrantApprove`; eine achte Capability entsteht NICHT, damit `deviceCertificate` aus dem
+  Cutover bleibt. `(organizationId, readerSubjectId)` ist erzwungen eindeutig, und je
+  Reader-Zertifikat existiert höchstens EIN gültiges Escrow. Fristen: Publikationsfreigabe 300 s,
+  Öffnungsautorisierung 900 s, Randsemantik inklusiv wie im Bestand. Der Ziel-Transport-Schlüssel
+  ist flüchtig in geteiltem Rust und wird nie persistiert — der Web-Reader benutzt `crypto.subtle`
+  nirgends. Vollständig normativ in
+  `docs/superpowers/specs/2026-09-08-einsatzarchiv-reader-key-escrow-profile.md`.
+
   **Cutover:** Das erste Enrollment, das ein Objekt einer neuen Trust-Familie in den Bestand legt, lässt jeden älteren Verifizierer am gesamten Trust-Store scheitern (`crates/ea-format/src/etb.rs:45` liefert bei unbekanntem Subtype `FormatError`, `crates/ea-trust/src/catalog.rs:50-55` propagiert das für den kompletten Katalog). Die Cutover-Regel MUSS vor diesem Stage entschieden sein.
 - **Merker Stale-Registry-Quittung (Ruling R62 vom 2026-08-28)**: Die dauerhafte signierte Einmal-Quittung für die Fortsetzung unter einem veralteten Registry-Kopf gehört in DIESE Stufe. Das Gate-Bullet `docs/superpowers/plans/2026-08-13-einsatzarchiv-v0-1.md:358` hatte sie der Stufe 2 zugeschrieben; Stufe 2 hat nur die Erkennung mit fail-closed-Ausgang geliefert (`crates/ea-writer/tests/stale_registry_warning.rs::a_head_that_expires_while_bound_is_acknowledgeable_and_blocks_fail_closed`, `::an_overdue_refresh_deadline_warns_without_blocking`). Zu bauen sind hier: `WriterService::acknowledge_stale_registry` im Kern, die dauerhafte Einmal-Quittung als signiertes Auditobjekt (einmalig verwendbar, Replay abgewiesen) und die Verdrahtung des Wirtsstummels `writer_acknowledge_stale_registry`, der heute `EA-DESKTOP-STALE-ACK-UNAVAILABLE` meldet. Ledgeranker: `AK-24` `v1` auf Stufe 5, Status `planned`. Begründung und Belege: `docs/traceability/stage-2-nacharbeit-2026-08-28.md`.
 - **Merker Auflösungspfade der Stufe 2 (2026-08-28)**: Zwei fail-closed-Blockaden der Stufe 2 haben ihren Auflösungspfad in DIESER Stufe, weil beide eine Administrationshandlung verlangen. Erstens eine sich selbst widersprechende Abschlussmarke: `crates/ea-writer/src/recover.rs` weist sie mit `EA-WRITER-PREPARED-FINALIZATION-INCONSISTENT` ab, und `recover_pending` scheitert für diesen Bestand danach dauerhaft (Zeugen in `crates/ea-writer/tests/prepared_recovery.rs`). Zweitens eine liegengebliebene Sperrdatei, deren Übernahme zwar automatisch gelingt, deren Diagnose aber kein Werkzeug führt. Beides ist zu streng und nicht zu lax, ohne Datenverlust, aber jeweils ein manueller Schritt.
@@ -42,7 +58,7 @@
 - Non-goals are fixed: no live incident log, dispatch/alarm/control-center integration, patient record or identifying patient data, concurrent offline Writers, normal-app mutation/deletion of finalized content, AI summarization/OCR, public links, server-side content search, unprofiled network paths, qualified personal electronic signature, TR-ESOR certification claim, screenshot/transcription prevention, or cryptographic recall of already decrypted data.
 - Product invariants apply verbatim: exactly one active Writer; never-reused predecessor-bound sequences; immutable `.eip` bytes except whole-object authorized replacement by `.eds`; amendment-only corrections; one fresh CEK/ciphertext; one signed grant per recipient; exactly one active Recovery grant before commit; no Reader/Recovery/HGA/Approver private key on Writer; no retained CEK/decryptable draft key; no server decrypt/grant key; server-independent archive verification; independent schema/format/suite versions with old bytes unchanged; separate Sync/verification/Evidence/Entry/destruction statuses; no legal overclaim from a hash chain; every active Reader initially granted; external-anchor recovery; and only Root-signed OS/device-bound operator snapshots.
 - Exactly one active Writer exists. Trust, Registry, policy, revocation, and Writer changes are append-only Root-signed objects; database/config flags cannot grant authority.
-- Every post-bootstrap Root ceremony binds a valid `organizationAdminAuthorization`; Root-only and Admin-only are invalid. Initial exception is limited to the independently pinned Root certificate and at least two exactly paired Admin certificate/operator-binding pairs.
+- Every post-bootstrap Root ceremony that changes **registry-effective** Trust state binds a valid `organizationAdminAuthorization`; there, Root-only and Admin-only are invalid. Direct, Root-signed object kinds **without** Registry effect are enumerated exhaustively: `webBundleRelease`, `webBundleRevocation`, `readerKeyEscrow`. They are no valid `target-trust-subtype`, carry no arm in `registry-change-v1`, and are no subject of the admission check (`schemas/archive/v1/trust.cddl:195-199`, `crates/ea-crypto/src/cose.rs:1612-1659`, `crates/ea-trust/src/admission.rs:230-240`). Corrected 2026-09-22 (DRK-318): the earlier blanket sentence had been untrue since `webBundleRelease` shipped, independently of the escrow. Initial exception is limited to the independently pinned Root certificate and at least two exactly paired Admin certificate/operator-binding pairs.
 - At least two active Admin keys and two appropriate Key Approvers exist before production. An Admin cannot self-authorize its own rotation; losing every Admin has no Root-only bypass.
 - Admin and Key-Approver personhood is the stable 16-byte
   `authoritySubjectId`, never certificate/device/thumbprint identity. Each Admin
@@ -1912,9 +1928,9 @@ Pfade und die Testskizze; keine Zusage entfällt.
   Doppelverbrauch, normaler Reopen) und unabhängigem Security-Review; die
   Unknown-Erweiterung ist ein eigener Schritt.
   (3) Escrow-v1.1-Profil
-  (`docs/superpowers/specs/2026-09-08-einsatzarchiv-reader-key-escrow-profile.md:3`,
-  Status „proposed") ist in das Folgeticket DRK-318 verschoben (Security-Review vor
-  Code). E1/E2 haben in diesem Plan keinen eigenen Task-Abschnitt; ihre Abnahme und
+  (`docs/superpowers/specs/2026-09-08-einsatzarchiv-reader-key-escrow-profile.md`)
+  ist in das Folgeticket DRK-318 verschoben. Review und Freigabe sind dort am
+  2026-09-22 erfolgt; das Profil ist seither verbindlich, die Umsetzung steht aus. E1/E2 haben in diesem Plan keinen eigenen Task-Abschnitt; ihre Abnahme und
   die Reihenfolge „E1/E2 precede T14" stehen in
   `docs/superpowers/plans/2026-09-08-drk-250-runtime-closure.md:83-91`. Bis DRK-318
   bleibt WR-075 `planned`, und dieses Gate kann nicht vollständig schließen.
