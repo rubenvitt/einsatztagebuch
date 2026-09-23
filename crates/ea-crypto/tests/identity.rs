@@ -2494,6 +2494,22 @@ fn reader_key_escrow_approval_core(
     issued_at: i64,
     expires_at: i64,
 ) -> Vec<u8> {
+    reader_key_escrow_approval_core_naming_admin_key(
+        fixture_public_key().thumbprint().as_bytes(),
+        admin_certificate_hash,
+        issued_at,
+        expires_at,
+    )
+}
+
+/// Wie [`reader_key_escrow_approval_core`], aber mit frei gewähltem
+/// `admin-key-thumbprint` (Position 6).
+fn reader_key_escrow_approval_core_naming_admin_key(
+    admin_key_thumbprint: &[u8],
+    admin_certificate_hash: CertificateHash,
+    issued_at: i64,
+    expires_at: i64,
+) -> Vec<u8> {
     let mut bytes = Vec::new();
     Encoder::new(&mut bytes)
         .array(16)
@@ -2503,7 +2519,7 @@ fn reader_key_escrow_approval_core(
         .and_then(|encoder| encoder.u8(3))
         .and_then(|encoder| encoder.bytes(&[0x44; 32]))
         .and_then(|encoder| encoder.u8(5))
-        .and_then(|encoder| encoder.bytes(fixture_public_key().thumbprint().as_bytes()))
+        .and_then(|encoder| encoder.bytes(admin_key_thumbprint))
         .and_then(|encoder| encoder.bytes(admin_certificate_hash.as_bytes()))
         .and_then(|encoder| encoder.bytes(&[0x48; 32]))
         .and_then(|encoder| encoder.bytes(&[0x49; 32]))
@@ -2622,6 +2638,43 @@ fn the_escrow_approval_context_admits_only_the_named_organization_admin() {
             &VerificationContext::reader_key_escrow_approval_trust_digest(&input).unwrap(),
         )
         .is_err()
+    );
+}
+
+/// Review (a) F3: der Freigabe-Kontext bindet den im Kern benannten
+/// `admin-key-thumbprint` an den Schlüssel der Signatur. Zertifikat, Rolle,
+/// Capability und Signatur stimmen; nur der Kern nennt einen anderen Abdruck.
+#[test]
+fn the_escrow_approval_context_binds_the_admin_key_thumbprint_of_the_core() {
+    let admin_certificate = device_certificate_bytes_with_profile_and_authority(
+        &fixture_public_key(),
+        2,
+        &["organizationAdminApprove"],
+        Some(fixture_authority_subject(0xa2)),
+    );
+    let admin_certificate_hash = CertificateHash::from(object_hash(&admin_certificate));
+    let foreign_thumbprint = [0x47; 32];
+    assert_ne!(
+        fixture_public_key().thumbprint().as_bytes(),
+        &foreign_thumbprint
+    );
+    let input = trust_digest_input(
+        "readerKeyEscrowApproval",
+        &reader_key_escrow_approval_core_naming_admin_key(
+            &foreign_thumbprint,
+            admin_certificate_hash,
+            1_000,
+            301_000,
+        ),
+    );
+    assert_eq!(
+        verify_cose_sign1(
+            &escrow_signed_normal(admin_certificate_hash, &input),
+            &resolver_for_certificate(admin_certificate),
+            &VerificationContext::reader_key_escrow_approval_trust_digest(&input).unwrap(),
+        )
+        .unwrap_err(),
+        CryptoError::SignerMismatch
     );
 }
 
