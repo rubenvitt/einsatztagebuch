@@ -713,7 +713,7 @@ impl TrustEventValidator for PostgresTrustAuthority {
                 now,
             )
             .map_err(|error| TrustPublishError::from(map_escrow_admission_error(error)))?;
-            escrow_cutover_gate(&prepared, exact_etb_bytes, &admission)?;
+            escrow_cutover_gate(&prepared, head.as_ref(), exact_etb_bytes, &admission)?;
             return self.fenced(organization_id, before).await;
         }
 
@@ -1053,12 +1053,17 @@ const fn map_escrow_admission_error(error: TrustError) -> TrustServiceError {
 /// Öffnung braucht kein eigenes Tor: sie verlangt ein gültiges Escrow im
 /// Katalog, und das kam nur durch diese Sperre hinein.
 ///
-/// Solange keine Freigabe den Katalog erreicht — bis Scheibe (f) gibt es
-/// keinen Annahmeweg für `webBundleRelease` —, bleibt die Annahme zu:
+/// Die Sperre gilt ZUSÄTZLICH zum aktuellen Kopf (review-d P3-1): ein
+/// Widerruf, der erst nach der Freigabe wirkt, hält ein später eingereichtes
+/// Escrow auf, obwohl die Freigabe historisch hinter einer offenen Sperre
+/// stand. Ohne Kopf hält sie zu.
+///
+/// Solange keine v1.1-fähige Freigabe wirkt, bleibt die Annahme zu:
 /// 422 NOT-VALID-NOW. `UNVERIFIABLE` hieße, die geteilte Prüfung könne
 /// über das Objekt nichts sagen; sie hat es aber geprüft.
 fn escrow_cutover_gate(
     prepared: &PreparedClosure,
+    head: Option<&SelectedRegistryHead>,
     exact_etb_bytes: &[u8],
     admission: &ReaderKeyEscrowAdmission,
 ) -> Result<(), TrustServiceError> {
@@ -1085,9 +1090,14 @@ fn escrow_cutover_gate(
         return Err(TrustServiceError::EventInvalid);
     };
     let catalog: Vec<&[u8]> = prepared.source.0.values().map(AsRef::as_ref).collect();
-    reader_key_escrow_cutover_release(&prepared.anchor, &catalog, approval.registry_version)
-        .map(|_| ())
-        .map_err(|_| TrustServiceError::EventNotYetOrNoLongerValid)
+    let open_at = |version: RegistryVersion| {
+        reader_key_escrow_cutover_release(&prepared.anchor, &catalog, version)
+            .map(|_| ())
+            .map_err(|_| TrustServiceError::EventNotYetOrNoLongerValid)
+    };
+    open_at(approval.registry_version)?;
+    let head = head.ok_or(TrustServiceError::EventNotYetOrNoLongerValid)?;
+    open_at(head.registry_version())
 }
 
 fn decoded_payload(exact_etb_bytes: &[u8]) -> Option<DecodedTrustPayloadV1> {

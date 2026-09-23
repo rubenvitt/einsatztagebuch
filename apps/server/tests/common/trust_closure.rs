@@ -130,6 +130,7 @@ const SECOND_READER_DEVICE_ID: [u8; 16] = [0xe4; 16];
 const HISTORICAL_GRANT_AUTHORITY_DEVICE_ID: [u8; 16] = [0xe5; 16];
 const APPROVER_A_DEVICE_ID: [u8; 16] = [0xe6; 16];
 const APPROVER_B_DEVICE_ID: [u8; 16] = [0xe7; 16];
+const LATE_READER_DEVICE_ID: [u8; 16] = [0xe9; 16];
 /// Die pseudonyme Betreiberkennung eines Approver-Zertifikats.
 ///
 /// `Some` gilt GENAU fuer die Arten 2 und 3 — Organisationsadministrator und
@@ -1191,6 +1192,41 @@ pub fn escrow_recovery_authorization(
     ea_testkit::reader_key_escrow_fixture::signed_reader_key_escrow_recovery_authorization(
         &recovery, &signers,
     )
+}
+
+/// Ein weiterer Kopf NACH dem Abschluss: er aktiviert ein drittes
+/// Reader-Zertifikat und hebt die Registry-Version um eins. Seine Leihe
+/// beginnt eine Sequenz nach der Escrow-Basis und reicht bis zum Ende der
+/// Leihe des Abschlusses. Zurück kommen die vier Objekte in
+/// Abhängigkeitsreihenfolge.
+#[must_use]
+pub fn late_reader_transition(closure: &ExtendedClosure) -> Vec<ClosureObject> {
+    let context = frozen_context();
+    let from = escrow_basis_sequence(closure) + 1;
+    certificate_transition(
+        &context,
+        device_fields(
+            &context,
+            LATE_READER_DEVICE_ID,
+            CertificateKindV1::Reader,
+            Some([0xdb; 32]),
+            Some([0xdc; 32]),
+            Vec::new(),
+            from,
+            None,
+        ),
+        closure.registry_version.get(),
+        closure.registry_head_hash,
+        (from, LEASE_THROUGH_SEQUENCE),
+        0x70,
+        [
+            "late-reader-certificate-authorization",
+            "late-reader-certificate",
+            "late-reader-head-authorization",
+            "late-reader-head-event",
+        ],
+    )
+    .objects
 }
 
 /// Eine wurzelsignierte `webBundleRelease` dieser Organisation.
