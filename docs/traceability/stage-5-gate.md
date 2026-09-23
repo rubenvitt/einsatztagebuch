@@ -311,7 +311,7 @@ Produkthaelfte dieser Zeilen und senkt keine auf `implemented`.
 | `FR-121` | implemented | Derselbe Zeuge liest Original-ID, -Hash, Sequenz, Grund und Ersteller aus verifizierten Bytes; in-process |
 | `FR-123` | implemented | Derselbe Zeuge, Originalbytes identisch; in-process |
 | `FR-124` | implemented | Derselbe Zeuge, zwei Nachtraege; in-process |
-| `WR-075` | integrated | Systemziel `e2e_reader_key_escrow.rs` gegen den echten Server (DRK-318); offen sind nur benannte Grenzen, keine Produkthaelfte der Zeile (siehe `## Dokumentierte Grenzen`) |
+| `WR-075` | integrated | Systemziel `e2e_reader_key_escrow.rs` in-process über die echten Serveradapter (PostgreSQL, Object Store), die HTTP-Annahme bezeugt `test:server` (DRK-318); offen sind nur benannte Grenzen, keine Produkthaelfte der Zeile (siehe `## Dokumentierte Grenzen`) |
 
 Die Belegspalte jeder bewegten Zeile nennt die Zeugen aus Abschnitt 1 bzw. der
 Tabelle unten im Stil der Stufe-4-Zeilen (`Datei::Test; kurze Aussage`);
@@ -343,7 +343,7 @@ Bericht.
 | FR-121 | Original-ID/-Hash, Grund, Ersteller | `crates/ea-admin/tests/amendment.rs::amendment_finalization_preserves_original_bytes_and_reader_keeps_multiple_amendments` (1/0/0) liest Original-ID, Original-Hash, Sequenz, Grund und Ersteller aus den verifizierten und entschluesselten Bytes (`9d3716f`) |
 | FR-123 | Original nicht aendern/verbergen | `crates/ea-admin/tests/amendment.rs` (1/0/0) — Originalbytes vor und nach dem Nachtrag identisch, der Reader zeigt Original und Nachtraege gemeinsam |
 | FR-124 | Mehrere Nachtraege unterstuetzen | `crates/ea-admin/tests/amendment.rs` (1/0/0) — zwei Nachtraege auf dasselbe Original, der Reader haelt beide (`amendments().len() == 2`) |
-| WR-075 | Re-Encryption nur bei Uebereinstimmung mit dem gebundenen Transport-Key-Fingerprint | `tests/ea-system-tests/tests/e2e_reader_key_escrow.rs::publish_admit_export_import_and_reopen_a_reader_key_escrow` (1/0/0, mit `xtask integration up`): Freigabe, Publikationsfreigabe und Escrow gegen den echten Server, Export und Einfuhr in ein frisches Verzeichnis mit identischem Bericht, Öffnung nur an den gebundenen Transport-Key, ein fremder Schlüssel wird vor HPKE und ohne Verbrauch abgewiesen. Dazu `crates/ea-trust/tests/reader_key_escrow_recovery.rs`, `crates/ea-recovery/tests/reader_key_escrow.rs` (mit `--features pkcs11-fixture` 106/0/0 im Crate), `crates/ea-admin/tests/reader_key_escrow_publication.rs`, `crates/ea-admin/tests/web_bundle_release.rs`, `apps/cli/tests/operator_escrow/mod.rs` unter `process_native::escrow::` (12/0/0, mit `pkcs11-fixture` 13/0/0) und `apps/web/tests/e2e/reader-key-escrow.spec.ts` (4/0/0, Chromium) |
+| WR-075 | Re-Encryption nur bei Uebereinstimmung mit dem gebundenen Transport-Key-Fingerprint | `tests/ea-system-tests/tests/e2e_reader_key_escrow.rs::publish_admit_export_import_and_reopen_a_reader_key_escrow` (1/0/0, mit `xtask integration up`): Freigabe, Publikationsfreigabe und Escrow in-process über `publish_trust_event` gegen die echten Serveradapter (PostgreSQL, Object Store), Export und Einfuhr in ein frisches Verzeichnis mit identischem Bericht, Öffnung nur an den gebundenen Transport-Key; ein Öffnungsversuch mit fremdem Schlüssel wird abgewiesen, und NACH ihm ist nichts verbraucht. Beide Zeremonien laufen dort über ihre `test-support`-Eingänge mit Stubs für Reauthentifizierung und Sitzung. Die HTTP-Annahme bezeugt `test:server` (`apps/server/tests/auth_trust_api.rs::an_escrow_family_is_admitted_through_its_own_entry`, `apps/server/tests/read_apis.rs`, `apps/server/tests/export_api.rs`); echte Sitzung, echten Verbrauch und die Abweisung vor HPKE bezeugen `crates/ea-admin/tests/reader_key_escrow_opening.rs::a_foreign_or_non_canonical_transport_key_is_refused_before_consumption` und `apps/cli/tests/operator_escrow/mod.rs::reader_key_escrow_pickup_refuses_another_transport_key`. Die Offline-Kontinuität über den KEM-Abdruck bezeugt `crates/ea-verify/tests/reader_key_escrow_continuity.rs`. Dazu `crates/ea-trust/tests/reader_key_escrow_recovery.rs`, `crates/ea-recovery/tests/reader_key_escrow.rs` (mit `--features pkcs11-fixture` 106/0/0 im Crate), `crates/ea-admin/tests/reader_key_escrow_publication.rs`, `crates/ea-admin/tests/web_bundle_release.rs`, `apps/cli/tests/operator_escrow/mod.rs` unter `process_native::escrow::` (12/0/0, mit `pkcs11-fixture` 13/0/0) und `apps/web/tests/e2e/reader-key-escrow.spec.ts` (4/0/0, Chromium) |
 
 ## Dokumentierte Grenzen
 
@@ -404,6 +404,40 @@ Keine davon ist eine Produkthälfte von WR-075; jede steht auch im PR.
    eine ANDERE aktive Freigabe" und das Scheitern der Nachprüfung nach dem
    Commit haben keinen eigenen Zeugen; scheitert die Verteilung nach dem
    Commit, heilt sie erst das exakte Wiedereinspielen.
+10. Öffnungsergebnis: die Kopie des Umschlags im Ausgangsverzeichnis wird
+    nicht gelöscht. Ein nicht ausgeliefertes, verschlüsseltes Ergebnis im
+    Ledger löscht erst der Verfall beim nächsten Escrow-Kommando; läuft nie
+    wieder eines, bleibt es verschlüsselt liegen.
+11. Browser-Nachweise aus Folgerung statt Verhalten: dass die Öffnung im
+    Reader `require_escrow_binding` durchläuft, hat keinen Verhaltenszeugen
+    (die Regel selbst hat einen Einheitszeugen, die Signatur ohne freie
+    Parameter trägt die Bindung). Dass der restaurierte KEM genullt wird, ist
+    aus `ZeroizeOnDrop` gefolgert, nicht gemessen.
+12. `organization_of` am Server liefert für `policy`, `writerTransition`,
+    `grantAuthorization` und `destructionAuthorization` weiter `None`; diese
+    Subtypen bleiben bei der geteilten Prüfung (fremde Organisation dort 422
+    statt 403). `destructionTransition` und `deletionAttestation` tragen kein
+    eigenes `organizationId`. Umstellung ist ein Folgeticket (Entscheidung O4
+    aus Scheibe d).
+13. Ein Archiv MIT gültigem Escrow, dessen Katalog-Linie offline nicht bis
+    zur Spitze nachspielbar ist (Lücke, Fork, reiner Zukunftskopf), scheitert
+    an Gate `trust`, obwohl `verify_trust` allein trägt; dasselbe Archiv ohne
+    Escrow-Familienobjekt trägt (F1). Der Server nimmt weder Lücken noch Forks
+    an, betroffen sind nur unvollständige oder manipulierte Offline-Kopien,
+    und dort ist fail-closed gewollt. Zeugen:
+    `crates/ea-verify/tests/reader_key_escrow.rs::a_valid_escrow_over_a_line_that_is_not_replayable_offline_seals_the_report_at_trust`
+    und die Kontrolle `a_catalog_without_escrow_objects_carries_the_trust_gate`.
+14. Die Fresh-Machine-Abnahme (Profil §11) ist für das Escrow nur als
+    Regression belegt: `e2e_recovery_fresh_machine` und
+    `e2e_organization_lifecycle` laufen grün, enthalten aber kein Escrow; die
+    Einfuhr in ein frisches Verzeichnis im Systemziel ist keine
+    Fresh-Machine-Recovery.
+15. `effective-from` der Bundle-Freigabe: nur die native Zeremonie weist
+    einen Wert unter der Kopfversion ab, die Serverannahme
+    (`verify_web_bundle_family_admission`) prüft das nicht. Das ist eine
+    Asymmetrie, keine Lücke: einziger Erzeuger ist die Root, und ob eine
+    Freigabe die Sperre öffnet, entscheidet
+    `reader_key_escrow_cutover_release` zum jeweiligen Stand.
 
 **DRK-320 (Controlled-Network-Archiv) ist eine dokumentierte Grenze und
 bekommt KEINE eigene Ledgerzeile.** Ruling Ruben vom 2026-09-15. Begruendung:
