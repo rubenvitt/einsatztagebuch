@@ -868,6 +868,15 @@ pub fn reader_key_escrow_approval_v1_manifest() -> VectorManifest {
             rejected(SHAPE),
         ),
         object_entry(
+            "object/rejected-approval-lifetime-zero",
+            signed(&replace_once(
+                &payload,
+                &expires_field(APPROVAL_LIFETIME_MS),
+                &expires_field(0),
+            )),
+            rejected(SHAPE),
+        ),
+        object_entry(
             "object/rejected-approval-lifetime-over-limit",
             signed(&replace_once(
                 &payload,
@@ -946,6 +955,11 @@ pub fn reader_key_escrow_recovery_v1_manifest() -> VectorManifest {
         field.extend_from_slice(&(RECOVERY_ISSUED_AT_MS + lifetime).to_be_bytes());
         field
     };
+    let mut short_escrow_hash_from = vec![0x58, 0x20];
+    short_escrow_hash_from.extend_from_slice(chain.recovery_core.escrow_object_hash.as_bytes());
+    let mut short_escrow_hash_to = vec![0x58, 0x1f];
+    short_escrow_hash_to
+        .extend_from_slice(&chain.recovery_core.escrow_object_hash.as_bytes()[..31]);
 
     let restore_info = hpke_info(&chain.restore_context);
     let restore_aad = hpke_aad(&chain.restore_context);
@@ -999,6 +1013,24 @@ pub fn reader_key_escrow_recovery_v1_manifest() -> VectorManifest {
                 &expires_field(
                     ea_crypto::READER_KEY_ESCROW_RECOVERY_AUTHORIZATION_MAX_LIFETIME_MS + 1,
                 ),
+            )),
+            rejected(SHAPE),
+        ),
+        object_entry(
+            "object/rejected-recovery-authorization-lifetime-zero",
+            signed(&replace_once(
+                &payload,
+                &expires_field(RECOVERY_LIFETIME_MS),
+                &expires_field(0),
+            )),
+            rejected(SHAPE),
+        ),
+        object_entry(
+            "object/rejected-recovery-authorization-escrow-object-hash-short",
+            signed(&replace_once(
+                &payload,
+                &short_escrow_hash_from,
+                &short_escrow_hash_to,
             )),
             rejected(SHAPE),
         ),
@@ -1278,8 +1310,8 @@ mod tests {
     fn the_reader_key_escrow_generators_keep_their_names_free_of_the_subtype_literals() {
         for ((relative, manifest), (family, count, accepted)) in families().into_iter().zip([
             ("reader-key-escrow", 14, 6),
-            ("reader-key-escrow-approval", 10, 2),
-            ("reader-key-escrow-recovery", 10, 4),
+            ("reader-key-escrow-approval", 11, 2),
+            ("reader-key-escrow-recovery", 12, 4),
         ]) {
             let generated = manifest();
             assert_eq!(generated.family, family, "{relative}");
