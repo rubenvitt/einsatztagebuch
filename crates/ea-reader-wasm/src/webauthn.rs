@@ -1,5 +1,12 @@
-//! Das Browser-Enrollment: GENAU FUENF Ausfuhren, und keine gibt
+//! Das Browser-Enrollment: GENAU SIEBEN Ausfuhren, und keine gibt
 //! Schluesselmaterial heraus.
+//!
+//! Fuenf fuer das frische Enrollment, zwei fuer das Enrollment um einen
+//! wiederhergestellten KEM (Escrow-Profil §6 Schritt 6, Scheibe e):
+//! `enrollmentBeginRestored` entnimmt den KEM aus der Zeremonientabelle von
+//! [`crate::escrow_bridge`], `enrollmentFinishRestored` schliesst LOKAL ab,
+//! ohne Endpunkte. Registrierung, Fingerprint-Gate und Bestaetigung laufen
+//! ueber dieselben drei mittleren Ausfuhren.
 //!
 //! # Was hier NICHT entschieden wird
 //!
@@ -907,6 +914,101 @@ pub async fn enrollment_finish(
     let mut endpoints = XhrEnrollmentEndpoints;
     enrollment
         .finish(confirmation, context, &mut endpoints, &mut store)
+        .map_err(|error| JsValue::from_str(error.code()))?;
+    Ok(String::from("{\"finished\":true}"))
+}
+
+/// Legt ein Enrollment um den wiederhergestellten KEM an (Escrow-Profil §6
+/// Schritt 6) und gibt dieselbe Antwort wie [`enrollment_begin`].
+///
+/// `restored` ist die Kennung aus `readerKeyEscrowTransportOpen`. Der KEM wird
+/// erst NACH dem Geraetetor entnommen: ein Geraet mit Tresor weist ab, und der
+/// wiederhergestellte KEM bleibt dann liegen (Abbruch nullt ihn).
+///
+/// # Errors
+/// Wie [`enrollment_begin`], dazu `EA-READER-ENROLLMENT-BRIDGE-ARGUMENT` fuer
+/// eine Kennung ohne wiederhergestellten KEM.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "enrollmentBeginRestored")]
+pub async fn enrollment_begin_restored(
+    restored: u32,
+    organization_id: Vec<u8>,
+    subject_id: Vec<u8>,
+    pinned_anchor: Vec<u8>,
+    bundle_fingerprint: Vec<u8>,
+) -> Result<String, JsValue> {
+    let organization_id =
+        OrganizationId::try_from(&organization_id[..]).map_err(|_| bridge_argument())?;
+    let subject_id = SubjectId::try_from(&subject_id[..]).map_err(|_| bridge_argument())?;
+    let bundle_fingerprint =
+        Hash32::try_from(&bundle_fingerprint[..]).map_err(|_| bridge_argument())?;
+    let anchor =
+        decode_trust_anchor(&pinned_anchor).map_err(|error| JsValue::from_str(error.code()))?;
+    if !crate::escrow_bridge::holds_restored(restored) {
+        return Err(bridge_argument());
+    }
+    let key = ReaderBlobKey::new(READER_VAULT_BLOB_KEY_V1).map_err(|error| blob_failure(&error))?;
+    let store = OpfsBlobStore::open(ENROLLMENT_BLOB_DIRECTORY, std::slice::from_ref(&key))
+        .await
+        .map_err(|error| blob_failure(&error))?;
+    if ReaderEnrollment::device_state(&store).map_err(|error| JsValue::from_str(error.code()))?
+        == ea_reader::DeviceTrustStateV1::Pinned
+    {
+        return Err(JsValue::from_str(
+            ea_reader::EnrollmentError::VaultAlreadyOnDevice.code(),
+        ));
+    }
+    let kem = crate::escrow_bridge::take_restored(restored).ok_or_else(bridge_argument)?;
+    let enrollment = ReaderEnrollment::begin_restored(
+        &store,
+        organization_id,
+        subject_id,
+        anchor,
+        bundle_fingerprint,
+        kem,
+    )
+    .map_err(|error| JsValue::from_str(error.code()))?;
+
+    let registered_credential_ids = registered_credential_ids_json(&enrollment);
+    let handle = next_handle();
+    ENROLLMENTS.with(|enrollments| {
+        enrollments.borrow_mut().insert(handle, enrollment);
+    });
+    let salt = hex::encode(VAULT_PRF_SALT_V1);
+    Ok(format!(
+        "{{\"handle\":{handle},\"prfSalt\":\"{salt}\",\"publicKeyAlgorithms\":[{CREDENTIAL_PUBLIC_KEY_ALGORITHM_V1}],\"registeredCredentialIds\":{registered_credential_ids}}}"
+    ))
+}
+
+/// Schliesst ein Enrollment aus [`enrollment_begin_restored`] LOKAL ab:
+/// derselbe OPFS-Vorlauf wie [`enrollment_finish`], aber kein Endpunkt —
+/// `ReaderEnrollment::finish_restored` nimmt keinen.
+///
+/// Zurueck geht `{"finished":true}`.
+///
+/// # Errors
+/// `EA-READER-ENROLLMENT-BRIDGE-ARGUMENT` fuer eine unbekannte Kennung oder
+/// ein Enrollment ohne bestaetigten Fingerprint-Vergleich, die Codes des
+/// Vorlaufs und die des Enrollments.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "enrollmentFinishRestored")]
+pub async fn enrollment_finish_restored(handle: u32) -> Result<String, JsValue> {
+    let known = ENROLLMENTS.with(|enrollments| enrollments.borrow().contains_key(&handle));
+    if !known {
+        return Err(bridge_argument());
+    }
+    let key = ReaderBlobKey::new(READER_VAULT_BLOB_KEY_V1).map_err(|error| blob_failure(&error))?;
+    let mut store = OpfsBlobStore::open(ENROLLMENT_BLOB_DIRECTORY, std::slice::from_ref(&key))
+        .await
+        .map_err(|error| blob_failure(&error))?;
+    let enrollment = ENROLLMENTS
+        .with(|enrollments| enrollments.borrow_mut().remove(&handle))
+        .ok_or_else(bridge_argument)?;
+    let confirmation = CONFIRMATIONS
+        .with(|confirmations| confirmations.borrow_mut().remove(&handle))
+        .ok_or_else(bridge_argument)?;
+    enrollment
+        .finish_restored(confirmation, &mut store)
         .map_err(|error| JsValue::from_str(error.code()))?;
     Ok(String::from("{\"finished\":true}"))
 }

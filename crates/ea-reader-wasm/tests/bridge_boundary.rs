@@ -199,6 +199,12 @@ enum Capability {
     ReplicaCacheRemoval,
     /// Nur die eigene, jobgebundene Loeschattestierung (Web-Reader-Design §3).
     ReplicaAttestation,
+    /// Die zwei Escrow-Zeremonien des Readers (Escrow-Profil §5–§7, DRK-460
+    /// Ruling Q3): das Paket aus dem eigenen KEM und der fluechtige
+    /// Transport-Schluessel. Eigene Faehigkeit, damit eine Zeremonie mit
+    /// fremdem Schluesselmaterial nicht unter `Enrollment` oder `Vault`
+    /// verschwindet.
+    ReaderKeyEscrow,
 }
 
 /// Jede `#[wasm_bindgen]`-Ausfuhr von `ea-reader-wasm` mit ihrer Faehigkeit,
@@ -209,9 +215,11 @@ const WASM_EXPORTS: &[(&str, Capability)] = &[
     ("blobPut", Capability::Storage),
     ("bridgeEcho", Capability::Diagnostics),
     ("enrollmentBegin", Capability::Enrollment),
+    ("enrollmentBeginRestored", Capability::Enrollment),
     ("enrollmentConfirmFingerprints", Capability::Enrollment),
     ("enrollmentFingerprints", Capability::Enrollment),
     ("enrollmentFinish", Capability::Enrollment),
+    ("enrollmentFinishRestored", Capability::Enrollment),
     ("enrollmentRegisterAuthenticator", Capability::Enrollment),
     ("evaluateBundleCandidate", Capability::BundleTrust),
     ("fileModeBeginDirectory", Capability::FileMode),
@@ -234,8 +242,13 @@ const WASM_EXPORTS: &[(&str, Capability)] = &[
     ("readerDestructionReceipt", Capability::ReplicaCacheRemoval),
     ("readerEntryView", Capability::View),
     ("readerExportOne", Capability::Export),
+    ("readerKeyEscrowSealPackage", Capability::ReaderKeyEscrow),
+    ("readerKeyEscrowTransportAbort", Capability::ReaderKeyEscrow),
+    ("readerKeyEscrowTransportBegin", Capability::ReaderKeyEscrow),
+    ("readerKeyEscrowTransportOpen", Capability::ReaderKeyEscrow),
     ("readerNoteActivity", Capability::Session),
     ("readerNoteVisibility", Capability::Session),
+    ("readerRegistrationRequest", Capability::Enrollment),
     ("readerRuntimeWitness", Capability::Runtime),
     ("readerSearch", Capability::View),
     ("readerSessionLock", Capability::Session),
