@@ -284,10 +284,13 @@ reader-key-escrow-recovery-authorization-core-v1 = [
   issued-at: int, expires-at: int, nonce: bstr .size 32, []
 ]
 
-; Die HPKE-Kontexte nach Profil §4. Sie werden NICHT übertragen, sondern aus
-; dem geprüften Core bzw. der geprüften Autorisierung abgeleitet und in der
-; Hausform hpke_info(cbor) / hpke_aad(cbor) verwendet. Der Familienunterschied
-; steht als Suite-Literal im CBOR; der leere Extension-Slot ist Pflicht.
+; Die HPKE-Kontexte nach Profil §4. Der Escrow-Kontext wird nicht übertragen,
+; sondern aus dem geprüften Core abgeleitet. Die Öffnungsantwort trägt ihre
+; Restore-Bindung als öffentliche Bindung mit (Profil §4); der Empfänger prüft
+; jedes Feld gegen die geprüfte Autorisierung (Profil §6). Beide Kontexte
+; werden in der Hausform hpke_info(cbor) / hpke_aad(cbor) verwendet. Der
+; Familienunterschied steht als Suite-Literal im CBOR; der leere
+; Extension-Slot ist Pflicht.
 reader-key-escrow-hpke-context-v1 = [
   1, organization-id: bstr .size 16,
   reader-certificate-object-hash: bstr .size 32,
