@@ -490,7 +490,7 @@ fn replaying_the_same_package_returns_the_same_bytes_once_audited() {
     assert_eq!(count(&database, "operator_admin_replay"), 2);
 }
 
-/// Lokale Eindeutigkeit vor (f): dasselbe Reader-Zertifikat mit einem anderen
+/// Lokale Vorprüfung der Eindeutigkeit: dasselbe Reader-Zertifikat mit einem anderen
 /// Core scheitert, ebenso dieselbe Person unter einem zweiten, noch aktiven
 /// Zertifikat — nach dem Widerruf des alten gelingt der Ersatz.
 #[test]
