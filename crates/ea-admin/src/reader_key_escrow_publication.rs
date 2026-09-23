@@ -45,12 +45,12 @@ use ea_audit::{
 };
 use ea_crypto::{ContentType, object_hash, reader_key_escrow_core_hash, trust_digest};
 use ea_format::{
-    DecodedTrustPayloadV1, OperatorRoleV1, ReaderKeyEscrowApprovalCoreV1, ReaderKeyEscrowPackageV1,
-    ReaderKeyEscrowTransferKindV1, TrustObjectV1, TrustPayloadV1, decode_reader_key_escrow_package,
-    encode_trust,
+    DecodedTrustPayloadV1, OperatorRoleV1, ReaderKeyEscrowApprovalCoreV1, ReaderKeyEscrowCoreV1,
+    ReaderKeyEscrowPackageV1, ReaderKeyEscrowTransferKindV1, TrustObjectV1, TrustPayloadV1,
+    decode_reader_key_escrow_package, encode_trust,
 };
 use ea_key_provider::{KeyProvider, SecretPurpose};
-use ea_local_store::{EncryptedDatabase, StoreError, StoreValue};
+use ea_local_store::{EncryptedDatabase, StoreError, StoreRow, StoreValue};
 use ea_operator::{OperatorSessionProof, ReauthPurpose};
 use ea_recovery::ReaderKeyEscrowError;
 use ea_trust::{
@@ -238,8 +238,27 @@ pub fn prepare_reader_key_escrow_package(
     {
         return Err(ReaderKeyEscrowError::PackageStale);
     }
-    if database
-        .query_row(
+    require_unique_publication(&|sql, params| database.query_row(sql, params), head, core)?;
+    Ok(PreparedReaderKeyEscrowPackage::Fresh(
+        FreshReaderKeyEscrowPackage {
+            package_hash,
+            package,
+        },
+    ))
+}
+
+/// Lokale Eindeutigkeit (Profil §5.3): höchstens ein Escrow je
+/// Reader-Zertifikat und höchstens eines je Person unter einem im Kopf noch
+/// aktiven Zertifikat. Läuft in der Vorprüfung und noch einmal in der
+/// Transaktion des Commits, damit ein nebenläufiger Prozess zwischen beiden
+/// nichts durchlässt; `UNIQUE(organization_id, reader_certificate_hash)` in
+/// Migration 28 ist die Rückfallebene.
+fn require_unique_publication(
+    query: &dyn Fn(&str, &[StoreValue]) -> Result<Option<StoreRow>, StoreError>,
+    head: &SelectedRegistryHead,
+    core: &ReaderKeyEscrowCoreV1,
+) -> Result<(), ReaderKeyEscrowError> {
+    if query(
             "SELECT 1 FROM reader_key_escrow_publication WHERE organization_id=?1 AND reader_certificate_hash=?2",
             &[
                 blob(core.organization_id.as_bytes()),
@@ -252,8 +271,7 @@ pub fn prepare_reader_key_escrow_package(
         return Err(ReaderKeyEscrowError::PublicationConflict);
     }
     let mut offset = 0_i64;
-    while let Some(row) = database
-        .query_row(
+    while let Some(row) = query(
             "SELECT reader_certificate_hash FROM reader_key_escrow_publication WHERE organization_id=?1 AND reader_subject_id=?2 ORDER BY package_hash LIMIT 1 OFFSET ?3",
             &[
                 blob(core.organization_id.as_bytes()),
@@ -273,12 +291,7 @@ pub fn prepare_reader_key_escrow_package(
         }
         offset += 1;
     }
-    Ok(PreparedReaderKeyEscrowPackage::Fresh(
-        FreshReaderKeyEscrowPackage {
-            package_hash,
-            package,
-        },
-    ))
+    Ok(())
 }
 
 /// Ein Signierer über einen Trust-Digest: `(zertifikat, digest) -> COSE`.
@@ -405,6 +418,8 @@ fn commit_reader_key_escrow_publication(
     context
         .database
         .transaction(|tx| {
+            require_unique_publication(&|sql, params| tx.query_row(sql, params), head, core)
+                .map_err(Tx)?;
             for key in approval.replay_keys() {
                 if key.organization_id() != context.proof.organization_id() {
                     return Err(Tx(ReaderKeyEscrowError::Trust(TrustError::ActionMismatch)));

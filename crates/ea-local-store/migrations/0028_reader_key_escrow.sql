@@ -5,6 +5,8 @@
 
 -- Zeremonie A: die exakt publizierten Bytes, append-only. package_hash ist der
 -- Objekthash der Paketdatei und trägt die Idempotenz derselben Übergabe.
+-- Höchstens eine Publikation je Organisation und Reader-Zertifikat, auch bei
+-- nebenläufigen Prozessen; ein Ersatz trägt ein neues Zertifikat (U2).
 CREATE TABLE reader_key_escrow_publication (
   package_hash BLOB PRIMARY KEY NOT NULL CHECK(length(package_hash)=32),
   organization_id BLOB NOT NULL CHECK(length(organization_id)=16),
@@ -15,6 +17,7 @@ CREATE TABLE reader_key_escrow_publication (
   exact_approval BLOB NOT NULL CHECK(length(exact_approval) BETWEEN 1 AND 65536),
   exact_escrow BLOB NOT NULL CHECK(length(exact_escrow) BETWEEN 1 AND 65536),
   audit_event_id BLOB NOT NULL UNIQUE CHECK(length(audit_event_id)=16),
+  UNIQUE(organization_id, reader_certificate_hash),
   FOREIGN KEY(audit_event_id) REFERENCES local_audit_event(event_id)
 ) STRICT;
 CREATE TRIGGER reader_key_escrow_publication_no_update BEFORE UPDATE ON reader_key_escrow_publication
