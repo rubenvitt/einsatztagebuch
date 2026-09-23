@@ -177,16 +177,28 @@ impl AdminAuthorizationReplayKey {
     pub(crate) const fn pair_from_verified_authorization(
         fields: &OrganizationAdminAuthorizationFieldsV1,
     ) -> [Self; 2] {
+        Self::pair_of(
+            fields.organization_id,
+            fields.authorization_id,
+            fields.nonce,
+        )
+    }
+
+    /// Die EINE Reihenfolge der beiden Sperrzeilen: `authorizationId`
+    /// zuerst, dann `nonce`. Jeder Familienkonstruktor läuft hier durch.
+    const fn pair_of(
+        organization_id: OrganizationId,
+        authorization_id: AuthorizationId,
+        nonce: [u8; 32],
+    ) -> [Self; 2] {
         [
             Self {
-                organization_id: fields.organization_id,
-                dimension: AdminAuthorizationReplayDimension::AuthorizationId(
-                    fields.authorization_id,
-                ),
+                organization_id,
+                dimension: AdminAuthorizationReplayDimension::AuthorizationId(authorization_id),
             },
             Self {
-                organization_id: fields.organization_id,
-                dimension: AdminAuthorizationReplayDimension::Nonce(fields.nonce),
+                organization_id,
+                dimension: AdminAuthorizationReplayDimension::Nonce(nonce),
             },
         ]
     }
