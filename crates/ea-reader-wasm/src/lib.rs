@@ -71,6 +71,8 @@ pub mod bridge;
 /// Ohne cfg an der `mod`-Zeile, weil das Modul eine Ausfuhr traegt und die
 /// reine Haelfte — das Bericht-DTO und die Zielart aus ihrer Zahl — auf dem
 /// Wirt bezeugt wird.
+pub mod escrow_bridge;
+
 pub mod export_bridge;
 
 /// Die Bruecke des inkrementellen Lesestapels: GENAU ZWEI Ausfuhren.
@@ -139,7 +141,8 @@ pub mod vault_bridge;
 /// reine Haelfte — das Sitzungs-DTO — wird auf dem Wirt bezeugt.
 pub mod visibility;
 
-/// Das Browser-Enrollment: die fuenf Ausfuhren und der Endpunktport dahinter.
+/// Das Browser-Enrollment: die sieben Ausfuhren (fuenf fuer das frische, zwei
+/// fuer das wiederhergestellte Enrollment) und der Endpunktport dahinter.
 ///
 /// Das Modul steht OHNE cfg an der `mod`-Zeile, weil es Ausfuhren traegt und
 /// die Regel „cfg am Item" dann fuer jede einzelne von ihnen gilt — dieselbe
@@ -148,7 +151,7 @@ pub mod visibility;
 /// `crates/ea-reader-wasm/tests/bridge_boundary.rs` und die Aufgabe selbst die
 /// Ausfuhren unter `ea_reader_wasm::webauthn` benennen.
 ///
-/// Alle fuenf Ausfuhren laufen IM DEDIZIERTEN WORKER: der Zustand liegt in
+/// Alle sieben Ausfuhren laufen IM DEDIZIERTEN WORKER: der Zustand liegt in
 /// einem `thread_local!`, OPFS und das synchrone `XMLHttpRequest` gibt es nur
 /// dort. `navigator.credentials` gibt es umgekehrt nur auf dem Hauptthread —
 /// die Naht dazwischen ist die Nachrichtenform von
