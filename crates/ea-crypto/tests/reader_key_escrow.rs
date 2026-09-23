@@ -102,10 +102,26 @@ fn escrow_digest_input(seed: [u8; 32]) -> Vec<u8> {
 
 /// Eine Normalprofil-Signatur über `trust_digest(input)`.
 fn signed_normal(seed: [u8; 32], certificate: [u8; 32], exact_digest_input: &[u8]) -> Vec<u8> {
+    signed_normal_under_header_key(
+        seed,
+        root_public_key(seed).thumbprint(),
+        certificate,
+        exact_digest_input,
+    )
+}
+
+/// Wie [`signed_normal`], aber mit frei gewähltem Schlüsselabdruck im
+/// geschützten Header — die Signatur legt weiter `seed`.
+fn signed_normal_under_header_key(
+    seed: [u8; 32],
+    header_key_thumbprint: ea_types::KeyThumbprint,
+    certificate: [u8; 32],
+    exact_digest_input: &[u8],
+) -> Vec<u8> {
     let digest = trust_digest(exact_digest_input);
     let protected = ProtectedHeader::normal(
         ContentType::TrustDigest,
-        root_public_key(seed).thumbprint(),
+        header_key_thumbprint,
         certificate_hash(certificate),
     );
     let signature = SigningKey::from_bytes(&seed)
@@ -206,6 +222,30 @@ fn a_foreign_key_certificate_or_digest_is_a_signer_mismatch() {
             &root_public_key(ROOT_SEED),
             certificate_hash(ROOT_CERTIFICATE_HASH),
             &foreign_core_input,
+        )
+        .unwrap_err(),
+        CryptoError::SignerMismatch
+    );
+}
+
+/// Review (a) F2: der Schlüsselabdruck im geschützten Header muss der des
+/// gepinnten Ankers sein — auch wenn die Signatur selbst unter dem Anker
+/// trägt und der Core den Anker nennt. Nur der Header weicht ab.
+#[test]
+fn a_root_signature_under_a_foreign_header_thumbprint_is_a_signer_mismatch() {
+    let input = escrow_digest_input(ROOT_SEED);
+    let signature = signed_normal_under_header_key(
+        ROOT_SEED,
+        root_public_key([0xa1; 32]).thumbprint(),
+        ROOT_CERTIFICATE_HASH,
+        &input,
+    );
+    assert_eq!(
+        verify_reader_key_escrow_trust_signature(
+            &signature,
+            &root_public_key(ROOT_SEED),
+            certificate_hash(ROOT_CERTIFICATE_HASH),
+            &input,
         )
         .unwrap_err(),
         CryptoError::SignerMismatch
