@@ -22,8 +22,12 @@ import { SingleExport } from './features/export/SingleExport'
 import { fileModeBridge } from './features/file-mode/DirectoryHandle'
 import { OpenArchivePanel } from './features/file-mode/OpenArchivePanel'
 import { ReaderPage } from './features/reader/ReaderPage'
+import { EscrowPackagePage } from './features/reader-key-escrow/EscrowPackagePage'
+import { EscrowRestorePage } from './features/reader-key-escrow/EscrowRestorePage'
+import { downloadEscrowFile, readerKeyEscrowBridge } from './features/reader-key-escrow/escrow-bridge'
 import { readerSessionBridge } from './features/session/reader-session'
 import { TrustAgeBanner } from './features/trust-age/TrustAgeBanner'
+import { restoredEnrollmentBridge } from './vault/webauthn-prf'
 
 /**
  * Ein Eintrag der Routentabelle: der Pfad, sein Wortlaut im Verweis und — seit
@@ -78,6 +82,22 @@ export const EA_WEB_ROUTES: readonly EaWebRoute[] = [
     path: '/export',
     label: 'Einzelexport',
     render: () => <SingleExport bridge={readerSessionBridge} host={window} />,
+  },
+  {
+    path: '/schluessel-hinterlegung',
+    label: 'Schlüsselhinterlegung',
+    render: () => <EscrowPackagePage bridge={readerKeyEscrowBridge} download={downloadEscrowFile} />,
+  },
+  {
+    path: '/wiederherstellung',
+    label: 'Wiederherstellung',
+    render: () => (
+      <EscrowRestorePage
+        bridge={readerKeyEscrowBridge}
+        download={downloadEscrowFile}
+        renderEnrollment={restored => <EnrollmentPage bridge={restoredEnrollmentBridge(restored)} />}
+      />
+    ),
   },
   { path: '/vernichtung', label: 'Reader-Cache', render: () => <ReaderDestructionPage bridge={readerDestructionBridge} session={readerSessionBridge} host={window} download={downloadReaderAttestation} /> },
 ]

@@ -25,6 +25,8 @@ type WorkerCapability =
   | 'view'
   | 'replica-cache-removal'
   | 'replica-attestation'
+  // Die zwei Escrow-Zeremonien (Escrow-Profil §5–§7, DRK-460 Ruling Q3).
+  | 'reader-key-escrow'
 
 // Zwei Netze, die sich ergänzen:
 // - Typzeit (`pnpm typecheck`): `satisfies Record<…>` macht eine fehlende Art
@@ -45,6 +47,13 @@ const WORKER_CAPABILITIES = {
   'enrollment-fingerprints': 'enrollment',
   'enrollment-confirm-fingerprints': 'enrollment',
   'enrollment-finish': 'enrollment',
+  'enrollment-begin-restored': 'enrollment',
+  'enrollment-finish-restored': 'enrollment',
+  'reader-registration-request': 'enrollment',
+  'reader-key-escrow-seal-package': 'reader-key-escrow',
+  'reader-key-escrow-transport-begin': 'reader-key-escrow',
+  'reader-key-escrow-transport-open': 'reader-key-escrow',
+  'reader-key-escrow-transport-abort': 'reader-key-escrow',
   'vault-unlock': 'vault',
   'session-note-visibility': 'session',
   'session-note-activity': 'session',
