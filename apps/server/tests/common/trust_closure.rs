@@ -1196,9 +1196,9 @@ pub fn escrow_recovery_authorization(
 /// Eine wurzelsignierte `webBundleRelease` dieser Organisation.
 ///
 /// Die Cutover-Vorbedingung (Profil §5) öffnet die Escrow-Annahme erst, wenn
-/// eine solche Freigabe einer v1.1-fähigen Fassung gilt. Einen
-/// Produktionsweg in den Katalog gibt es bis Scheibe (f) nicht; die Zeugen
-/// legen sie direkt ab.
+/// eine solche Freigabe einer v1.1-fähigen Fassung gilt. Seit Scheibe (f)
+/// nimmt der Server sie über `POST /v1/trust/events` an; direkt abgelegt wird
+/// sie nur noch für Umgehungsfälle.
 #[must_use]
 pub fn web_bundle_release(
     closure: &ExtendedClosure,
@@ -1206,12 +1206,57 @@ pub fn web_bundle_release(
     effective_from: u64,
     fill: u8,
 ) -> Vec<u8> {
+    web_bundle_release_signed_by(
+        closure.organization_id,
+        bundle_version,
+        effective_from,
+        fill,
+        ROOT_SEED,
+    )
+}
+
+/// Eine Freigabe für `organization_id`, unterschrieben mit `root_seed` unter
+/// dem Zertifikatshash der echten Wurzel — mit einem fremden Seed der Tausch,
+/// gegen den die Wurzelprüfung gebaut ist.
+#[must_use]
+pub fn web_bundle_release_signed_by(
+    organization_id: OrganizationId,
+    bundle_version: &str,
+    effective_from: u64,
+    fill: u8,
+    root_seed: [u8; 32],
+) -> Vec<u8> {
     let context = frozen_context();
     ea_testkit::reader_key_escrow_fixture::signed_web_bundle_release(
         &ea_format::WebBundleReleaseCoreV1 {
-            organization_id: closure.organization_id,
+            organization_id,
             bundle_hash: Hash32::try_from([fill; 32].as_slice()).expect("32 bytes"),
             bundle_version: bundle_version.to_owned(),
+            effective_from_registry_version: RegistryVersion::new(effective_from),
+            issued_at: UnixMillis::new(i64::from(fill)),
+            root_key_thumbprint: signing_key(ROOT_SEED).thumbprint(),
+        },
+        &ea_testkit::reader_key_escrow_fixture::FixtureTrustSigner {
+            seed: root_seed,
+            certificate_hash: context.root_certificate_hash,
+        },
+    )
+}
+
+/// Ein wurzelsignierter `webBundleRevocation` der Freigabe `release`, wirksam
+/// ab `effective_from`.
+#[must_use]
+pub fn web_bundle_revocation(
+    closure: &ExtendedClosure,
+    release: &[u8],
+    effective_from: u64,
+    fill: u8,
+) -> Vec<u8> {
+    let context = frozen_context();
+    ea_testkit::reader_key_escrow_fixture::signed_web_bundle_revocation(
+        &ea_format::WebBundleRevocationCoreV1 {
+            organization_id: closure.organization_id,
+            release_object_hash: ea_crypto::object_hash(release),
             effective_from_registry_version: RegistryVersion::new(effective_from),
             issued_at: UnixMillis::new(i64::from(fill)),
             root_key_thumbprint: signing_key(ROOT_SEED).thumbprint(),

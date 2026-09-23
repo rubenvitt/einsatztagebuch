@@ -1347,8 +1347,8 @@ async fn a_foreign_organization_escrow_family_is_refused_before_validation() {
     database.cleanup().await;
 }
 
-/// Eine v1.1-fähige Freigabe des Web-Bundles, direkt im Katalog: bis Scheibe
-/// (f) gibt es keinen Annahmeweg für `webBundleRelease`.
+/// Eine v1.1-fähige Freigabe des Web-Bundles über ihren Annahmeweg
+/// (`POST /v1/trust/events`, Scheibe f), VOR jeder Escrow-Freigabe.
 async fn seed_capable_release(ready: &common::ReadyServer, database: &common::TestDatabase) {
     let release = trust_closure::web_bundle_release(
         &ready.closure,
@@ -1356,8 +1356,13 @@ async fn seed_capable_release(ready: &common::ReadyServer, database: &common::Te
         1,
         0xb1,
     );
-    common::seed_indexed_trust_object(database.pool(), ready.closure.organization_id, &release)
-        .await;
+    let response = post_escrow_object(ready, &release, 0xb1).await;
+    assert_eq!(
+        status_and_code(&response),
+        (201, None),
+        "the capable release"
+    );
+    assert!(indexed(database.pool(), &release).await);
 }
 
 /// Ob `trust_events` eine Zeile für diese Bytes trägt.
@@ -1906,6 +1911,104 @@ async fn exactly_one_of_two_concurrent_escrows_is_admitted() {
         .await
         .expect("count");
     assert_eq!(escrows, 1, "exactly one escrow row");
+
+    database.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Die Bundle-Familie über ihren eigenen Einstieg (Scheibe f, U4)
+// ---------------------------------------------------------------------------
+
+/// `webBundleRelease` und `webBundleRevocation` nimmt der Server über
+/// `POST /v1/trust/events` an, jede Art über den eigenen Einstieg des
+/// Trust-Kerns. Eine byte-gleiche Wiederholung ist idempotent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_web_bundle_release_and_its_revocation_are_admitted() {
+    let database = common::fresh_database().await;
+    let ready = escrow_server(&database).await;
+    let release = trust_closure::web_bundle_release(&ready.closure, "2026.3.1", 1, 0xc1);
+    let revocation = trust_closure::web_bundle_revocation(&ready.closure, &release, 1, 0xc2);
+
+    for (marker, (name, bytes)) in [("release", &release), ("revocation", &revocation)]
+        .into_iter()
+        .enumerate()
+    {
+        let response =
+            post_escrow_object(&ready, bytes, 0x20 + u8::try_from(marker).expect("two")).await;
+        assert_eq!(status_and_code(&response), (201, None), "{name}");
+        assert!(indexed(database.pool(), bytes).await, "{name} is indexed");
+        assert!(
+            stored(ea_crypto::object_hash(bytes)).await,
+            "{name} is stored"
+        );
+    }
+    let replay = post_escrow_object(&ready, &release, 0x22).await;
+    assert_eq!(status_and_code(&replay), (201, None), "exact replay");
+
+    database.cleanup().await;
+}
+
+/// Eine Freigabe unter einem fremden Wurzelschlüssel und ein Widerruf ohne
+/// seine Freigabe im Katalog: 422 INVALID, keine Zeile, keine Bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_release_and_a_dangling_revocation_are_refused_without_bytes() {
+    let database = common::fresh_database().await;
+    let ready = escrow_server(&database).await;
+    let forged = trust_closure::web_bundle_release_signed_by(
+        ready.closure.organization_id,
+        ea_trust::MIN_ESCROW_BUNDLE_VERSION,
+        1,
+        0xc3,
+        [0x99; 32],
+    );
+    let never_admitted = trust_closure::web_bundle_release(&ready.closure, "2026.3.1", 1, 0xc4);
+    let dangling = trust_closure::web_bundle_revocation(&ready.closure, &never_admitted, 1, 0xc5);
+    let indexed_before = indexed_trust_objects(database.pool()).await;
+
+    for (marker, (name, bytes)) in [
+        ("foreign root", &forged),
+        ("dangling revocation", &dangling),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response =
+            post_escrow_object(&ready, bytes, 0x28 + u8::try_from(marker).expect("two")).await;
+        assert_eq!(
+            status_and_code(&response),
+            (422, Some("EA-TRUST-EVENT-INVALID".to_owned())),
+            "{name}"
+        );
+        assert!(!indexed(database.pool(), bytes).await, "{name} has no row");
+        assert!(
+            !stored(ea_crypto::object_hash(bytes)).await,
+            "{name} has no bytes"
+        );
+    }
+    assert_eq!(indexed_trust_objects(database.pool()).await, indexed_before);
+
+    database.cleanup().await;
+}
+
+/// Eine Freigabe einer FREMDEN Organisation fällt vor der Prüfung mit 403.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_foreign_organization_release_is_refused_before_validation() {
+    let database = common::fresh_database().await;
+    let ready = escrow_server(&database).await;
+    let release = trust_closure::web_bundle_release_signed_by(
+        OrganizationId::try_from(&FOREIGN_ORGANIZATION[..]).expect("16 bytes"),
+        ea_trust::MIN_ESCROW_BUNDLE_VERSION,
+        1,
+        0xc6,
+        ea_testkit::TEST_ENTROPY_ROOT_ED25519_SEED,
+    );
+    let response = post_escrow_object(&ready, &release, 0x2a).await;
+    assert_eq!(
+        status_and_code(&response),
+        (403, Some("EA-TRUST-EVENT-ORGANIZATION".to_owned()))
+    );
+    assert!(!indexed(database.pool(), &release).await);
+    assert!(!stored(ea_crypto::object_hash(&release)).await);
 
     database.cleanup().await;
 }

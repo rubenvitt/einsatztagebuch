@@ -1287,12 +1287,13 @@ pub async fn call(request: &ApiCall<'_>) -> HttpResponse {
 /// Legt exakte `.etb`-Bytes DIREKT in den Object Store.
 ///
 /// Bewusst NICHT ueber `POST /v1/trust/events`. Der Aufnahmeweg weist
-/// `destructionAuthorization`, `destructionTransition`, `deletionAttestation`,
-/// `webBundleRelease` und `webBundleRevocation` fail-closed als
-/// `EA-TRUST-EVENT-UNVERIFIABLE` ab, weil `ea-trust` fuer sie im
-/// Registrierungsabschluss keine Signiererregel fuehrt; die Vernichtungsarten
-/// reisen ueber `POST /v1/destructions`, die Bundle-Arten haben in dieser
-/// Stufe gar keinen Endpunkt.
+/// `destructionAuthorization`, `destructionTransition` und
+/// `deletionAttestation` fail-closed als `EA-TRUST-EVENT-UNVERIFIABLE` ab, weil
+/// `ea-trust` fuer sie im Registrierungsabschluss keine Signiererregel fuehrt;
+/// sie reisen ueber `POST /v1/destructions`. `webBundleRelease` und
+/// `webBundleRevocation` nimmt der Endpunkt seit Scheibe (f) ueber ihren
+/// eigenen Einstieg an; direkt abgelegt werden sie nur noch fuer Negativ- und
+/// Umgehungsfaelle.
 ///
 /// Die `grantAuthorization` DAGEGEN hat seit dieser Stufe ihren echten
 /// Aufnahmeweg an `POST /v1/trust/events` (siehe
@@ -1528,10 +1529,11 @@ pub async fn receipt_object_hash_of(
 /// (`object_index`, `trust_events`) — ohne den Annahmeweg.
 ///
 /// Anders als [`seed_trust_object_bytes`] sieht der Katalog das Objekt danach:
-/// `PostgresTrustAuthority` liest ihn aus `trust_events`. Gebraucht für die
-/// `webBundleRelease` der Escrow-Cutover-Vorbedingung, für die es bis Scheibe
-/// (f) keinen Annahmeweg gibt. Der Trigger auf `trust_events` hebt die
-/// Katalogrevision wie bei jeder Indexierung.
+/// `PostgresTrustAuthority` liest ihn aus `trust_events`. Gebraucht nur noch
+/// für Umgehungsfälle: eine Freigabe einer nicht v1.1-fähigen Fassung oder
+/// eine Escrow-Freigabe, die am Annahmeweg vorbei im Katalog liegt. Der
+/// Trigger auf `trust_events` hebt die Katalogrevision wie bei jeder
+/// Indexierung.
 ///
 /// # Panics
 ///
@@ -1583,23 +1585,23 @@ pub async fn stand_up_escrow_server(database: &TestDatabase) -> ReadyServer {
     .await
 }
 
-/// Legt eine v1.1-fähige `webBundleRelease` in den Katalog und nimmt dann
-/// Freigabe, Escrow und Öffnung ÜBER DEN ENDPUNKT an — in dieser Reihenfolge,
-/// jedes einzeln. Zurück kommen die exakten Bytes mit ihrem Subtyp.
+/// Nimmt ÜBER DEN ENDPUNKT an, jedes einzeln und in dieser Reihenfolge: eine
+/// ältere Bundle-Freigabe und ihren Widerruf, eine v1.1-fähige Freigabe, dann
+/// Publikationsfreigabe, Escrow und Öffnung. Zurück kommen die exakten Bytes
+/// mit ihrem Subtyp.
 ///
 /// # Panics
 ///
-/// Wenn der Server eines der drei Objekte nicht mit `201` annimmt.
-pub async fn publish_escrow_family(
-    database: &TestDatabase,
-    ready: &ReadyServer,
-) -> Vec<(&'static str, Vec<u8>)> {
+/// Wenn der Server eines der sechs Objekte nicht mit `201` annimmt.
+pub async fn publish_escrow_family(ready: &ReadyServer) -> Vec<(&'static str, Vec<u8>)> {
     use ea_sync_protocol::{EndpointV1, TrustEventUploadV1};
 
     let closure = &ready.closure;
+    // Die ältere Freigabe ist widerrufen; aktiv bleibt die v1.1-fähige.
+    let older = trust_closure::web_bundle_release(closure, "2026.3.1", 1, 0xb6);
+    let revocation = trust_closure::web_bundle_revocation(closure, &older, 1, 0xb8);
     let release =
         trust_closure::web_bundle_release(closure, ea_trust::MIN_ESCROW_BUNDLE_VERSION, 1, 0xb7);
-    seed_indexed_trust_object(database.pool(), closure.organization_id, &release).await;
     let core = trust_closure::escrow_core(
         closure,
         trust_closure::ESCROW_READER_SUBJECT,
@@ -1620,6 +1622,9 @@ pub async fn publish_escrow_family(
         &[0, 1],
     );
     let family = vec![
+        ("webBundleRelease (older)", older),
+        ("webBundleRevocation", revocation),
+        ("webBundleRelease", release),
         ("readerKeyEscrowApproval", approval_bytes),
         ("readerKeyEscrow", escrow_bytes),
         ("readerKeyEscrowRecoveryAuthorization", recovery_bytes),
@@ -1627,7 +1632,7 @@ pub async fn publish_escrow_family(
     for (index, (name, bytes)) in family.iter().enumerate() {
         let upload = TrustEventUploadV1::new(bytes.clone()).expect("the upload frame must build");
         let mut request_id = [0xf7_u8; 16];
-        request_id[15] = u8::try_from(index).expect("three objects");
+        request_id[15] = u8::try_from(index).expect("six objects");
         let response = call(&ApiCall {
             ready,
             signer_seed: trust_closure::ADMIN_SEED,
