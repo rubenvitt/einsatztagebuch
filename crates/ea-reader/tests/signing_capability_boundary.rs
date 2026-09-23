@@ -38,6 +38,10 @@ const COSE_SIGNING_CALLS: &[(&str, &str)] = &[
         "ea-reader/src/reader_attestation.rs",
         "sign_deletion_attestation_digest",
     ),
+    // Besitznachweis des eigenen Registrierungsantrags (§6.6 Schritte 3–4,
+    // DRK-460 Ruling Q2): selbstsigniert über die eigenen öffentlichen
+    // Schlüssel, kein Zertifikat, kein Übergang, keine Autorisierung.
+    ("ea-reader/src/registration_request.rs", "sign_enrollment"),
 ];
 
 /// `(Datei, Anzahl)`: Roh-Ed25519-Signaturen außerhalb von COSE.

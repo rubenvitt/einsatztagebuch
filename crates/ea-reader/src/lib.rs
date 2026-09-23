@@ -186,6 +186,8 @@ mod http;
 mod key_profile;
 mod mode;
 mod operator_profile;
+mod reader_key_escrow;
+mod registration_request;
 mod search;
 mod session;
 mod sync;
@@ -262,6 +264,10 @@ pub use grant::{VerifiedEncryptedEntry, VerifiedGrantForRecipient};
 pub use http::ReaderRequestV1;
 pub use key_profile::{ReaderKeyProfile, ReaderKeyProfileError};
 pub use mode::ReaderMode;
+pub use reader_key_escrow::ReaderKeyEscrowError;
+pub use registration_request::{
+    READER_REGISTRATION_FILE_SUFFIX_V1, ReaderRegistrationFileV1, reader_registration_request,
+};
 pub use search::{ReaderSearch, indexable_record};
 pub use session::{
     READER_BACKGROUND_INACTIVITY_MS_V1, READER_CONFIRMATION_VALIDITY_MS_V1,

@@ -223,6 +223,13 @@ pub fn foreign_anchor_exact_bytes() -> Vec<u8> {
 // Die Schluessel des Readers
 // ---------------------------------------------------------------------------
 
+/// Der private KEM-Schluessel des Tresors als Rohbytes — NUR fuer
+/// Kanarienzeugen, die seine Abwesenheit messen, und fuer Gegenproben, die ihn
+/// aus einem Escrow zurueckgewinnen.
+pub const fn reader_kem_seed() -> [u8; 32] {
+    READER_KEM_SEED
+}
+
 /// Der oeffentliche X25519-Punkt zum privaten KEM-Schluessel des Tresors.
 pub fn reader_kem_public_key() -> HpkeRecipientPublicKey {
     HpkeRecipientPrivateKey::from_bytes(SecretBytes::new(READER_KEM_SEED))
