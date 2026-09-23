@@ -29,7 +29,7 @@ use std::{
 use ea_admin::{
     reader_key_escrow_opening::ReaderKeyEscrowLedger,
     reader_key_escrow_publication::{
-        CutoverPending, FixtureBundleRelease, PublishedReaderKeyEscrow,
+        ActiveWebBundleRelease, CutoverPending, FixtureBundleRelease, PublishedReaderKeyEscrow,
         ReaderKeyEscrowPublicationContext, publish_reader_key_escrow_in_context,
     },
 };
@@ -166,6 +166,11 @@ struct Ceremony<'a> {
     /// Läuft einmal in der Sitzungsprüfung vor dem Commit — also zwischen
     /// Vorprüfung und Transaktion: der Platz eines nebenläufigen Prozesses.
     interleave: Cell<Option<Box<dyn FnOnce() + 'a>>>,
+    anchor: ea_trust::TrustAnchorV1,
+    /// Die exakten Trust-Objekte des Bestands (Linie plus Zusätze).
+    catalog: Vec<Vec<u8>>,
+    /// Was die Verteilung ins Archiv bekam, in Reihenfolge.
+    distributed: std::cell::RefCell<Vec<Vec<u8>>>,
 }
 
 impl<'a> Ceremony<'a> {
@@ -176,7 +181,28 @@ impl<'a> Ceremony<'a> {
         proof: &'a OperatorSessionProof,
     ) -> Self {
         let (trust, head) = select(&line.line, tip_sequence(&line.line));
+        let source = line.line.source();
+        let mut hashes = Vec::new();
+        source
+            .visit_trust_object_hashes(&mut |hash| {
+                hashes.push(hash);
+                Ok(())
+            })
+            .unwrap();
+        let catalog = hashes
+            .into_iter()
+            .map(|hash| {
+                source
+                    .read_exact_trust_object(hash)
+                    .unwrap()
+                    .unwrap()
+                    .to_vec()
+            })
+            .collect();
         Self {
+            anchor: ea_trust::decode_trust_anchor(line.line.exact_anchor_bytes()).unwrap(),
+            catalog,
+            distributed: std::cell::RefCell::new(Vec::new()),
             database,
             audit,
             proof,
@@ -227,9 +253,17 @@ impl<'a> Ceremony<'a> {
                 (id, hash)
             }))
         };
+        let catalog: Vec<&[u8]> = self.catalog.iter().map(Vec::as_slice).collect();
+        let distribute = |bytes: &[u8]| {
+            self.distributed.borrow_mut().push(bytes.to_vec());
+            Ok(())
+        };
         publish_reader_key_escrow_in_context(
             cutover,
             &ReaderKeyEscrowPublicationContext {
+                anchor: &self.anchor,
+                catalog: &catalog,
+                distribute: &distribute,
                 database: self.database,
                 trust: &self.trust,
                 head: &self.head,
@@ -617,4 +651,114 @@ fn concurrent_publications_for_one_person_commit_exactly_once() {
     assert_eq!(count(&database, "reader_key_escrow_publication"), 1);
     assert_eq!(publication_rows(&database).len(), 1);
     assert_eq!(count(&database, "operator_admin_replay"), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Hinter dem echten Port (Scheibe f): die aktive v1.1-webBundleRelease
+// ---------------------------------------------------------------------------
+
+use ea_testkit::reader_key_escrow_fixture::{
+    signed_web_bundle_release, signed_web_bundle_revocation,
+};
+use ea_trust::TrustObjectSource as _;
+
+/// Eine wurzelsignierte Freigabe der Linie, wirksam ab Version 1.
+fn line_release(line: &EscrowLine, version: &str, fill: u8) -> Vec<u8> {
+    signed_web_bundle_release(
+        &ea_format::WebBundleReleaseCoreV1 {
+            organization_id: support::organization(),
+            bundle_hash: Hash32::try_from([fill; 32].as_slice()).unwrap(),
+            bundle_version: version.to_owned(),
+            effective_from_registry_version: ea_types::RegistryVersion::new(1),
+            issued_at: UnixMillis::new(i64::from(fill)),
+            root_key_thumbprint: support::device_signing_key(support::root_signing_secret())
+                .thumbprint(),
+        },
+        &escrow_support::root(&line.line),
+    )
+}
+
+fn line_revocation(line: &EscrowLine, release: &[u8], fill: u8) -> Vec<u8> {
+    signed_web_bundle_revocation(
+        &ea_format::WebBundleRevocationCoreV1 {
+            organization_id: support::organization(),
+            release_object_hash: ea_crypto::object_hash(release),
+            effective_from_registry_version: ea_types::RegistryVersion::new(1),
+            issued_at: UnixMillis::new(i64::from(fill)),
+            root_key_thumbprint: support::device_signing_key(support::root_signing_secret())
+                .thumbprint(),
+        },
+        &escrow_support::root(&line.line),
+    )
+}
+
+/// Profil §11 Pflichtzeuge „Publikation ohne aktive v1.1-webBundleRelease":
+/// ohne Freigabe, mit einer nicht fähigen Fassung und mit einer widerrufenen
+/// fähigen Freigabe endet der echte Port als ERSTER Schritt — kein
+/// Signierer, keine Zeile, kein Audit, nichts verteilt.
+#[test]
+fn publication_without_an_active_v11_release_is_refused_before_any_side_effect() {
+    let line = escrow_line(EscrowLineOptions::default());
+    let capable = line_release(&line, ea_trust::MIN_ESCROW_BUNDLE_VERSION, 0xa1);
+    let cases: [(&str, Vec<Vec<u8>>); 3] = [
+        ("no release", Vec::new()),
+        (
+            "frozen version",
+            vec![line_release(&line, "2026.3.1", 0xa2)],
+        ),
+        (
+            "revoked capable release",
+            vec![capable.clone(), line_revocation(&line, &capable, 0xa3)],
+        ),
+    ];
+    for (name, extra) in cases {
+        let store = Store::new(&format!("port-{}", name.replace(' ', "-")));
+        let database = store.open();
+        let audit = store.audit(&database);
+        let mut ceremony = Ceremony::new(&line, &database, &audit, &store.proof);
+        ceremony.catalog.extend(extra);
+        let (_, bytes) = package(&line, &line.reader, READER_KEM_SEED, 0xc1, ISSUED);
+        let error = ceremony.publish(&ActiveWebBundleRelease, &bytes).err();
+        assert_eq!(error, Some(ReaderKeyEscrowError::CutoverNotReady), "{name}");
+        assert_eq!(ceremony.signatures.load(Ordering::SeqCst), 0, "{name}");
+        assert!(ceremony.distributed.borrow().is_empty(), "{name}");
+        for table in [
+            "operator_admin_replay",
+            "reader_key_escrow_publication",
+            "local_audit_event",
+        ] {
+            assert_eq!(count(&database, table), 0, "{name}: {table}");
+        }
+    }
+}
+
+/// Hinter einer aktiven fähigen Freigabe: Audit 13 trägt GENAU deren Hash,
+/// und nach dem Commit gehen Freigabe, dann Escrow in die Verteilung — beim
+/// exakten Wiedereinspielen noch einmal dieselben Bytes.
+#[test]
+fn publication_behind_a_capable_release_names_it_and_distributes_approval_then_escrow() {
+    let line = escrow_line(EscrowLineOptions::default());
+    let capable = line_release(&line, ea_trust::MIN_ESCROW_BUNDLE_VERSION, 0xa4);
+    let store = Store::new("port-capable");
+    let database = store.open();
+    let audit = store.audit(&database);
+    let mut ceremony = Ceremony::new(&line, &database, &audit, &store.proof);
+    ceremony.catalog.push(capable.clone());
+    let (_, bytes) = package(&line, &line.reader, READER_KEM_SEED, 0xc1, ISSUED);
+    let published = ceremony.publish(&ActiveWebBundleRelease, &bytes).unwrap();
+    let rows = publication_rows(&database);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].2 == Some(ea_crypto::object_hash(&capable)));
+    assert_eq!(
+        *ceremony.distributed.borrow(),
+        [
+            published.exact_approval.clone(),
+            published.exact_escrow.clone()
+        ]
+    );
+    let again = ceremony.publish(&ActiveWebBundleRelease, &bytes).unwrap();
+    assert!(again.replayed);
+    assert_eq!(ceremony.distributed.borrow().len(), 4);
+    assert_eq!(ceremony.distributed.borrow()[2], published.exact_approval);
+    assert_eq!(ceremony.distributed.borrow()[3], published.exact_escrow);
 }
