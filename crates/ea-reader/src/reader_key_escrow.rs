@@ -58,8 +58,13 @@ use crate::vault::UnlockedVault;
 /// durchreichenden geben den Code IHRER QUELLE weiter — dieselbe Regel wie
 /// bei [`crate::EnrollmentError`].
 pub enum ReaderKeyEscrowError {
-    /// Der KEM des Tresors ist nicht der des Reader-Zertifikats.
+    /// Der KEM ist nicht der des Reader-Zertifikats: der Tresor-KEM vor dem
+    /// Versiegeln (A) oder der wiederhergestellte KEM nach dem Öffnen (B).
     KemMismatch,
+    /// Kein gültiges Escrow zur Subject-ID (Zeremonie B).
+    NotFound,
+    /// Ein Bindungsfeld des Umschlags weicht von seiner Referenz ab.
+    RestoreBinding,
     /// Der Trust-Kern hat abgewiesen.
     Trust(TrustError),
     /// Der Codec der Übergabedateien hat abgewiesen.
@@ -78,6 +83,8 @@ impl ReaderKeyEscrowError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::KemMismatch => "EA-READER-ESCROW-KEM-MISMATCH",
+            Self::NotFound => "EA-READER-ESCROW-NOT-FOUND",
+            Self::RestoreBinding => "EA-READER-ESCROW-RESTORE-BINDING",
             Self::Trust(error) => error.code(),
             Self::Format(error) => error.code(),
             Self::Archive(error) => error.code(),
