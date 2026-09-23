@@ -443,7 +443,7 @@ async fn plant_admin_audit(
 }
 
 /// Alle fünfunddreißig Tabellen sind da: die sechsundzwanzig der Stufe 3,
-/// samt den additiven Migrationen fuer bestehende Installationen, die acht
+/// samt den additiven Migrationen für bestehende Installationen, die acht
 /// der verwalteten Vernichtung aus `0003_managed_destruction.sql` (Stufe 5)
 /// und der Escrow-Index aus `0004_reader_key_escrow_index.sql` (v1.1-Profil).
 #[tokio::test]

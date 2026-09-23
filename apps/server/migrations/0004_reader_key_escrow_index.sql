@@ -1,18 +1,18 @@
 -- Technischer Index der angenommenen Reader-Key-Escrows (v1.1-Profil §3.1),
--- KEINE Autoritaet: gueltig ist, was ea-trust beweist. Die eigentliche Sperre
+-- KEINE Autorität: gültig ist, was ea-trust beweist. Die eigentliche Sperre
 -- gegen zwei gleichzeitige Escrows ist der Katalogzaun beim Indexieren; diese
--- Tabelle ist der Rueckfall und haelt hoechstens EIN Escrow je
+-- Tabelle ist der Rückfall und hält höchstens EIN Escrow je
 -- Reader-Zertifikat fest. Ein zweites, byte-verschiedenes Escrow zum selben
--- Zertifikat ist nie zulaessig (Konflikt, solange das erste gilt; inaktiv nach
+-- Zertifikat ist nie zulässig (Konflikt, solange das erste gilt; inaktiv nach
 -- einem Widerruf).
 --
 -- Die Personenkennung ist bewusst NICHT eindeutig: der Ersatz nach U2 ist ein
--- neues Zertifikat zur selben Person, und ob das alte widerrufen ist, haengt
--- am gewaehlten Kopf, den die Datenbank nicht kennt.
+-- neues Zertifikat zur selben Person, und ob das alte widerrufen ist, hängt
+-- am gewählten Kopf, den die Datenbank nicht kennt.
 CREATE TABLE reader_key_escrows (
-    -- Kein Fremdschluessel auf trust_events: eine Katalogreparatur darf
+    -- Kein Fremdschlüssel auf trust_events: eine Katalogreparatur darf
     -- trust_events weiter leeren (0002, TRUNCATE-Trigger). Die Zeile entsteht
-    -- ausschliesslich in derselben Transaktion wie ihr Trust-Ereignis.
+    -- ausschließlich in derselben Transaktion wie ihr Trust-Ereignis.
     object_hash BYTEA PRIMARY KEY CHECK (octet_length(object_hash) = 32),
     organization_id BYTEA NOT NULL REFERENCES organizations (organization_id),
     reader_certificate_object_hash BYTEA NOT NULL

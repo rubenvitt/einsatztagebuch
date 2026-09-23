@@ -594,14 +594,14 @@ impl TrustEventValidator for PostgresTrustAuthority {
     ///    Fehlerkoerper nennt ihn.
     /// 2. Die drei Reader-Key-Escrow-Familien laufen durch IHREN Einstieg,
     ///    [`ea_trust::verify_reader_key_escrow_family_admission`] (Ruling U1):
-    ///    der Registrierungsabschluss bleibt fuer sie zu. Danach gilt die
+    ///    der Registrierungsabschluss bleibt für sie zu. Danach gilt die
     ///    Cutover-Vorbedingung (v1.1-Profil §5) — siehe
     ///    [`escrow_cutover_gate`]. Die Reihenfolge ist fest: erst die Freigabe,
-    ///    einzeln, dann das Escrow, das sie nennt, dann jede Oeffnung. Ein
-    ///    Escrow ohne angenommene Freigabe ist ungueltig. Die Freigabe muss
+    ///    einzeln, dann das Escrow, das sie nennt, dann jede Öffnung. Ein
+    ///    Escrow ohne angenommene Freigabe ist ungültig. Die Freigabe muss
     ///    innerhalb ihrer 300-s-Frist gegen die SERVERUHR hochgeladen werden;
     ///    das Escrow selbst ist nicht an `now` gebunden.
-    /// 3. Jedes andere `.etb` laeuft durch
+    /// 3. Jedes andere `.etb` läuft durch
     ///    [`ea_trust::verify_catalogue_admission`]: Organisationsbindung,
     ///    die Signiererregel SEINER Objektart im aktuellen Abschluss, und sein
     ///    Zeitfenster. Aufnahme ist keine Autoritaet — sie legt das Objekt in
@@ -669,8 +669,8 @@ impl TrustEventValidator for PostgresTrustAuthority {
             )
             .map_err(|error| TrustPublishError::from(map_escrow_admission_error(error)))?;
             escrow_cutover_gate(&prepared, exact_etb_bytes, &admission)?;
-            // Die Object-Store-Lesungen liegen ausserhalb des SQL-Snapshots.
-            // Nur ein Lauf, den DERSELBE Katalogstand einrahmt, zaehlt; der
+            // Die Object-Store-Lesungen liegen außerhalb des SQL-Snapshots.
+            // Nur ein Lauf, den DERSELBE Katalogstand einrahmt, zählt; der
             // Index vergleicht ihn noch einmal unter der Organisationssperre.
             if self.catalog_identity(organization_id).await? != before {
                 return Err(TrustServiceError::StateConflict.into());
@@ -968,12 +968,12 @@ const fn map_admission_error(error: TrustError) -> TrustServiceError {
 
 /// Die Befunde des Escrow-Einstiegs in der Sprache des Protokolls.
 ///
-/// Jeder Arm ausdruecklich, damit ein spaeter ergaenzter Befund nicht still
+/// Jeder Arm ausdrücklich, damit ein später ergänzter Befund nicht still
 /// bei `EventInvalid` landet. Keine neuen Leitungscodes: die
 /// `EA-TRUST-ESCROW-*`-Codes des Kerns erscheinen nicht auf der Leitung.
 ///
-/// - Konflikt zweier gueltiger Escrows: 409, wie jeder Bytekonflikt.
-/// - Traegt, gilt aber jetzt nicht (Reader widerrufen, Signierer nicht mehr
+/// - Konflikt zweier gültiger Escrows: 409, wie jeder Bytekonflikt.
+/// - Trägt, gilt aber jetzt nicht (Reader widerrufen, Signierer nicht mehr
 ///   aktiv, Frist): 422 NOT-VALID-NOW.
 /// - Kein Kopf oder fremde Organisation im Kern: 422 UNVERIFIABLE, wie beim
 ///   Registrierungsabschluss.
@@ -1010,18 +1010,18 @@ const fn map_escrow_admission_error(error: TrustError) -> TrustServiceError {
 /// Die Cutover-Vorbedingung des Reader-Key-Escrows (v1.1-Profil §5, §9).
 ///
 /// Freigabe und Escrow werden nur angenommen, wenn der Katalog eine aktive,
-/// wurzelsignierte `webBundleRelease` einer v1.1-faehigen Fassung traegt, die
+/// wurzelsignierte `webBundleRelease` einer v1.1-fähigen Fassung trägt, die
 /// zur Registry-Version der PUBLIKATION wirkt — der Version, an die die
-/// Publikationsfreigabe gebunden ist. Das Urteil faellt in
+/// Publikationsfreigabe gebunden ist. Das Urteil fällt in
 /// [`ea_trust::reader_key_escrow_cutover_release`], derselben Funktion, die
 /// die native Zeremonie ruft; einen Serverschalter gibt es nicht. Eine
-/// Oeffnung braucht kein eigenes Tor: sie verlangt ein gueltiges Escrow im
+/// Öffnung braucht kein eigenes Tor: sie verlangt ein gültiges Escrow im
 /// Katalog, und das kam nur durch diese Sperre hinein.
 ///
 /// Solange keine Freigabe den Katalog erreicht — bis Scheibe (f) gibt es
-/// keinen Annahmeweg fuer `webBundleRelease` —, bleibt die Annahme zu:
-/// 422 NOT-VALID-NOW. `UNVERIFIABLE` hiesse, die geteilte Pruefung koenne
-/// ueber das Objekt nichts sagen; sie hat es aber geprueft.
+/// keinen Annahmeweg für `webBundleRelease` —, bleibt die Annahme zu:
+/// 422 NOT-VALID-NOW. `UNVERIFIABLE` hieße, die geteilte Prüfung könne
+/// über das Objekt nichts sagen; sie hat es aber geprüft.
 fn escrow_cutover_gate(
     prepared: &PreparedClosure,
     exact_etb_bytes: &[u8],
