@@ -247,6 +247,9 @@ pub fn prepare_reader_key_escrow_package(
     ))
 }
 
+/// Eine Leseabfrage gegen die Datenbank oder die laufende Transaktion.
+type StoreQuery<'a> = &'a dyn Fn(&str, &[StoreValue]) -> Result<Option<StoreRow>, StoreError>;
+
 /// Lokale Eindeutigkeit (Profil §5.3): höchstens ein Escrow je
 /// Reader-Zertifikat und höchstens eines je Person unter einem im Kopf noch
 /// aktiven Zertifikat. Läuft in der Vorprüfung und noch einmal in der
@@ -254,7 +257,7 @@ pub fn prepare_reader_key_escrow_package(
 /// nichts durchlässt; `UNIQUE(organization_id, reader_certificate_hash)` in
 /// Migration 28 ist die Rückfallebene.
 fn require_unique_publication(
-    query: &dyn Fn(&str, &[StoreValue]) -> Result<Option<StoreRow>, StoreError>,
+    query: StoreQuery<'_>,
     head: &SelectedRegistryHead,
     core: &ReaderKeyEscrowCoreV1,
 ) -> Result<(), ReaderKeyEscrowError> {
