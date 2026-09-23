@@ -982,3 +982,243 @@ pub async fn seed_chain_head(
     .await
     .expect("seeding the chain head must succeed");
 }
+
+// ---------------------------------------------------------------------------
+// Reader-Key-Escrow (v1.1-Profil §3) über dem fortgeschriebenen Abschluss
+// ---------------------------------------------------------------------------
+//
+// Escrow-Zeugen brauchen den ZWEITEN Reader (`build_with(true, …)`): der erste
+// wird bei Version 4 aktiviert, der Recovery-Empfänger erst bei Version 5 —
+// zum Enrollment des ersten Readers war er also nicht aktiv, und kein Escrow
+// dieses Readers kann Profil §3.1 erfüllen. Der zweite Reader kommt bei
+// Version 7, nach dem Recovery-Empfänger.
+
+/// Der Registry-Zustand, in dem der zweite Reader aktiv wurde — gelesen aus
+/// dem Kopfereignis des Abschlusses, nicht nachgerechnet.
+#[derive(Clone, Copy)]
+pub struct EscrowEnrollment {
+    pub certificate: CertificateHash,
+    pub version: RegistryVersion,
+    pub head_hash: Hash32,
+    pub sequence: ChainSequence,
+}
+
+/// Die Personenkennung des zweiten Readers in den Escrow-Zeugen.
+pub const ESCROW_READER_SUBJECT: [u8; 16] = [0x5b; 16];
+
+/// Die vorgeschlagene Sequenz des Servers für diesen Abschluss: die größte
+/// `effective-from-sequence` seiner Köpfe.
+fn escrow_basis_sequence(closure: &ExtendedClosure) -> u64 {
+    closure
+        .objects
+        .iter()
+        .filter_map(|object| registry_fields(&object.bytes))
+        .map(|fields| fields.effective_from_sequence.get())
+        .max()
+        .expect("the closure carries registry heads")
+}
+
+fn registry_fields(bytes: &[u8]) -> Option<RegistryEventFieldsV1> {
+    let Ok(ea_format::ParsedArchiveObject::Trust(parsed)) = ea_format::decode_exact_object(bytes)
+    else {
+        return None;
+    };
+    match parsed.value().decoded_payload().ok()? {
+        ea_format::DecodedTrustPayloadV1::RegistryEvent(core) => Some(core.fields().clone()),
+        _ => None,
+    }
+}
+
+/// Der Enrollment-Zustand des zweiten Readers.
+///
+/// # Panics
+///
+/// Wenn der Abschluss den zweiten Reader nicht trägt.
+#[must_use]
+pub fn escrow_enrollment(closure: &ExtendedClosure) -> EscrowEnrollment {
+    let head = closure
+        .objects
+        .iter()
+        .find(|object| object.name == "second-reader-head-event")
+        .expect("escrow witnesses need build_with(true, …)");
+    let fields = registry_fields(&head.bytes).expect("the head event decodes");
+    EscrowEnrollment {
+        certificate: closure
+            .second_reader_certificate_hash
+            .expect("escrow witnesses need build_with(true, …)"),
+        version: fields.registry_version,
+        head_hash: hash32(object_hash(&head.bytes)),
+        sequence: fields.effective_from_sequence,
+    }
+}
+
+/// Ein Escrow-Core des zweiten Readers mit ECHTEM Chiffrat an den
+/// Recovery-Empfänger.
+///
+/// # Panics
+///
+/// Wenn die Versiegelung scheitert.
+#[must_use]
+pub fn escrow_core(
+    closure: &ExtendedClosure,
+    reader_subject: [u8; 16],
+    issued_at: i64,
+) -> ea_format::ReaderKeyEscrowCoreV1 {
+    let enrollment = escrow_enrollment(closure);
+    let mut core = ea_format::ReaderKeyEscrowCoreV1 {
+        organization_id: closure.organization_id,
+        reader_certificate_object_hash: enrollment.certificate,
+        reader_subject_id: ea_types::SubjectId::try_from(&reader_subject[..]).expect("16 bytes"),
+        enrollment_registry_version: enrollment.version,
+        enrollment_registry_head_hash: enrollment.head_hash,
+        enrollment_sequence: enrollment.sequence,
+        recovery_certificate_object_hash: closure.recovery_certificate_hash,
+        recovery_kem_key_thumbprint: kem_key(RECOVERY_KEM_SEED).thumbprint(),
+        encapsulated_key: [0; 32],
+        encrypted_reader_kem_key: [0; 48],
+        issued_at: UnixMillis::new(issued_at),
+        root_key_thumbprint: signing_key(ROOT_SEED).thumbprint(),
+    };
+    let recovery_public =
+        ea_crypto::HpkeRecipientPrivateKey::from_bytes(SecretBytes::new(RECOVERY_KEM_SEED))
+            .expect("a declared X25519 seed loads")
+            .public_key();
+    let (encapsulated_key, encrypted) =
+        ea_testkit::reader_key_escrow_fixture::seal_reader_kem_key_for_escrow(
+            &SecretBytes::new(SECOND_READER_KEM_SEED),
+            *recovery_public.as_bytes(),
+            &core,
+        )
+        .expect("sealing the reader KEM must succeed");
+    core.encapsulated_key = encapsulated_key;
+    core.encrypted_reader_kem_key = encrypted;
+    core
+}
+
+/// Die Freigabefelder gegen den AKTUELLEN Kopf des Abschlusses; die drei
+/// Bindungsfelder setzt [`escrow_objects`] aus dem Core.
+#[must_use]
+pub fn escrow_approval_core(
+    closure: &ExtendedClosure,
+    id: u8,
+    window: (i64, i64),
+) -> ea_format::ReaderKeyEscrowApprovalCoreV1 {
+    let context = frozen_context();
+    ea_format::ReaderKeyEscrowApprovalCoreV1 {
+        authorization_id: AuthorizationId::try_from([id; 16].as_slice()).expect("16 bytes"),
+        organization_id: closure.organization_id,
+        registry_version: closure.registry_version,
+        registry_head_hash: hash32(closure.registry_head_hash),
+        authorization_sequence: escrow_basis_sequence(closure),
+        admin_key_thumbprint: signing_key(ADMIN_SEED).thumbprint(),
+        admin_certificate_object_hash: CertificateHash::from(context.admin_certificate_hash),
+        admin_operator_binding_object_hash: context.admin_binding_hash,
+        escrow_core_hash: Hash32::ZERO,
+        reader_certificate_object_hash: CertificateHash::from(ObjectHash::from(Hash32::ZERO)),
+        reader_subject_id: ea_types::SubjectId::try_from(&[0_u8; 16][..]).expect("16 bytes"),
+        issued_at: UnixMillis::new(window.0),
+        expires_at: UnixMillis::new(window.1),
+        nonce: [id.wrapping_add(0x40); 32],
+    }
+}
+
+/// Freigabe und Escrow zu EINEM Core, konsistent gebunden: `(freigabe,
+/// escrow)`. Signiert von Administrator und Wurzel des Abschlusses.
+#[must_use]
+pub fn escrow_objects(
+    core: &ea_format::ReaderKeyEscrowCoreV1,
+    approval: &ea_format::ReaderKeyEscrowApprovalCoreV1,
+) -> (Vec<u8>, Vec<u8>) {
+    let context = frozen_context();
+    ea_testkit::reader_key_escrow_fixture::escrow_with_approval(
+        core,
+        approval,
+        &ea_testkit::reader_key_escrow_fixture::FixtureTrustSigner {
+            seed: ADMIN_SEED,
+            certificate_hash: CertificateHash::from(context.admin_certificate_hash),
+        },
+        &ea_testkit::reader_key_escrow_fixture::FixtureTrustSigner {
+            seed: ROOT_SEED,
+            certificate_hash: context.root_certificate_hash,
+        },
+    )
+}
+
+/// Eine Öffnungsautorisierung über `escrow` gegen den aktuellen Kopf, signiert
+/// von den genannten Key Approvern des Abschlusses (`0` = A, `1` = B).
+///
+/// # Panics
+///
+/// Wenn der Abschluss keine Approver trägt.
+#[must_use]
+pub fn escrow_recovery_authorization(
+    closure: &ExtendedClosure,
+    escrow: &[u8],
+    core: &ea_format::ReaderKeyEscrowCoreV1,
+    id: u8,
+    window: (i64, i64),
+    approvers: &[usize],
+) -> Vec<u8> {
+    let certificates = closure
+        .approver_certificate_hashes
+        .expect("recovery witnesses need build_with(_, true)");
+    let seeds = [APPROVER_A_SEED, APPROVER_B_SEED];
+    let recovery = ea_format::ReaderKeyEscrowRecoveryAuthorizationCoreV1 {
+        authorization_id: AuthorizationId::try_from([id; 16].as_slice()).expect("16 bytes"),
+        organization_id: core.organization_id,
+        registry_version: closure.registry_version,
+        registry_head_hash: hash32(closure.registry_head_hash),
+        authorization_sequence: escrow_basis_sequence(closure),
+        escrow_object_hash: object_hash(escrow),
+        reader_certificate_object_hash: core.reader_certificate_object_hash,
+        reader_subject_id: core.reader_subject_id,
+        enrollment_registry_version: core.enrollment_registry_version,
+        enrollment_registry_head_hash: core.enrollment_registry_head_hash,
+        target_transport_key_thumbprint: kem_key([0xdb; 32]).thumbprint(),
+        issued_at: UnixMillis::new(window.0),
+        expires_at: UnixMillis::new(window.1),
+        nonce: [id.wrapping_add(0x40); 32],
+    };
+    let signers: Vec<_> = approvers
+        .iter()
+        .map(
+            |&index| ea_testkit::reader_key_escrow_fixture::FixtureTrustSigner {
+                seed: seeds[index],
+                certificate_hash: certificates[index],
+            },
+        )
+        .collect();
+    ea_testkit::reader_key_escrow_fixture::signed_reader_key_escrow_recovery_authorization(
+        &recovery, &signers,
+    )
+}
+
+/// Eine wurzelsignierte `webBundleRelease` dieser Organisation.
+///
+/// Die Cutover-Vorbedingung (Profil §5) öffnet die Escrow-Annahme erst, wenn
+/// eine solche Freigabe einer v1.1-fähigen Fassung gilt. Einen
+/// Produktionsweg in den Katalog gibt es bis Scheibe (f) nicht; die Zeugen
+/// legen sie direkt ab.
+#[must_use]
+pub fn web_bundle_release(
+    closure: &ExtendedClosure,
+    bundle_version: &str,
+    effective_from: u64,
+    fill: u8,
+) -> Vec<u8> {
+    let context = frozen_context();
+    ea_testkit::reader_key_escrow_fixture::signed_web_bundle_release(
+        &ea_format::WebBundleReleaseCoreV1 {
+            organization_id: closure.organization_id,
+            bundle_hash: Hash32::try_from([fill; 32].as_slice()).expect("32 bytes"),
+            bundle_version: bundle_version.to_owned(),
+            effective_from_registry_version: RegistryVersion::new(effective_from),
+            issued_at: UnixMillis::new(i64::from(fill)),
+            root_key_thumbprint: signing_key(ROOT_SEED).thumbprint(),
+        },
+        &ea_testkit::reader_key_escrow_fixture::FixtureTrustSigner {
+            seed: ROOT_SEED,
+            certificate_hash: context.root_certificate_hash,
+        },
+    )
+}
