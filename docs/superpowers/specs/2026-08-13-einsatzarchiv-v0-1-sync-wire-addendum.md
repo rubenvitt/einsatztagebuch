@@ -394,15 +394,22 @@ Die Codes der Trust-Annahme, mit ihrer Abbildung:
 | `EA-TRUST-EVENT-NOT-APPLICABLE` | 409 | Ein `registryEvent`, das nicht der nächste Kopf ist — die Zeile „erforderlicher neuerer Registry-Head“. Der Körper führt `required-registry-version` und `required-registry-head-hash` |
 | `EA-TRUST-STATE-CONFLICT` | 503 | Der persistente Vertrauenszustand hat sich unter dem Aufrufer bewegt; `retryable=true`, und ausdrücklich keine Aussage über seine Autorität |
 
-`EA-TRUST-EVENT-UNVERIFIABLE` trifft **genau fünf** Trust-Subtypen, und die
-Menge ist abschließend: `destructionAuthorization`, `destructionTransition`,
-`deletionAttestation`, `webBundleRelease` und `webBundleRevocation`. Die drei
-Vernichtungsarten reisen nicht über `POST /v1/trust/events`:
+`EA-TRUST-EVENT-UNVERIFIABLE` trifft **genau drei** Trust-Subtypen, und die
+Menge ist abschließend: `destructionAuthorization`, `destructionTransition` und
+`deletionAttestation`. Sie reisen nicht über `POST /v1/trust/events`:
 `destructionAuthorization` über `POST /v1/destructions`, `destructionTransition`
 und `deletionAttestation` seit Stufe 5 über den additiven Endpunkt
 `POST /v1/destructions/{destructionId}/events` (Abschnitt „Die beiden additiven
-Vernichtungsendpunkte"); die beiden Bundle-Arten haben in Stufe 3 **keinen**
-Aufnahmeendpunkt und sind nur als Format definiert.
+Vernichtungsendpunkte").
+
+Die beiden Bundle-Arten `webBundleRelease` und `webBundleRevocation` nimmt
+`POST /v1/trust/events` seit dem Reader-Key-Escrow-Profil v1.1 an (Ruling U4),
+und zwar über ihren **eigenen** Prüfeinstieg im Trust-Kern, nicht über den
+Registrierungsabschluss. Eine fremde `organization-id` fällt vorher mit 403
+`EA-TRUST-EVENT-ORGANIZATION`. Eine Freigabe oder ein Widerruf unter fremder
+Wurzel, mit fremdem `root-key-thumbprint` oder in einem Katalog, dessen
+Bundle-Familie nicht trägt, fällt mit 422 `EA-TRUST-EVENT-INVALID`. Mit
+demselben Code fällt ein Widerruf, dessen Freigabe noch nicht im Katalog liegt.
 
 Die `grantAuthorization` gehört ausdrücklich **nicht** dazu: sie wird an
 `POST /v1/trust/events` als **Katalogstoff** angenommen. Angenommen heißt
