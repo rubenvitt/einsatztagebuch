@@ -7,6 +7,9 @@
 #[path = "../src/args.rs"]
 mod args;
 #[allow(dead_code)]
+#[path = "../src/commands/reader_key_escrow.rs"]
+mod escrow_command;
+#[allow(dead_code)]
 #[path = "../src/commands/grant.rs"]
 mod grant_command;
 #[allow(dead_code)]
@@ -195,7 +198,7 @@ fn invalid_subcommands_report_command_specific_choices() {
         (
             "organization",
             "iniit",
-            "einsatzarchiv: unknown organization subcommand iniit; expected init|certify-root",
+            "einsatzarchiv: unknown organization subcommand iniit; expected init|certify-root|reader-key-escrow-publish",
         ),
         (
             "operator",
@@ -1004,6 +1007,76 @@ mod process_native {
             std::io::stderr().flush().unwrap();
             std::process::exit(code.as_i32());
         }
+        // Reader-Key-Escrow (DRK-458). Nur der Laufzeitöffner ist die
+        // Fixture; der Cutover-Port der Publikation bleibt der produktive.
+        // `escrow-stale-runtime` öffnet eine Laufzeit, die während der
+        // Zeremonie VOR dem Verbrauch abläuft.
+        let escrow_opener = |config, anchor: &Path, now: UnixMillis| {
+            let native = NativeOperatorProvider::open_test_fixture(
+                directory.join("ea-native-operator"),
+                false,
+            )?;
+            let stale = directory.join("escrow-stale-runtime").exists();
+            let opened_at = if stale {
+                UnixMillis::new(now.get() - (ea_operator::MAX_INACTIVITY_MS - 3_000))
+            } else {
+                now
+            };
+            let runtime =
+                OperatorRuntime::open_with_test_native(config, anchor, opened_at, false, native)?;
+            if stale {
+                std::thread::sleep(std::time::Duration::from_millis(3_500));
+            }
+            Ok(runtime)
+        };
+        let escrow_code = match invocation.command {
+            args::Command::ReaderKeyEscrowOpen {
+                ref config,
+                ref recovery_key,
+                ref authorization,
+                ref inbox,
+                ref outbox,
+            } => Some(escrow_command::run_open_with_runtime_opener(
+                &invocation,
+                config,
+                recovery_key,
+                authorization,
+                inbox,
+                outbox,
+                support::live_clock(),
+                &escrow_opener,
+            )),
+            args::Command::ReaderKeyEscrowPickup {
+                ref config,
+                ref authorization,
+                ref inbox,
+                ref outbox,
+            } => Some(escrow_command::run_pickup_with_runtime_opener(
+                &invocation,
+                config,
+                authorization,
+                inbox,
+                outbox,
+                support::live_clock(),
+                &escrow_opener,
+            )),
+            args::Command::OrganizationReaderKeyEscrowPublish {
+                ref config,
+                ref inbox,
+            } => Some(escrow_command::run_publish_with_runtime_opener(
+                &invocation,
+                config,
+                inbox,
+                support::live_clock(),
+                &escrow_opener,
+            )),
+            _ => None,
+        };
+        if let Some(code) = escrow_code {
+            std::io::stdout().flush().unwrap();
+            std::io::stderr().flush().unwrap();
+            std::process::exit(code.as_i32());
+        }
         if let args::Command::Posture {
             ref action,
             ref config,
@@ -1501,6 +1574,9 @@ mod process_native {
 
     mod grant {
         include!("operator_grant/mod.rs");
+    }
+    mod escrow {
+        include!("operator_escrow/mod.rs");
     }
     mod destruction {
         include!("operator_destruction/mod.rs");

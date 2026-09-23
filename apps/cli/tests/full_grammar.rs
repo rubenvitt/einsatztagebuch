@@ -55,7 +55,7 @@ const PIN_V1: &str = "pin-7731-distinct";
 /// Geschlossen und nicht „mindestens diese Zeilen": nur ein vollstaendiger
 /// Vergleich faellt ueber eine zusaetzliche oder umsortierte Zeile. Die
 /// ersten sieben Zeilen sind `design.md` §16.1 in dessen Reihenfolge.
-const PRINTED_GRAMMAR_V1: [&str; 26] = [
+const PRINTED_GRAMMAR_V1: [&str; 30] = [
     "einsatzarchiv --trust-anchor <file> verify <archive-path>",
     "einsatzarchiv --trust-anchor <file> list <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
@@ -65,6 +65,7 @@ const PRINTED_GRAMMAR_V1: [&str; 26] = [
     "einsatzarchiv --trust-anchor <file> recovery-test <archive-path> --key-inventory <file> --output <report-file>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
     "einsatzarchiv --trust-anchor <new-file> organization certify-root --initial-registry-version <u64>",
+    "einsatzarchiv --trust-anchor <file> organization reader-key-escrow-publish --operator-config <file> --escrow-inbox <dir>",
     "einsatzarchiv --trust-anchor <file> posture target --operator-config <file> --output <new-target.json>",
     "einsatzarchiv --trust-anchor <file> posture issue --operator-config <file> --posture-target <target.json> --evidence-reference <public-document> --valid-for-ms <1..86400000> --output <new-document.cbor>",
     "einsatzarchiv --trust-anchor <file> posture import --operator-config <file> --posture-document <document.cbor>",
@@ -74,6 +75,8 @@ const PRINTED_GRAMMAR_V1: [&str; 26] = [
     "einsatzarchiv --trust-anchor <file> clock-release apply --operator-config <file> --release <file>",
     "einsatzarchiv --trust-anchor <file> writer-transition prepare --operator-config <file> --request <file>",
     "einsatzarchiv --trust-anchor <file> writer-transition activate --operator-config <file> --request <file> --transition-object <file> --valid-through <sequence> --not-after <unix-millis>",
+    "einsatzarchiv --trust-anchor <file> reader-key-escrow open --operator-config <file> --recovery-key <source> --authorization <file> --escrow-inbox <dir> --escrow-outbox <dir>",
+    "einsatzarchiv --trust-anchor <file> reader-key-escrow pickup --operator-config <file> --authorization <file> --escrow-inbox <dir> --escrow-outbox <dir>",
     "key-source is <path> | file:<path> | container:<path>;passphrase-file=<path> | pkcs11:module=<path>;token=<label>;id=<hex>;pin-file=<path>; passphrase and pin are read from the named file with owner-only permissions, never from argv or the environment",
     "grant verifies the archive and requires --operator-config for native historical-regrant presence; signed audited grants are appended under --output or archive/grants",
     "recovery-test verifies the archive, requires a free output path and reads the key inventory, then ends with exit 21 naming the missing recovery test service; it writes nothing",
@@ -82,6 +85,7 @@ const PRINTED_GRAMMAR_V1: [&str; 26] = [
     "registry revocation-plan prepares change 1 for the object named by target_certificate_hash in the operator config and reports its reach; it publishes nothing, because publishing needs the root signature",
     "clock-release apply consumes an already issued release file and never prints its bytes; issuing one is a step of the administration workflow and not of this tool",
     "writer-transition prepare checks the request file against the selected head and shows the fields the root ceremony will sign; activate holds the published transition object against the same request and plans change 3; neither signs nor publishes anything",
+    "reader-key-escrow-publish is refused until the web bundle cutover (EA-ESCROW-CUTOVER-NOT-READY); open consumes the authorization before the recovery key is used and writes only the sealed envelope",
 ];
 
 /// Ein abgelegter Bestand samt einem Verzeichnis AUSSERHALB fuer alle

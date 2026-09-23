@@ -42,6 +42,7 @@ pub mod list;
 pub mod operator;
 pub mod organization;
 pub mod posture;
+pub mod reader_key_escrow;
 pub mod recovery_test;
 pub mod registry;
 pub mod report;
@@ -113,6 +114,32 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
         Command::OrganizationCertifyRoot {
             initial_registry_version,
         } => organization::run_certify_root(invocation, *initial_registry_version),
+        Command::OrganizationReaderKeyEscrowPublish { config, inbox } => {
+            reader_key_escrow::run_publish(invocation, config, inbox, now)
+        }
+        // Zeremonie B: Fachlogik in `ea_admin::reader_key_escrow_opening`, der
+        // Bestand eine Ebene tiefer in `OperatorRuntime::open` geprüft.
+        Command::ReaderKeyEscrowOpen {
+            config,
+            recovery_key,
+            authorization,
+            inbox,
+            outbox,
+        } => reader_key_escrow::run_open(
+            invocation,
+            config,
+            recovery_key,
+            authorization,
+            inbox,
+            outbox,
+            now,
+        ),
+        Command::ReaderKeyEscrowPickup {
+            config,
+            authorization,
+            inbox,
+            outbox,
+        } => reader_key_escrow::run_pickup(invocation, config, authorization, inbox, outbox, now),
         Command::Posture { action, config } => posture::run(invocation, action, config, now),
         Command::Operator {
             action,
