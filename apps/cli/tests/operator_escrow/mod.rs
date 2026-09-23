@@ -357,7 +357,10 @@ impl EscrowInstallation {
     }
 
     /// Kanarienvogelsuche: weder Pfad, PIN, Label noch Person stehen in
-    /// Ausgabe, Dateinamen oder Auditbytes.
+    /// Ausgabe, Dateinamen oder Auditbytes. Die 32 Klartextbytes des
+    /// Reader-KEM und der Recovery-Seed stehen darüber hinaus auch nicht im
+    /// INHALT der Ausgangsdateien und nicht in einem gespeicherten Umschlag —
+    /// weder roh noch als Hex oder Base64 (review-c P3-3).
     fn assert_no_canaries(&self, outputs: &[&std::process::Output]) {
         let subject_hex = hex::encode(ESCROW_SUBJECT);
         let mut haystacks: Vec<Vec<u8>> = Vec::new();
@@ -365,8 +368,11 @@ impl EscrowInstallation {
             haystacks.push(output.stdout.clone());
             haystacks.push(output.stderr.clone());
         }
+        let mut outbox_contents = Vec::new();
         for entry in fs::read_dir(&self.outbox).unwrap() {
-            haystacks.push(entry.unwrap().file_name().into_encoded_bytes());
+            let entry = entry.unwrap();
+            haystacks.push(entry.file_name().into_encoded_bytes());
+            outbox_contents.push(fs::read(entry.path()).unwrap());
         }
         for row in self.audit_rows() {
             haystacks.push(row.exact_bytes().to_vec());
@@ -378,20 +384,77 @@ impl EscrowInstallation {
             assert!(!text.contains(ESCROW_PIN), "pin leaked");
             assert!(!text.contains("drk250-fixture"), "token label leaked");
             assert!(!text.contains("pin-file"), "key source leaked");
-            assert!(
-                !haystack
-                    .windows(directory.len())
-                    .any(|window| window == directory.as_slice()),
-                "path leaked"
-            );
-            assert!(
-                !haystack
-                    .windows(ESCROW_SUBJECT.len())
-                    .any(|window| window == ESCROW_SUBJECT),
-                "raw subject id leaked"
-            );
+            assert!(!contains(haystack, &directory), "path leaked");
+            assert!(!contains(haystack, &ESCROW_SUBJECT), "raw subject id leaked");
+        }
+        // Die Person steht legitim im Restore-Kontext des Umschlags; dort
+        // wird nur nach den Schlüsselbytes gesucht.
+        let mut secret_haystacks = haystacks;
+        secret_haystacks.extend(outbox_contents);
+        let database = self.database();
+        let mut after = Vec::new();
+        while let Some(row) = database
+            .query_row(
+                "SELECT authorization_object_hash,exact_envelope FROM reader_key_escrow_result WHERE authorization_object_hash>?1 ORDER BY authorization_object_hash LIMIT 1",
+                &[StoreValue::Blob(after.clone())],
+            )
+            .unwrap()
+        {
+            after = row.blob(0).unwrap().to_vec();
+            secret_haystacks.push(row.blob(1).unwrap().to_vec());
+        }
+        for (name, secret) in [
+            ("reader KEM", fixture::other_recipient_secret_bytes()),
+            ("recovery seed", fixture::complete_recipient_secret_bytes()),
+        ] {
+            let encodings = secret_encodings(&secret);
+            for haystack in &secret_haystacks {
+                for encoding in &encodings {
+                    assert!(!contains(haystack, encoding), "{name} leaked");
+                }
+            }
         }
     }
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+/// Ein Geheimnis roh, als Hex (klein und groß) und als Base64 (Standard und
+/// URL-sicher, je mit und ohne Auffüllung).
+fn secret_encodings(secret: &[u8; 32]) -> Vec<Vec<u8>> {
+    const STANDARD: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const URL_SAFE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let base64 = |alphabet: &[u8; 64], pad: bool| {
+        let mut encoded = Vec::new();
+        for chunk in secret.chunks(3) {
+            let bits = chunk
+                .iter()
+                .enumerate()
+                .fold(0_u32, |bits, (index, byte)| {
+                    bits | u32::from(*byte) << (16 - 8 * index)
+                });
+            for position in 0..=chunk.len() {
+                encoded.push(alphabet[((bits >> (18 - 6 * position)) & 0x3f) as usize]);
+            }
+            if pad {
+                encoded.extend(std::iter::repeat_n(b'=', 3 - chunk.len()));
+            }
+        }
+        encoded
+    };
+    vec![
+        secret.to_vec(),
+        hex::encode(secret).into_bytes(),
+        hex::encode_upper(secret).into_bytes(),
+        base64(STANDARD, true),
+        base64(STANDARD, false),
+        base64(URL_SAFE, true),
+        base64(URL_SAFE, false),
+    ]
 }
 
 /// Der Core des Escrows: der Reader-KEM der Fixture, versiegelt an ihren
@@ -880,4 +943,16 @@ fn an_expired_result_is_purged_before_a_failing_reauthentication() {
             == Some(installation.material.operator_binding)
     );
     installation.assert_no_canaries(&[&consumed, &refused]);
+}
+
+/// Die Kodierungen der Kanarienvogelsuche treffen, was sie suchen sollen.
+#[test]
+fn the_canary_encodings_match_known_base64() {
+    let secret: [u8; 32] = std::array::from_fn(|index| {
+        u8::try_from((index * 37 + 0xf0) % 256).unwrap()
+    });
+    let encodings = secret_encodings(&secret);
+    assert!(encodings.contains(&b"8BU6X4SpzvMYPWKHrNH2G0Bliq/U+R5DaI2y1/whRms=".to_vec()));
+    assert!(encodings.contains(&b"8BU6X4SpzvMYPWKHrNH2G0Bliq_U-R5DaI2y1_whRms".to_vec()));
+    assert!(encodings.contains(&hex::encode(secret).into_bytes()));
 }
