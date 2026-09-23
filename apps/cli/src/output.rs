@@ -126,15 +126,18 @@ const GRAMMAR_V1: [&str; 23] = [
     "einsatzarchiv --trust-anchor <file> reader-key-escrow pickup --operator-config <file> --authorization <file> --escrow-inbox <dir> --escrow-outbox <dir>",
 ];
 
-/// Was die Reader-Key-Escrow-Kommandos tun — und was bis zum Cutover nicht.
+/// Was die Reader-Key-Escrow-Kommandos tun.
 ///
-/// Die Publikation ist gebaut, endet aber bis Scheibe (f) als erster Schritt
-/// mit `EA-ESCROW-CUTOVER-NOT-READY`; die Öffnung verbraucht die
-/// Autorisierung vor dem privaten Schlüssel und gibt allein den versiegelten
-/// Umschlag heraus. Englisch wie jede beobachtbare Zeichenkette.
-const READER_KEY_ESCROW_SCOPE_NOTE_V1: &str = "reader-key-escrow-publish is refused until the web \
-     bundle cutover (EA-ESCROW-CUTOVER-NOT-READY); open consumes the authorization before the \
-     recovery key is used and writes only the sealed envelope";
+/// Die Publikation verlangt die aktive, wurzelsignierte Freigabe einer
+/// v1.1-fähigen Bundle-Fassung im Bestand und legt Freigabe und Escrow unter
+/// `trust/` ab; die Öffnung verbraucht die Autorisierung vor dem privaten
+/// Schlüssel und gibt allein den versiegelten Umschlag heraus. Englisch wie
+/// jede beobachtbare Zeichenkette.
+const READER_KEY_ESCROW_SCOPE_NOTE_V1: &str = "reader-key-escrow-publish needs an active \
+     root-signed web bundle release of a v1.1-capable version in the archive (else \
+     EA-ESCROW-CUTOVER-NOT-READY) and writes approval and escrow under archive/trust; open \
+     consumes the authorization before the recovery key is used and writes only the sealed \
+     envelope";
 
 /// Was `organization init` TUT — und was ausdruecklich nicht.
 ///

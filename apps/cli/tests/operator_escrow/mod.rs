@@ -52,6 +52,15 @@ struct EscrowInstallation {
 
 impl EscrowInstallation {
     fn new(name: &str, purpose: &str) -> Self {
+        Self::with_escrow(name, purpose, true)
+    }
+
+    /// Ein Wirt, dessen Bestand noch KEIN Escrow trägt — für die Publikation.
+    fn without_escrow(name: &str, purpose: &str) -> Self {
+        Self::with_escrow(name, purpose, false)
+    }
+
+    fn with_escrow(name: &str, purpose: &str, published: bool) -> Self {
         let directory = support::temp_dir(name);
         install_fixture_helper(directory.path());
         fs::write(directory.path().join("authority-fixture"), b"").unwrap();
@@ -92,12 +101,14 @@ impl EscrowInstallation {
             },
         );
         let escrow_hash = ea_crypto::object_hash(&escrow);
-        material
-            .fixture
-            .push_exact_bytes("trust/reader-key-escrow-approval.etb", approval);
-        material
-            .fixture
-            .push_exact_bytes("trust/reader-key-escrow.etb", escrow);
+        if published {
+            material
+                .fixture
+                .push_exact_bytes("trust/reader-key-escrow-approval.etb", approval);
+            material
+                .fixture
+                .push_exact_bytes("trust/reader-key-escrow.etb", escrow);
+        }
         let archive = directory.path().join("archive");
         support::materialize(&material.fixture, &archive);
         let anchor = directory.path().join("independent-anchor.etb");
@@ -552,9 +563,10 @@ fn approval_core(
     }
 }
 
-/// Pflicht bis (f): die Publikation endet als erster Schritt mit Exit 21 —
-/// keine Präsenz, keine Signatur, keine Sperr-, Publikations- oder
-/// Auditzeile, keine Datei.
+/// Profil §11 („Publikation ohne aktive v1.1-webBundleRelease“): der Bestand
+/// trägt keine Bundle-Freigabe, also endet die Publikation als erster Schritt
+/// mit Exit 21 — keine Präsenz, keine Signatur, keine Sperr-, Publikations-
+/// oder Auditzeile, keine Datei.
 #[test]
 fn reader_key_escrow_publish_is_locked_before_any_side_effect() {
     let installation = EscrowInstallation::new("escrow-publish-locked", "admin-root-ceremony");
@@ -1157,4 +1169,314 @@ fn web_bundle_release_needs_the_root_ceremony_host_and_has_no_json_form() {
     assert_eq!(output.status.code(), Some(21));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("web-bundle "));
     assert!(authority.trust_files().len() == before.len());
+}
+
+// ---------------------------------------------------------------------------
+// Die freigeschaltete Publikation (Scheibe f, F10)
+// ---------------------------------------------------------------------------
+
+/// Legt beim nächsten Root-Signieren die Dateien aus
+/// `inject-before-root-signature/` in den Trust-Ordner des Bestands — der
+/// Platz eines anderen Prozesses zwischen Signatur und Commit. Einmalig.
+pub(super) fn inject_before_root_signature(directory: &Path) {
+    let staged = directory.join("inject-before-root-signature");
+    let Ok(entries) = fs::read_dir(&staged) else {
+        return;
+    };
+    let trust = directory.join("archive").join(ea_archive::TRUST_DIR_V1);
+    fs::create_dir_all(&trust).unwrap();
+    for entry in entries {
+        let entry = entry.unwrap();
+        fs::copy(entry.path(), trust.join(entry.file_name())).unwrap();
+    }
+    fs::remove_dir_all(staged).unwrap();
+}
+
+impl EscrowInstallation {
+    fn put_package(&self) {
+        let package = encode_reader_key_escrow_package(&self.core).unwrap();
+        fs::write(
+            self.inbox.join(reader_key_escrow_transfer_file_name(
+                ReaderKeyEscrowTransferKindV1::Package,
+                &package,
+            )),
+            &package,
+        )
+        .unwrap();
+    }
+
+    fn publish(&self) -> std::process::Output {
+        self.run(
+            &[
+                "organization",
+                "reader-key-escrow-publish",
+                "--operator-config",
+                self.config.to_str().unwrap(),
+                "--escrow-inbox",
+                self.inbox.to_str().unwrap(),
+            ],
+            None,
+        )
+    }
+
+    /// Root signiert eine v1.1-fähige Freigabe über die CLI; zurück kommen
+    /// ihre exakten Bytes.
+    fn release(&self) -> Vec<u8> {
+        let bundle = self.path("reader-bundle.bin");
+        fs::write(&bundle, b"reader bundle 2026.4.0").unwrap();
+        let output = self.bundle_command(&[
+            "web-bundle-release",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--bundle-version",
+            ea_trust::MIN_ESCROW_BUNDLE_VERSION,
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let hex = reported_object(&output, "released");
+        fs::read(
+            self.path("archive")
+                .join(ea_archive::TRUST_DIR_V1)
+                .join(format!("{hex}.etb")),
+        )
+        .unwrap()
+    }
+
+    fn stage_injection(&self, objects: &[Vec<u8>]) {
+        let staged = self.path("inject-before-root-signature");
+        fs::create_dir_all(&staged).unwrap();
+        for bytes in objects {
+            fs::write(
+                staged.join(format!(
+                    "{}.etb",
+                    hex::encode(ea_crypto::object_hash(bytes).as_bytes())
+                )),
+                bytes,
+            )
+            .unwrap();
+        }
+    }
+
+    fn publication_audit(&self) -> Vec<Option<ObjectHash>> {
+        self.audit_rows()
+            .into_iter()
+            .filter_map(|row| match row.action() {
+                LocalAuditActionV1::ReaderKeyEscrowPublication(context) => {
+                    Some(context.bundle_release_object_hash())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Nichts von der Publikation ist geschehen: kein Verbrauch, keine
+    /// Publikations- oder Auditzeile, keine Escrow-Datei.
+    fn assert_nothing_published(&self, trust_before: &[String]) {
+        assert_eq!(self.count("operator_admin_replay"), 0);
+        assert_eq!(self.count("reader_key_escrow_publication"), 0);
+        assert!(self.publication_audit().is_empty());
+        let trust = self.path("archive").join(ea_archive::TRUST_DIR_V1);
+        for name in self.trust_files() {
+            if trust_before.contains(&name) {
+                continue;
+            }
+            let Ok(ea_format::ParsedArchiveObject::Trust(parsed)) =
+                ea_format::decode_exact_object(&fs::read(trust.join(&name)).unwrap())
+            else {
+                panic!("an unexpected file under trust/: {name}");
+            };
+            assert!(
+                !matches!(
+                    parsed.value().subtype(),
+                    ea_format::TrustSubtypeV1::ReaderKeyEscrow
+                        | ea_format::TrustSubtypeV1::ReaderKeyEscrowApproval
+                ),
+                "no escrow file: {name}"
+            );
+        }
+    }
+}
+
+/// Hinter einer von Root signierten v1.1-Freigabe publiziert die CLI: Audit 13
+/// nennt genau diese Freigabe, Freigabe und Escrow liegen unter `trust/`, und
+/// der Bestand besteht die Offline-Prüfung mit dem Escrow. Ein exaktes
+/// Wiedereinspielen liefert dieselben Bytes.
+#[test]
+fn reader_key_escrow_publish_distributes_behind_a_root_signed_release() {
+    let installation =
+        EscrowInstallation::without_escrow("escrow-publish-open", "admin-root-ceremony");
+    let release = installation.release();
+    installation.put_package();
+    let output = installation.publish();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(stdout.contains("reader-key-escrow published"), "{stdout}");
+    let field = |name: &str| {
+        stdout
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix(&format!("{name}=")))
+            .unwrap()
+            .to_owned()
+    };
+    let (approval_hex, escrow_hex) = (field("approval"), field("escrow"));
+    let trust = installation.path("archive").join(ea_archive::TRUST_DIR_V1);
+    assert!(trust.join(format!("{approval_hex}.etb")).exists());
+    assert!(trust.join(format!("{escrow_hex}.etb")).exists());
+    assert_eq!(installation.count("reader_key_escrow_publication"), 1);
+    assert_eq!(
+        installation
+            .publication_audit()
+            .into_iter()
+            .map(|hash| hash.map(|hash| hex::encode(hash.as_bytes())))
+            .collect::<Vec<_>>(),
+        [Some(hex::encode(ea_crypto::object_hash(&release).as_bytes()))]
+    );
+
+    // Offline, ohne Server: Gate `trust` trägt über den Bestand mit Escrow.
+    let anchor =
+        ea_trust::decode_trust_anchor(&fs::read(&installation.anchor).unwrap()).unwrap();
+    let source = ea_recovery::FsArchiveSource::open(&installation.path("archive")).unwrap();
+    let report = ea_verify::verify_archive(
+        &source,
+        &anchor,
+        ea_verify::VerifyOptions::new(support::live_clock()),
+    )
+    .unwrap();
+    assert!(
+        report.public_key_thumbprints().len() > 0,
+        "gate trust carries"
+    );
+    let inventory = ea_archive::ArchiveInventory::build(&source).unwrap();
+    assert!(
+        inventory
+            .trust()
+            .iter()
+            .any(|object| hex::encode(object.object_hash().as_bytes()) == escrow_hex)
+    );
+
+    let again = installation.publish();
+    assert_eq!(again.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&again.stdout).contains("reader-key-escrow republished"));
+    assert_eq!(installation.count("reader_key_escrow_publication"), 1);
+}
+
+/// Kopfgleichheit (offen aus report-c): zwischen Root-Signatur und Commit legt
+/// ein anderer Prozess einen neuen Registry-Kopf ins Archiv. Die frisch
+/// geöffnete Laufzeit sieht einen anderen Kopf; die Publikation endet ohne
+/// Verbrauch, Zeile, Audit oder Datei.
+#[test]
+fn a_head_moved_between_root_signature_and_commit_publishes_nothing() {
+    let installation =
+        EscrowInstallation::without_escrow("escrow-publish-head-moved", "admin-root-ceremony");
+    installation.release();
+    installation.put_package();
+    let mut line = installation.material.line.clone();
+    let before = trust_hashes(&line);
+    line.push(
+        trust_support::ActionSpec::Device {
+            kind: CertificateKindV1::Reader,
+            marker: 0x9d,
+            effective_from: Some(installation.material.current_sequence),
+        },
+        trust_support::HeadOptions {
+            effective_from: Some(installation.material.current_sequence),
+            valid_through: Some(100),
+            not_after: UnixMillis::new(support::LIVE_WRITER_NOT_AFTER_V1),
+            ..Default::default()
+        },
+    );
+    let added: Vec<Vec<u8>> = trust_hashes(&line)
+        .difference(&before)
+        .map(|hash| {
+            line.exact_object_bytes(ObjectHash::try_from(hash.as_slice()).unwrap())
+                .to_vec()
+        })
+        .collect();
+    assert!(!added.is_empty());
+    installation.stage_injection(&added);
+    let trust_before = installation.trust_files();
+    let output = installation.publish();
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("EA-ESCROW-OPERATOR-UNAUTHORIZED"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !installation.path("inject-before-root-signature").exists(),
+        "the head moved during the ceremony"
+    );
+    installation.assert_nothing_published(&trust_before);
+    // Der Bestand selbst ist prüfbar: der Abbruch kam aus dem Kopfvergleich.
+    let anchor =
+        ea_trust::decode_trust_anchor(&fs::read(&installation.anchor).unwrap()).unwrap();
+    let source = ea_recovery::FsArchiveSource::open(&installation.path("archive")).unwrap();
+    let report = ea_verify::verify_archive(
+        &source,
+        &anchor,
+        ea_verify::VerifyOptions::new(support::live_clock()),
+    )
+    .unwrap();
+    assert!(report.public_key_thumbprints().len() > 0);
+}
+
+/// Ein Bundle-Widerruf bewegt den Kopf nicht: erst der zweite Lauf des
+/// Cutover-Ports gegen die frisch geöffnete Laufzeit sieht ihn. Die
+/// Publikation endet mit Exit 21, ohne Verbrauch, Zeile, Audit oder Datei.
+#[test]
+fn a_bundle_revocation_between_root_signature_and_commit_publishes_nothing() {
+    let installation =
+        EscrowInstallation::without_escrow("escrow-publish-revoked", "admin-root-ceremony");
+    let release = installation.release();
+    installation.put_package();
+    let revocation = ea_testkit::reader_key_escrow_fixture::signed_web_bundle_revocation(
+        &ea_format::WebBundleRevocationCoreV1 {
+            organization_id: installation.material.anchor.organization_id(),
+            release_object_hash: ea_crypto::object_hash(&release),
+            effective_from_registry_version: installation.material.head.version,
+            issued_at: support::live_clock(),
+            root_key_thumbprint: public(trust_support::root_signing_secret()).thumbprint(),
+        },
+        &FixtureTrustSigner {
+            seed: trust_support::root_signing_secret(),
+            certificate_hash: CertificateHash::from(
+                installation.material.line.current_root_hash(),
+            ),
+        },
+    );
+    installation.stage_injection(&[revocation]);
+    let trust_before = installation.trust_files();
+    let output = installation.publish();
+    assert_eq!(
+        output.status.code(),
+        Some(21),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("EA-ESCROW-CUTOVER-NOT-READY"));
+    assert!(!installation.path("inject-before-root-signature").exists());
+    installation.assert_nothing_published(&trust_before);
+}
+
+fn trust_hashes(
+    line: &trust_support::RegistryLineBuilder,
+) -> std::collections::BTreeSet<[u8; 32]> {
+    use ea_trust::TrustObjectSource as _;
+    let mut hashes = std::collections::BTreeSet::new();
+    line.source()
+        .visit_trust_object_hashes(&mut |hash| {
+            hashes.insert(*hash.as_bytes());
+            Ok(())
+        })
+        .unwrap();
+    hashes
 }

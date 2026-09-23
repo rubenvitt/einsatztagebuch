@@ -11,8 +11,7 @@
 //! (`ea_trust::reader_key_escrow_cutover_release`); sonst
 //! `EA-ESCROW-CUTOVER-NOT-READY` (Exit 21) — vor dem Lesen der Inbox, vor der
 //! Reauthentifizierung, vor jeder Sperrzeile, jeder Auditzeile und jeder
-//! Datei. [`CutoverPending`] scheitert immer. Die Fixture-Variante liegt
-//! allein hinter `test-support`.
+//! Datei. Die Fixture-Variante liegt allein hinter `test-support`.
 //!
 //! # Der Ablauf hinter der Sperre
 //!
@@ -83,9 +82,8 @@ pub const READER_KEY_ESCROW_PACKAGE_WINDOW_MS: i64 = 300_000;
 /// Vorbedingung erfüllt (Profil §5, U4), als ihr Objekthash.
 ///
 /// VERSIEGELT: außerhalb dieser Crate lässt sich kein Port bauen, der die
-/// Sperre öffnet — produktiv gibt es allein [`CutoverPending`], die
-/// Fixture-Variante nur hinter `test-support`. Scheibe (f) setzt hier den
-/// echten Port ein.
+/// Sperre öffnet — produktiv gibt es allein [`ActiveWebBundleRelease`], die
+/// Fixture-Variante nur hinter `test-support`.
 ///
 /// ```compile_fail
 /// struct Open;
@@ -119,23 +117,6 @@ pub trait ReaderKeyEscrowCutover: sealed::Sealed {
 mod sealed {
     /// Nur diese Crate implementiert den Cutover-Port.
     pub trait Sealed {}
-}
-
-/// Der produktive Port bis Scheibe (f): die Vorbedingung gilt nie als
-/// erfüllt.
-pub struct CutoverPending;
-
-impl sealed::Sealed for CutoverPending {}
-
-impl ReaderKeyEscrowCutover for CutoverPending {
-    fn active_v11_bundle_release(
-        &self,
-        _anchor: &TrustAnchorV1,
-        _exact_trust_objects: &[&[u8]],
-        _head: &SelectedRegistryHead,
-    ) -> Result<ObjectHash, ReaderKeyEscrowError> {
-        Err(ReaderKeyEscrowError::CutoverNotReady)
-    }
 }
 
 /// Der echte Port: die aktive, wurzelsignierte `webBundleRelease` eines
