@@ -306,7 +306,7 @@ pub struct TrustPorts<'a> {
 /// 2. Organisationsbindung des Objekts gegen die des Aufrufers stellen,
 /// 3. die GETEILTE Trust-Pruefung fuehren — LESEND,
 /// 4. die Bytes content-addressed ablegen,
-/// 5. transaktional indizieren — fuer ein Urteil ueber die ganze Objektmenge
+/// 5. transaktional indizieren — für ein Urteil über die ganze Objektmenge
 ///    nur auf dem Katalogstand, gegen den Schritt 3 lief,
 /// 6. und ganz zuletzt den persistenten Kopf nachruecken.
 ///

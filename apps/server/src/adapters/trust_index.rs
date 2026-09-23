@@ -4,11 +4,11 @@
 //! sind, sagt ausschliesslich die geteilte Pruefung aus `ea-trust`, und was
 //! ausgeliefert wird, holt der Dienst als exakte Bytes aus dem Object Store.
 //!
-//! Die Aufnahme laeuft in EINER Transaktion ueber `object_index`,
-//! `trust_events` und, fuer ein `registryEvent`, `registry_events` — fuer ein
-//! `readerKeyEscrow` zusaetzlich `reader_key_escrows`. Bricht eine davon,
-//! bricht die ganze Aufnahme: ein halb indiziertes Trust-Ereignis waere eine
-//! Registry-Linie mit einem Loch, und ein Reader liefe darueber in eine
+//! Die Aufnahme läuft in EINER Transaktion über `object_index`,
+//! `trust_events` und, für ein `registryEvent`, `registry_events` — für ein
+//! `readerKeyEscrow` zusätzlich `reader_key_escrows`. Bricht eine davon,
+//! bricht die ganze Aufnahme: ein halb indiziertes Trust-Ereignis wäre eine
+//! Registry-Linie mit einem Loch, und ein Reader liefe darüber in eine
 //! falsche Kopfauswahl.
 
 use async_trait::async_trait;
@@ -156,10 +156,10 @@ impl TrustEventStore for PostgresRepository {
             .map_err(|e| unavailable(&e))?;
             if inserted.rows_affected() != 1 {
                 // Dieselben Bytes (nach einer Katalogreparatur, die
-                // `trust_events` geleert hat) duerfen wieder hinein. Liegt zu
+                // `trust_events` geleert hat) dürfen wieder hinein. Liegt zu
                 // diesem Reader-Zertifikat dagegen ein ANDERES Escrow, ist das
                 // ein Konflikt und kein Ausfall: kein sqlx-Fehler, der zu
-                // einem endlos wiederholbaren 503 wuerde.
+                // einem endlos wiederholbaren 503 würde.
                 let recorded: Vec<u8> = sqlx::query_scalar(
                     "SELECT object_hash FROM reader_key_escrows WHERE organization_id = $1 \
                      AND reader_certificate_object_hash = $2",
