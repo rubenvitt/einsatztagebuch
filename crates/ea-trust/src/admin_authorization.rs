@@ -392,7 +392,14 @@ pub fn consume_admin_authorization_intent(
     consume_replay_keys(store, intent.replay_keys())
 }
 
-fn consume_replay_keys(
+/// Die EINE Zweierregel des Einmal-Speichers: beide Zeilen, in der
+/// Reihenfolge des Schlüsselpaars, und die erste bereits verbrauchte weist ab.
+///
+/// Jede Familie, deren Autorisierung `authorizationId` und `nonce`
+/// organisationsweit einmal nutzt, verbraucht über diese Funktion — die
+/// Administrationsautorisierung und die beiden Autorisierungen des
+/// Reader-Key-Escrows. Eine zweite Fassung dieser Schleife gibt es nicht.
+pub(crate) fn consume_replay_keys(
     store: &mut dyn TrustStateStore,
     keys: &[AdminAuthorizationReplayKey; 2],
 ) -> Result<(), TrustError> {
@@ -561,14 +568,58 @@ pub(crate) fn verify_authorization_signer(
     authorization_fields: &OrganizationAdminAuthorizationFieldsV1,
     pre_transition_sequence: ChainSequence,
 ) -> Result<SubjectId, TrustError> {
+    verify_admin_signer_claim(
+        state,
+        authorization,
+        &AdminSignerClaim {
+            organization_id: authorization_fields.organization_id,
+            admin_certificate_hash: authorization_fields.admin_certificate_hash,
+            admin_key_thumbprint: authorization_fields.admin_key_thumbprint,
+            admin_operator_binding_object_hash: authorization_fields
+                .admin_operator_binding_object_hash,
+        },
+        VerificationContext::organization_admin_trust_digest,
+        pre_transition_sequence,
+    )
+}
+
+/// Was ein Objekt über SEINEN unterschreibenden Organisationsadministrator
+/// behauptet: Zertifikat, Schlüsselabdruck und native Bedienerbindung.
+///
+/// Die Behauptung steht in verschiedenen Nutzlasten — heute in der
+/// `organizationAdminAuthorization` und in der Publikationsfreigabe des
+/// Reader-Key-Escrows. Die REGEL, die sie prüft, ist eine:
+/// [`verify_admin_signer_claim`].
+pub(crate) struct AdminSignerClaim {
+    pub(crate) organization_id: OrganizationId,
+    pub(crate) admin_certificate_hash: CertificateHash,
+    pub(crate) admin_key_thumbprint: ea_types::KeyThumbprint,
+    pub(crate) admin_operator_binding_object_hash: ObjectHash,
+}
+
+/// Die EINE Signiererregel eines Organisationsadministrators.
+///
+/// Genau eine Signatur des benannten, zur Sequenz aktiven
+/// `OrganizationAdmin`-Zertifikats mit `organizationAdminApprove` und dem
+/// benannten Schlüssel, gepaart mit der benannten aktiven nativen
+/// Bedienerbindung desselben Autoritätssubjekts. `context_of` legt fest, über
+/// WELCHEN Kontext die Signatur trägt; die Familie unterscheidet sich nur
+/// darin. Die Reihenfolge der Befunde ist die von
+/// [`verify_authorization_signer`] seit Stufe 1.
+pub(crate) fn verify_admin_signer_claim(
+    state: &PreviousHeadState,
+    object: &TrustObjectV1,
+    claim: &AdminSignerClaim,
+    context_of: impl FnOnce(&[u8]) -> Result<VerificationContext, ea_crypto::CryptoError>,
+    at_sequence: ChainSequence,
+) -> Result<SubjectId, TrustError> {
     let certificate = state
         .admin_certificates
-        .get(&authorization_fields.admin_certificate_hash)
+        .get(&claim.admin_certificate_hash)
         .ok_or(TrustError::Signature)?;
-    if certificate.fields.organization_id != authorization_fields.organization_id
+    if certificate.fields.organization_id != claim.organization_id
         || certificate.fields.certificate_kind != CertificateKindV1::OrganizationAdmin
-        || certificate.fields.signing_key_thumbprint
-            != Some(authorization_fields.admin_key_thumbprint)
+        || certificate.fields.signing_key_thumbprint != Some(claim.admin_key_thumbprint)
         || !certificate
             .fields
             .capabilities
@@ -580,19 +631,17 @@ pub(crate) fn verify_authorization_signer(
     require_active(
         certificate.fields.effective_from_sequence,
         certificate.fields.revoked_from_sequence,
-        pre_transition_sequence,
+        at_sequence,
     )?;
 
-    if authorization.signatures().len() != 1 {
+    if object.signatures().len() != 1 {
         return Err(TrustError::Signature);
     }
-    let authorization_context =
-        VerificationContext::organization_admin_trust_digest(authorization.exact_digest_input())
-            .map_err(|_| TrustError::Signature)?;
+    let context = context_of(object.exact_digest_input()).map_err(|_| TrustError::Signature)?;
     let verified_signer = CoseVerifier::verify_normal(
-        &authorization.signatures()[0],
+        &object.signatures()[0],
         &PreviousHeadResolver::new(state),
-        &authorization_context,
+        &context,
     )
     .map_err(|_| TrustError::Signature)?;
     let signer_subject = verified_signer
@@ -604,11 +653,11 @@ pub(crate) fn verify_authorization_signer(
 
     let binding = state
         .admin_bindings
-        .get(&authorization_fields.admin_operator_binding_object_hash)
+        .get(&claim.admin_operator_binding_object_hash)
         .ok_or(TrustError::SubjectMismatch)?;
-    if binding.fields.organization_id != authorization_fields.organization_id
+    if binding.fields.organization_id != claim.organization_id
         || binding.fields.operator_role != OperatorRoleV1::OrganizationAdmin
-        || binding.fields.device_certificate_hash != authorization_fields.admin_certificate_hash
+        || binding.fields.device_certificate_hash != claim.admin_certificate_hash
         || binding.fields.operator_subject_id.as_bytes() != signer_subject.as_bytes()
     {
         return Err(TrustError::SubjectMismatch);
@@ -616,7 +665,7 @@ pub(crate) fn verify_authorization_signer(
     require_active(
         binding.fields.effective_from_sequence,
         binding.fields.revoked_from_sequence,
-        pre_transition_sequence,
+        at_sequence,
     )?;
     Ok(signer_subject)
 }
