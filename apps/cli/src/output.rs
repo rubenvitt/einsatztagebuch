@@ -100,7 +100,7 @@ use crate::args::{Format, UsageError};
 /// Pfad benennt also einen Platz, der noch frei sein muss. Die Begruendung
 /// steht in `crate::commands::organization`; hier steht sie in einem Wort,
 /// damit ein Aufrufer sie schon in der Grammatik sieht.
-const GRAMMAR_V1: [&str; 18] = [
+const GRAMMAR_V1: [&str; 21] = [
     "einsatzarchiv --trust-anchor <file> verify <archive-path>",
     "einsatzarchiv --trust-anchor <file> list <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
@@ -110,6 +110,7 @@ const GRAMMAR_V1: [&str; 18] = [
     "einsatzarchiv --trust-anchor <file> recovery-test <archive-path> --key-inventory <file> --output <report-file>",
     "einsatzarchiv --trust-anchor <new-file> organization init",
     "einsatzarchiv --trust-anchor <new-file> organization certify-root --initial-registry-version <u64>",
+    "einsatzarchiv --trust-anchor <file> organization reader-key-escrow-publish --operator-config <file> --escrow-inbox <dir>",
     "einsatzarchiv --trust-anchor <file> posture target --operator-config <file> --output <new-target.json>",
     "einsatzarchiv --trust-anchor <file> posture issue --operator-config <file> --posture-target <target.json> --evidence-reference <public-document> --valid-for-ms <1..86400000> --output <new-document.cbor>",
     "einsatzarchiv --trust-anchor <file> posture import --operator-config <file> --posture-document <document.cbor>",
@@ -119,7 +120,19 @@ const GRAMMAR_V1: [&str; 18] = [
     "einsatzarchiv --trust-anchor <file> clock-release apply --operator-config <file> --release <file>",
     "einsatzarchiv --trust-anchor <file> writer-transition prepare --operator-config <file> --request <file>",
     "einsatzarchiv --trust-anchor <file> writer-transition activate --operator-config <file> --request <file> --transition-object <file> --valid-through <sequence> --not-after <unix-millis>",
+    "einsatzarchiv --trust-anchor <file> reader-key-escrow open --operator-config <file> --recovery-key <source> --authorization <file> --escrow-inbox <dir> --escrow-outbox <dir>",
+    "einsatzarchiv --trust-anchor <file> reader-key-escrow pickup --operator-config <file> --authorization <file> --escrow-inbox <dir> --escrow-outbox <dir>",
 ];
+
+/// Was die Reader-Key-Escrow-Kommandos tun — und was bis zum Cutover nicht.
+///
+/// Die Publikation ist gebaut, endet aber bis Scheibe (f) als erster Schritt
+/// mit `EA-ESCROW-CUTOVER-NOT-READY`; die Öffnung verbraucht die
+/// Autorisierung vor dem privaten Schlüssel und gibt allein den versiegelten
+/// Umschlag heraus. Englisch wie jede beobachtbare Zeichenkette.
+const READER_KEY_ESCROW_SCOPE_NOTE_V1: &str = "reader-key-escrow-publish is refused until the web \
+     bundle cutover (EA-ESCROW-CUTOVER-NOT-READY); open consumes the authorization before the \
+     recovery key is used and writes only the sealed envelope";
 
 /// Was `organization init` TUT — und was ausdruecklich nicht.
 ///
@@ -152,6 +165,7 @@ pub fn print_grammar() {
     println!("{REGISTRY_SCOPE_NOTE_V1}");
     println!("{CLOCK_RELEASE_SCOPE_NOTE_V1}");
     println!("{WRITER_TRANSITION_SCOPE_NOTE_V1}");
+    println!("{READER_KEY_ESCROW_SCOPE_NOTE_V1}");
 }
 
 /// Die Grammatik einer `<key-source>`, Wort fuer Wort.
@@ -380,6 +394,29 @@ pub fn print_certify_root_json_refusal() {
     eprintln!(
         "einsatzarchiv: organization certify-root has a text form only: no versioned ceremony-status JSON schema is available"
     );
+}
+
+/// Die Escrow-Kommandos haben nur eine Textform.
+pub fn print_reader_key_escrow_json_refusal() {
+    eprintln!(
+        "einsatzarchiv: reader-key-escrow has a text form only: no versioned escrow report JSON schema is available"
+    );
+}
+
+/// Der Bericht einer Escrow-Zeremonie: ausschließlich Hashes als
+/// Kleinbuchstaben-Hex — kein PIN, kein Pfad, kein Schlüssellabel, keine
+/// Subject-ID, kein Klartext.
+pub fn print_reader_key_escrow_report(action: &str, fields: &[(&str, &[u8])]) {
+    let mut line = format!("reader-key-escrow {action}");
+    for (name, bytes) in fields {
+        line.push(' ');
+        line.push_str(name);
+        line.push('=');
+        for byte in *bytes {
+            line.push_str(&format!("{byte:02x}"));
+        }
+    }
+    println!("{line}");
 }
 
 pub fn print_certify_root_anchor_path_occupied_refusal() {

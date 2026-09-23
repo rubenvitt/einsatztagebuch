@@ -111,12 +111,13 @@ impl ReaderKeyEscrowError {
 
     /// Der Prozess-Exitcode der CLI (Bauplan §3.5).
     #[must_use]
-    pub const fn exit_code(self) -> u8 {
+    pub const fn exit_code(self) -> crate::ExitCode {
+        use crate::ExitCode;
         match self {
-            Self::TransferFile => 10,
-            Self::RecoveryKey | Self::KemMismatch | Self::Crypto => 14,
-            Self::Audit | Self::Store | Self::Output => 20,
-            Self::CutoverNotReady => 21,
+            Self::TransferFile => ExitCode::Integrity,
+            Self::RecoveryKey | Self::KemMismatch | Self::Crypto => ExitCode::Key,
+            Self::Audit | Self::Store | Self::Output => ExitCode::Io,
+            Self::CutoverNotReady => ExitCode::Unsupported,
             Self::Trust(_)
             | Self::Operator
             | Self::TransportMismatch
@@ -124,7 +125,7 @@ impl ReaderKeyEscrowError {
             | Self::ResultDelivered
             | Self::ResultExpired
             | Self::PackageStale
-            | Self::PublicationConflict => 12,
+            | Self::PublicationConflict => ExitCode::Trust,
         }
     }
 }

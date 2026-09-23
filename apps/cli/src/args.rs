@@ -64,7 +64,13 @@ use ea_types::{ChainSequence, RegistryVersion, UnixMillis};
 /// Start/resume retains the existing ceremony without advancing offline steps.
 pub const ORGANIZATION_INIT_SUBCOMMAND: &str = "init";
 pub const ORGANIZATION_CERTIFY_ROOT_SUBCOMMAND: &str = "certify-root";
-pub const ORGANIZATION_SUBCOMMANDS: &str = "init|certify-root";
+/// Zeremonie A des Reader-Key-Escrows (DRK-458) — bis zum Cutover gesperrt.
+pub const ORGANIZATION_READER_KEY_ESCROW_PUBLISH_SUBCOMMAND: &str = "reader-key-escrow-publish";
+pub const ORGANIZATION_SUBCOMMANDS: &str = "init|certify-root|reader-key-escrow-publish";
+/// Die beiden Unterkommandos von `reader-key-escrow` (Zeremonie B).
+pub const READER_KEY_ESCROW_OPEN_SUBCOMMAND: &str = "open";
+pub const READER_KEY_ESCROW_PICKUP_SUBCOMMAND: &str = "pickup";
+pub const READER_KEY_ESCROW_SUBCOMMANDS: &str = "open|pickup";
 pub const INITIAL_REGISTRY_VERSION_SWITCH: &str = "--initial-registry-version";
 /// Das EINZIGE Unterkommando von `registry`.
 ///
@@ -220,6 +226,15 @@ pub const TRANSITION_OBJECT_SWITCH: &str = "--transition-object";
 pub const RELEASE_SWITCH: &str = "--release";
 /// `--include-runtime-metadata`, nur bei `report`.
 pub const INCLUDE_RUNTIME_METADATA_SWITCH: &str = "--include-runtime-metadata";
+/// `--escrow-inbox <dir>`, bei `reader-key-escrow` und
+/// `organization reader-key-escrow-publish`.
+///
+/// Die EIGENE Escrow-Inbox (Ruling U3): Paket- und Transportdateien, deren
+/// Name allein der Hash ihrer Bytes ist. Nicht die Registrierungs-Inbox.
+pub const ESCROW_INBOX_SWITCH: &str = "--escrow-inbox";
+/// `--escrow-outbox <dir>`, nur bei `reader-key-escrow`: dorthin geht allein
+/// der versiegelte Umschlag.
+pub const ESCROW_OUTBOX_SWITCH: &str = "--escrow-outbox";
 /// `--report-signing-key <source>`, nur bei `report` — und IMMER verweigert.
 ///
 /// # Warum ein Schalter, der nie etwas tut
@@ -398,6 +413,23 @@ pub enum Command {
     /// Certify only the existing installed native Root and retain step 2.
     OrganizationCertifyRoot {
         initial_registry_version: RegistryVersion,
+    },
+    /// Zeremonie A des Reader-Key-Escrows; bis zum Cutover gesperrt.
+    OrganizationReaderKeyEscrowPublish { config: PathBuf, inbox: PathBuf },
+    /// Zeremonie B: ein Escrow öffnen und den Umschlag ausliefern.
+    ReaderKeyEscrowOpen {
+        config: PathBuf,
+        recovery_key: KeySourceArgument,
+        authorization: PathBuf,
+        inbox: PathBuf,
+        outbox: PathBuf,
+    },
+    /// Zeremonie B: eine abgebrochene Auslieferung fortsetzen.
+    ReaderKeyEscrowPickup {
+        config: PathBuf,
+        authorization: PathBuf,
+        inbox: PathBuf,
+        outbox: PathBuf,
     },
     /// Verwaltung des nativen, OS-kontogebundenen Operators.
     Operator {
@@ -587,13 +619,13 @@ impl fmt::Display for UsageError {
             Self::UnknownCommand(command) => write!(
                 formatter,
                 "unknown command {command}; expected verify, list, decrypt, grant, report, \
-                 export, recovery-test, organization, operator, registry, clock-release or \
-                 writer-transition"
+                 export, recovery-test, organization, operator, registry, clock-release, \
+                 writer-transition or reader-key-escrow"
             ),
             Self::MissingCommand => formatter.write_str(
                 "no command was given; expected verify, list, decrypt, grant, report, export, \
-                 recovery-test, organization, operator, registry, clock-release or \
-                 writer-transition",
+                 recovery-test, organization, operator, registry, clock-release, \
+                 writer-transition or reader-key-escrow",
             ),
             Self::MissingTrustAnchor => write!(
                 formatter,
@@ -648,6 +680,7 @@ enum CommandKind {
     Registry,
     ClockRelease,
     WriterTransition,
+    ReaderKeyEscrow,
 }
 
 impl CommandKind {
@@ -667,6 +700,7 @@ impl CommandKind {
             Self::Registry => "registry",
             Self::ClockRelease => "clock-release",
             Self::WriterTransition => "writer-transition",
+            Self::ReaderKeyEscrow => "reader-key-escrow",
         }
     }
 
@@ -686,6 +720,7 @@ impl CommandKind {
             "registry" => Some(Self::Registry),
             "clock-release" => Some(Self::ClockRelease),
             "writer-transition" => Some(Self::WriterTransition),
+            "reader-key-escrow" => Some(Self::ReaderKeyEscrow),
             _ => None,
         }
     }
@@ -846,6 +881,8 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     let mut effective_from: Option<u64> = None;
     let mut valid_through: Option<u64> = None;
     let mut not_after: Option<u64> = None;
+    let mut escrow_inbox: Option<PathBuf> = None;
+    let mut escrow_outbox: Option<PathBuf> = None;
     let mut format: Option<Format> = None;
     let mut include_runtime_metadata: Option<bool> = None;
     let mut command_kind: Option<CommandKind> = None;
@@ -947,6 +984,12 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 NOT_AFTER_SWITCH => {
                     take_number_value(&mut not_after, NOT_AFTER_SWITCH, &mut arguments)?
                 }
+                ESCROW_INBOX_SWITCH => {
+                    take_path_value(&mut escrow_inbox, ESCROW_INBOX_SWITCH, &mut arguments)?
+                }
+                ESCROW_OUTBOX_SWITCH => {
+                    take_path_value(&mut escrow_outbox, ESCROW_OUTBOX_SWITCH, &mut arguments)?
+                }
                 REPORT_SIGNING_KEY_SWITCH => take_path_value(
                     &mut report_signing_key,
                     REPORT_SIGNING_KEY_SWITCH,
@@ -1035,10 +1078,26 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     // Die vier Eingaben von `grant` gehoeren allein `grant`, das Inventar
     // allein `recovery-test`. `--key` bleibt bei `decrypt`: `grant` fuehrt
     // seine beiden Schluesselquellen unter eigenem Namen.
+    // `reader-key-escrow` nimmt Recovery-Schlüssel und Autorisierung unter
+    // denselben Namen: es ist dieselbe Art Eingabe, eine andere Operation.
     for (present, switch) in [
         (recovery_key.is_some(), RECOVERY_KEY_SWITCH),
-        (authority_key.is_some(), AUTHORITY_KEY_SWITCH),
         (authorization.is_some(), AUTHORIZATION_SWITCH),
+    ] {
+        if present
+            && !matches!(
+                command_kind,
+                CommandKind::Grant | CommandKind::ReaderKeyEscrow
+            )
+        {
+            return Err(UsageError::SwitchNotAllowed {
+                switch,
+                command: command_name,
+            });
+        }
+    }
+    for (present, switch) in [
+        (authority_key.is_some(), AUTHORITY_KEY_SWITCH),
         (recipient_certificate.is_some(), RECIPIENT_CERT_SWITCH),
     ] {
         if present && command_kind != CommandKind::Grant {
@@ -1062,7 +1121,13 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
             command: command_name,
         });
     }
+    // `organization` nimmt die Bedienerdatei und die Escrow-Inbox allein für
+    // `reader-key-escrow-publish`; `init` und `certify-root` bleiben ohne.
+    let escrow_publication = command_kind == CommandKind::Organization
+        && positionals.first().map(PathBuf::as_path)
+            == Some(Path::new(ORGANIZATION_READER_KEY_ESCROW_PUBLISH_SUBCOMMAND));
     if operator_config.is_some()
+        && !escrow_publication
         && !matches!(
             command_kind,
             CommandKind::RecoveryTest
@@ -1072,6 +1137,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 | CommandKind::Registry
                 | CommandKind::ClockRelease
                 | CommandKind::WriterTransition
+                | CommandKind::ReaderKeyEscrow
         )
     {
         return Err(UsageError::SwitchNotAllowed {
@@ -1082,6 +1148,19 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     // Grobkörnig hier (das Kommando), fein — nur `register-network-archive`
     // — im `CommandKind::Operator`-Zweig unten, dieselbe Bauart wie bei
     // `posture`s Modus-Schaltern.
+    if escrow_inbox.is_some() && !escrow_publication && command_kind != CommandKind::ReaderKeyEscrow
+    {
+        return Err(UsageError::SwitchNotAllowed {
+            switch: ESCROW_INBOX_SWITCH,
+            command: command_name,
+        });
+    }
+    if escrow_outbox.is_some() && command_kind != CommandKind::ReaderKeyEscrow {
+        return Err(UsageError::SwitchNotAllowed {
+            switch: ESCROW_OUTBOX_SWITCH,
+            command: command_name,
+        });
+    }
     if archive_profile.is_some() && command_kind != CommandKind::Operator {
         return Err(UsageError::SwitchNotAllowed {
             switch: NETWORK_ARCHIVE_PROFILE_SWITCH,
@@ -1140,6 +1219,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 | CommandKind::Registry
                 | CommandKind::ClockRelease
                 | CommandKind::WriterTransition
+                | CommandKind::ReaderKeyEscrow
         )
     {
         return Err(UsageError::SwitchNotAllowed {
@@ -1256,6 +1336,25 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                     },
                 )?),
             },
+            Some(ORGANIZATION_READER_KEY_ESCROW_PUBLISH_SUBCOMMAND) => {
+                const COMMAND: &str = "organization reader-key-escrow-publish";
+                if initial_registry_version.is_some() {
+                    return Err(UsageError::SwitchNotAllowed {
+                        switch: INITIAL_REGISTRY_VERSION_SWITCH,
+                        command: COMMAND,
+                    });
+                }
+                Command::OrganizationReaderKeyEscrowPublish {
+                    config: operator_config.ok_or(UsageError::MissingSwitch {
+                        switch: OPERATOR_CONFIG_SWITCH,
+                        command: COMMAND,
+                    })?,
+                    inbox: escrow_inbox.ok_or(UsageError::MissingSwitch {
+                        switch: ESCROW_INBOX_SWITCH,
+                        command: COMMAND,
+                    })?,
+                }
+            }
             _ => {
                 return Err(UsageError::UnknownSubcommand {
                     command: command_name,
@@ -1427,6 +1526,55 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                     switch: RELEASE_SWITCH,
                     command: command_name,
                 })?,
+            }
+        }
+        CommandKind::ReaderKeyEscrow => {
+            let missing = |switch| UsageError::MissingSwitch {
+                switch,
+                command: command_name,
+            };
+            let open = match path.to_str() {
+                Some(READER_KEY_ESCROW_OPEN_SUBCOMMAND) => true,
+                Some(READER_KEY_ESCROW_PICKUP_SUBCOMMAND) => false,
+                _ => {
+                    return Err(UsageError::UnknownSubcommand {
+                        command: command_name,
+                        value: path.to_string_lossy().into_owned(),
+                        expected: READER_KEY_ESCROW_SUBCOMMANDS,
+                    });
+                }
+            };
+            // Die Abholung versiegelt nie neu und liest deshalb keinen
+            // Recovery-Schlüssel.
+            if !open && recovery_key.is_some() {
+                return Err(UsageError::SwitchNotAllowed {
+                    switch: RECOVERY_KEY_SWITCH,
+                    command: "reader-key-escrow pickup",
+                });
+            }
+            let config = operator_config.ok_or_else(|| missing(OPERATOR_CONFIG_SWITCH))?;
+            let recovery_key = if open {
+                Some(recovery_key.ok_or_else(|| missing(RECOVERY_KEY_SWITCH))?)
+            } else {
+                None
+            };
+            let authorization = authorization.ok_or_else(|| missing(AUTHORIZATION_SWITCH))?;
+            let inbox = escrow_inbox.ok_or_else(|| missing(ESCROW_INBOX_SWITCH))?;
+            let outbox = escrow_outbox.ok_or_else(|| missing(ESCROW_OUTBOX_SWITCH))?;
+            match recovery_key {
+                Some(recovery_key) => Command::ReaderKeyEscrowOpen {
+                    config,
+                    recovery_key,
+                    authorization,
+                    inbox,
+                    outbox,
+                },
+                None => Command::ReaderKeyEscrowPickup {
+                    config,
+                    authorization,
+                    inbox,
+                    outbox,
+                },
             }
         }
         CommandKind::WriterTransition => {
@@ -2696,6 +2844,176 @@ mod tests {
                 Err(UsageError::UnknownSwitch(_))
             ));
         }
+    }
+
+    /// DRK-458: die drei Escrow-Kommandos, ihre Pflichtschalter und ihre
+    /// Grenzen. `--escrow-outbox` gehört nur der Öffnung, der
+    /// Recovery-Schlüssel nie der Abholung, Bedienerdatei und Inbox an
+    /// `organization` nur der Publikation.
+    #[test]
+    fn reader_key_escrow_commands_parse_with_their_own_switches() {
+        let open = parsed(&[
+            TRUST_ANCHOR_SWITCH,
+            "anchor.etb",
+            "reader-key-escrow",
+            "open",
+            OPERATOR_CONFIG_SWITCH,
+            "operator.json",
+            RECOVERY_KEY_SWITCH,
+            "recovery.key",
+            AUTHORIZATION_SWITCH,
+            "authorization.etb",
+            super::ESCROW_INBOX_SWITCH,
+            "inbox",
+            super::ESCROW_OUTBOX_SWITCH,
+            "outbox",
+        ])
+        .expect("reader-key-escrow open muss parsen");
+        assert!(matches!(
+            open.command,
+            Command::ReaderKeyEscrowOpen { ref inbox, ref outbox, .. }
+                if inbox == &PathBuf::from("inbox") && outbox == &PathBuf::from("outbox")
+        ));
+        let pickup = parsed(&[
+            TRUST_ANCHOR_SWITCH,
+            "anchor.etb",
+            "reader-key-escrow",
+            "pickup",
+            OPERATOR_CONFIG_SWITCH,
+            "operator.json",
+            AUTHORIZATION_SWITCH,
+            "authorization.etb",
+            super::ESCROW_INBOX_SWITCH,
+            "inbox",
+            super::ESCROW_OUTBOX_SWITCH,
+            "outbox",
+        ])
+        .expect("reader-key-escrow pickup muss parsen");
+        assert!(matches!(
+            pickup.command,
+            Command::ReaderKeyEscrowPickup { .. }
+        ));
+        assert_eq!(
+            parsed(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "organization",
+                "reader-key-escrow-publish",
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                super::ESCROW_INBOX_SWITCH,
+                "inbox",
+            ])
+            .expect("organization reader-key-escrow-publish muss parsen")
+            .command,
+            Command::OrganizationReaderKeyEscrowPublish {
+                config: PathBuf::from("operator.json"),
+                inbox: PathBuf::from("inbox"),
+            }
+        );
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "reader-key-escrow",
+                "pickup",
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                RECOVERY_KEY_SWITCH,
+                "recovery.key",
+                AUTHORIZATION_SWITCH,
+                "authorization.etb",
+                super::ESCROW_INBOX_SWITCH,
+                "inbox",
+                super::ESCROW_OUTBOX_SWITCH,
+                "outbox",
+            ]),
+            UsageError::SwitchNotAllowed {
+                switch: RECOVERY_KEY_SWITCH,
+                command: "reader-key-escrow pickup",
+            }
+        );
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "reader-key-escrow",
+                "open",
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                AUTHORIZATION_SWITCH,
+                "authorization.etb",
+                super::ESCROW_INBOX_SWITCH,
+                "inbox",
+                super::ESCROW_OUTBOX_SWITCH,
+                "outbox",
+            ]),
+            UsageError::MissingSwitch {
+                switch: RECOVERY_KEY_SWITCH,
+                command: "reader-key-escrow",
+            }
+        );
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "organization",
+                "reader-key-escrow-publish",
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                super::ESCROW_INBOX_SWITCH,
+                "inbox",
+                super::ESCROW_OUTBOX_SWITCH,
+                "outbox",
+            ]),
+            UsageError::SwitchNotAllowed {
+                switch: super::ESCROW_OUTBOX_SWITCH,
+                command: "organization",
+            }
+        );
+        for subcommand in ["init", "certify-root"] {
+            assert_eq!(
+                rejected(&[
+                    TRUST_ANCHOR_SWITCH,
+                    "anchor.etb",
+                    "organization",
+                    subcommand,
+                    OPERATOR_CONFIG_SWITCH,
+                    "operator.json",
+                ]),
+                UsageError::SwitchNotAllowed {
+                    switch: OPERATOR_CONFIG_SWITCH,
+                    command: "organization",
+                }
+            );
+        }
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                "reader-key-escrow",
+                "close",
+            ]),
+            UsageError::UnknownSubcommand {
+                command: "reader-key-escrow",
+                value: "close".to_owned(),
+                expected: "open|pickup",
+            }
+        );
+        assert_eq!(
+            rejected(&[
+                TRUST_ANCHOR_SWITCH,
+                "anchor.etb",
+                super::ESCROW_INBOX_SWITCH,
+                "inbox",
+                "verify",
+                "archive",
+            ]),
+            UsageError::SwitchNotAllowed {
+                switch: super::ESCROW_INBOX_SWITCH,
+                command: "verify",
+            }
+        );
     }
 }
 

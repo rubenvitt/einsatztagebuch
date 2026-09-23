@@ -314,7 +314,8 @@ fn the_productive_cutover_port_refuses_before_any_side_effect() {
     let error = ceremony.publish(&CutoverPending, &bytes).err().unwrap();
     assert_eq!(error, ReaderKeyEscrowError::CutoverNotReady);
     assert_eq!(error.code(), "EA-ESCROW-CUTOVER-NOT-READY");
-    assert_eq!(error.exit_code(), 21);
+    assert_eq!(error.exit_code(), ea_recovery::ExitCode::Unsupported);
+    assert_eq!(error.exit_code().as_i32(), 21);
     // Selbst ein unlesbares Paket kommt nicht bis zur Prüfung.
     assert_eq!(
         ceremony.publish(&CutoverPending, b"not a package").err(),
