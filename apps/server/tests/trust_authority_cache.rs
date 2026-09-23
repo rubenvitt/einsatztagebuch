@@ -170,6 +170,7 @@ async fn index_trust_object(pool: &PgPool, organization_id: OrganizationId, byte
                 .map_or(NOW, |core| core.fields().issued_at),
             received_at: NOW,
             catalog_fence: None,
+            reader_key_escrow: None,
         })
         .await
         .expect("the real trust index must accept the frozen successor");

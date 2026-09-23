@@ -39,11 +39,11 @@ pub use models::{
     CommitIdentityV1, CommittedDbState, CredentialRegistrationOutcome, DestructionRequestCommandV1,
     DestructionStateV1, EntryIndexEntryV1, ExportIndexEntryV1, GrantDeliveryV1, GrantIndexEntryV1,
     GrantRecipientV1, HistoricalGrantCommandV1, IndexedObjectV1, PENDING_REGISTRATION_STATE_V1,
-    PendingDeviceRequestV1, PendingRegistrationOutcome, ReaderAckCommandV1, ReaderVaultBlobV1,
-    RegistryAdmissionFenceV1, RegistryLineEntryV1, RepositoryError, SecurityEventKindV1,
-    SecurityEventV1, StagedObject, StoreError, StoredObject, StoredWebauthnCredentialV1,
-    TrustCatalogFenceV1, TrustEventCommandV1, TrustIndexOutcome, ValidatedTrustEventV1,
-    VaultBlobOutcome, WebauthnCredentialV1, object_key, object_type_segment,
+    PendingDeviceRequestV1, PendingRegistrationOutcome, ReaderAckCommandV1, ReaderKeyEscrowIndexV1,
+    ReaderVaultBlobV1, RegistryAdmissionFenceV1, RegistryLineEntryV1, RepositoryError,
+    SecurityEventKindV1, SecurityEventV1, StagedObject, StoreError, StoredObject,
+    StoredWebauthnCredentialV1, TrustCatalogFenceV1, TrustEventCommandV1, TrustIndexOutcome,
+    ValidatedTrustEventV1, VaultBlobOutcome, WebauthnCredentialV1, object_key, object_type_segment,
 };
 pub use ports::{
     ActiveRegistryHeadV1, ArchiveExportDirectory, AuthorityError, ChainHeadReader,

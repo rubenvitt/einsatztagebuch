@@ -11,8 +11,8 @@ use core::fmt;
 
 use ea_format::ObjectTypeV1;
 use ea_types::{
-    ChainId, ChainSequence, DeviceId, EntryHash, Hash32, KeyThumbprint, ObjectHash, OrganizationId,
-    RegistryVersion, SubjectId, UnixMillis,
+    CertificateHash, ChainId, ChainSequence, DeviceId, EntryHash, Hash32, KeyThumbprint,
+    ObjectHash, OrganizationId, RegistryVersion, SubjectId, UnixMillis,
 };
 
 /// Das Namensraumsegment einer Objektart im Object Store.
@@ -643,6 +643,25 @@ pub struct TrustEventCommandV1 {
     pub effective_from: UnixMillis,
     pub received_at: UnixMillis,
     pub catalog_fence: Option<TrustCatalogFenceV1>,
+    /// `Some` genau für ein `readerKeyEscrow`: die Felder seines bereits
+    /// geprüften Cores, für den technischen Rückfallindex.
+    pub reader_key_escrow: Option<ReaderKeyEscrowIndexV1>,
+}
+
+/// Der technische Index eines angenommenen Escrows — KEINE Autorität.
+///
+/// Gültig ist, was `ea-trust` beweist; der Index hält nur fest, dass zu einem
+/// Reader-Zertifikat höchstens EIN Escrow liegt (Profil §3.1, Entscheidung 5).
+/// Ein zweites, byte-verschiedenes Escrow zum selben Zertifikat ist nie
+/// zulässig: solange das erste gilt, ist es ein Konflikt, nach einem Widerruf
+/// ist das Zertifikat inaktiv. Die Personenkennung wird mitgeführt, aber NICHT
+/// eindeutig gemacht: der Ersatz nach U2 ist ein neues Zertifikat zur selben
+/// Person, und ob das alte widerrufen ist, hängt am gewählten Kopf, den die
+/// Datenbank nicht kennt.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ReaderKeyEscrowIndexV1 {
+    pub reader_certificate_object_hash: CertificateHash,
+    pub reader_subject_id: SubjectId,
 }
 
 /// Der technische Katalogstand, gegen den eine Trust-Prüfung lief.

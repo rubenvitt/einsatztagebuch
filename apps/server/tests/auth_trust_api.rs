@@ -1696,6 +1696,7 @@ async fn a_second_escrow_checked_against_a_moved_catalog_is_not_indexed() {
         effective_from: now,
         received_at: now,
         catalog_fence: Some(fence),
+        reader_key_escrow: None,
     };
     common::seed_trust_object_bytes(&escrow_a).await;
     common::seed_trust_object_bytes(&escrow_b).await;
@@ -1733,6 +1734,113 @@ async fn a_second_escrow_checked_against_a_moved_catalog_is_not_indexed() {
         "the retry meets the admitted escrow"
     );
     assert!(!indexed(database.pool(), &escrow_b).await);
+
+    database.cleanup().await;
+}
+
+/// Der Rückfallindex (F7): hat der Zaun einmal nicht gegriffen, hält die
+/// Datenbank trotzdem höchstens ein Escrow je Reader-Zertifikat — als 409 und
+/// nicht als wiederholbarer 503. Eine zweite Person-Zeile mit NEUEM Zertifikat
+/// (der U2-Ersatz) bleibt möglich: die Personenkennung ist nicht eindeutig.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_escrow_index_keeps_one_escrow_per_reader_certificate() {
+    use ea_sync_server::{
+        ReaderKeyEscrowIndexV1, TrustCatalogFenceV1, TrustEventCommandV1, TrustEventStore,
+        TrustIndexOutcome,
+    };
+
+    let database = common::fresh_database().await;
+    let fixture = common::seed_trust_fixture(database.pool(), ROTATION_CASE, &[]).await;
+    let organization_id = fixture.organization_id;
+    let index =
+        einsatzarchiv_server::adapters::postgres::PostgresRepository::new(database.pool().clone());
+    let now = UnixMillis::new(common::READ_SERVER_NOW_MILLIS);
+    let pool = database.pool().clone();
+    let fresh_fence = || {
+        let pool = pool.clone();
+        async move {
+            TrustCatalogFenceV1 {
+                catalog_revision: sqlx::query_scalar(
+                    "SELECT trust_catalog_revision FROM organizations WHERE organization_id = $1",
+                )
+                .bind(&organization_id.as_bytes()[..])
+                .fetch_one(&pool)
+                .await
+                .expect("the organization has a catalog revision"),
+            }
+        }
+    };
+    let command = |object: u8, certificate: u8, subject: u8, fence| TrustEventCommandV1 {
+        organization_id,
+        object_hash: ea_types::ObjectHash::try_from(&[object; 32][..]).expect("32 bytes"),
+        size_bytes: 1,
+        subtype_code: "readerKeyEscrow".to_owned(),
+        registry_version: None,
+        effective_from: now,
+        received_at: now,
+        catalog_fence: Some(fence),
+        reader_key_escrow: Some(ReaderKeyEscrowIndexV1 {
+            reader_certificate_object_hash: CertificateHash::try_from(&[certificate; 32][..])
+                .expect("32 bytes"),
+            reader_subject_id: ea_types::SubjectId::try_from(&[subject; 16][..]).expect("16 bytes"),
+        }),
+    };
+
+    let first = index
+        .index_event(command(0xd1, 0xc1, 0x51, fresh_fence().await))
+        .await
+        .expect("index");
+    assert_eq!(first, TrustIndexOutcome::Indexed);
+    let second = index
+        .index_event(command(0xd2, 0xc1, 0x52, fresh_fence().await))
+        .await;
+    assert!(
+        matches!(second, Ok(TrustIndexOutcome::Conflict)),
+        "a second escrow of one certificate is a conflict, not an outage: {second:?}"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM trust_events WHERE object_hash = $1")
+        .bind(&[0xd2_u8; 32][..])
+        .fetch_one(database.pool())
+        .await
+        .expect("count");
+    assert_eq!(rows, 0, "the conflicting escrow leaves no row behind");
+
+    let replacement = index
+        .index_event(command(0xd3, 0xc2, 0x51, fresh_fence().await))
+        .await
+        .expect("index");
+    assert_eq!(
+        replacement,
+        TrustIndexOutcome::Indexed,
+        "a new certificate of the same person is not blocked by the index"
+    );
+    let escrows: i64 = sqlx::query_scalar("SELECT count(*) FROM reader_key_escrows")
+        .fetch_one(database.pool())
+        .await
+        .expect("count");
+    assert_eq!(escrows, 2);
+
+    // Eine Katalogreparatur leert `trust_events`; der Index bleibt
+    // append-only. Dieselben Bytes kommen danach wieder hinein, ein anderes
+    // Escrow zum selben Zertifikat weiterhin nicht.
+    sqlx::query("TRUNCATE trust_events")
+        .execute(database.pool())
+        .await
+        .expect("a catalog repair may truncate the trust events");
+    let again = index
+        .index_event(command(0xd1, 0xc1, 0x51, fresh_fence().await))
+        .await
+        .expect("index");
+    assert_eq!(
+        again,
+        TrustIndexOutcome::Indexed,
+        "the same escrow re-enters after a catalog repair"
+    );
+    let rival = index
+        .index_event(command(0xd4, 0xc1, 0x51, fresh_fence().await))
+        .await
+        .expect("index");
+    assert_eq!(rival, TrustIndexOutcome::Conflict);
 
     database.cleanup().await;
 }

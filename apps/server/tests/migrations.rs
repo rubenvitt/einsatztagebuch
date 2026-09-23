@@ -442,9 +442,10 @@ async fn plant_admin_audit(
     .map(|_| ())
 }
 
-/// Alle vierunddreissig Tabellen sind da: die sechsundzwanzig der Stufe 3,
-/// samt den additiven Migrationen fuer bestehende Installationen, und die acht
-/// der verwalteten Vernichtung aus `0003_managed_destruction.sql` (Stufe 5).
+/// Alle fünfunddreißig Tabellen sind da: die sechsundzwanzig der Stufe 3,
+/// samt den additiven Migrationen fuer bestehende Installationen, die acht
+/// der verwalteten Vernichtung aus `0003_managed_destruction.sql` (Stufe 5)
+/// und der Escrow-Index aus `0004_reader_key_escrow_index.sql` (v1.1-Profil).
 #[tokio::test]
 async fn the_migrations_create_every_planned_table() {
     let database = common::fresh_database().await;
@@ -473,6 +474,7 @@ async fn the_migrations_create_every_planned_table() {
         "organizations",
         "pending_device_requests",
         "reader_acknowledgements",
+        "reader_key_escrows",
         "reader_vault_blobs",
         "receipts",
         "registry_events",
@@ -503,9 +505,9 @@ async fn the_migrations_create_every_planned_table() {
             .expect("the migration bookkeeping table must exist");
     assert_eq!(
         applied,
-        vec![(1_i64,), (2_i64,), (3_i64,)],
-        "the original schema, the additive trust cache migration and the additive managed \
-         destruction migration must all apply"
+        vec![(1_i64,), (2_i64,), (3_i64,), (4_i64,)],
+        "the original schema, the additive trust cache migration, the additive managed \
+         destruction migration and the additive reader key escrow index must all apply"
     );
 
     database.cleanup().await;
@@ -599,6 +601,85 @@ async fn the_trust_cache_migration_upgrades_the_original_schema_without_replacin
         recreated > deleted,
         "recreating an organization must not reuse a cache generation"
     );
+    database.cleanup().await;
+}
+
+/// Der Escrow-Index kommt ADDITIV auf ein bestehendes Schema (0001–0003):
+/// vorhandene Trust-Zeilen bleiben, ein Zertifikat trägt höchstens ein
+/// Escrow, eine Person mehrere (U2-Ersatz), und eine Zeile ist append-only.
+#[tokio::test]
+async fn the_escrow_index_migration_upgrades_an_existing_schema() {
+    let released = std::env::temp_dir().join(format!("ea-released-{}", common::unique_suffix()));
+    std::fs::create_dir(&released).expect("the released migration directory must be creatable");
+    for name in [
+        "0001_initial.sql",
+        "0002_trust_authority_cache.sql",
+        "0003_managed_destruction.sql",
+    ] {
+        std::fs::copy(format!("migrations/{name}"), released.join(name))
+            .expect("a released migration must copy unchanged");
+    }
+    let database = common::fresh_database_with_migrations(&released).await;
+    std::fs::remove_dir_all(&released).expect("the disposable migration copy must be removable");
+    insert_organization(database.pool(), &ORGANIZATION_ID).await;
+    let trust_event = |object: u8| {
+        sqlx::query(
+            "INSERT INTO trust_events (organization_id, event_id, object_hash, event_code, \
+             received_at_millis) VALUES ($1, $2, $3, 'readerKeyEscrow', 17)",
+        )
+        .bind(&ORGANIZATION_ID[..])
+        .bind(vec![object; 16])
+        .bind(vec![object; 32])
+    };
+    trust_event(0x91).execute(database.pool()).await.unwrap();
+
+    sqlx_core::migrate::Migrator::new(std::path::Path::new("migrations"))
+        .await
+        .unwrap()
+        .run(database.pool())
+        .await
+        .expect("upgrade must validate the released checksums and preserve their rows");
+    let survived: i64 = sqlx::query_scalar("SELECT count(*) FROM trust_events")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(survived, 1, "the pre-upgrade trust object must survive");
+
+    for object in [0x92_u8, 0x93, 0x94] {
+        trust_event(object).execute(database.pool()).await.unwrap();
+    }
+    let escrow = |object: u8, certificate: u8, subject: u8| {
+        sqlx::query(
+            "INSERT INTO reader_key_escrows (object_hash, organization_id, \
+             reader_certificate_object_hash, reader_subject_id) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(vec![object; 32])
+        .bind(&ORGANIZATION_ID[..])
+        .bind(vec![certificate; 32])
+        .bind(vec![subject; 16])
+    };
+    escrow(0x91, 0xc1, 0x51)
+        .execute(database.pool())
+        .await
+        .expect("the first escrow of a certificate is recorded");
+    escrow(0x92, 0xc1, 0x52)
+        .execute(database.pool())
+        .await
+        .expect_err("a second escrow of the same certificate is refused");
+    escrow(0x93, 0xc2, 0x51)
+        .execute(database.pool())
+        .await
+        .expect("a replacement certificate of the same person is recorded (U2)");
+    sqlx::query("UPDATE reader_key_escrows SET reader_subject_id = $1")
+        .bind(vec![0x5f_u8; 16])
+        .execute(database.pool())
+        .await
+        .expect_err("an escrow row is append-only");
+    sqlx::query("DELETE FROM reader_key_escrows")
+        .execute(database.pool())
+        .await
+        .expect_err("an escrow row is never deleted");
+
     database.cleanup().await;
 }
 
