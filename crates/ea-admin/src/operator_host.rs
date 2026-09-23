@@ -80,6 +80,22 @@ impl VerifiedLocalDeviceIdentity {
         }
         Self::verify(head, self.certificate, self.device).map(|_| ())
     }
+    /// Dieses Gerät als Auditakteur OHNE Bedienerbindung, zuvor am gewählten
+    /// Kopf nachgeprüft — für Gerätezeilen, zu denen es keinen frischen
+    /// Bedienernachweis gibt (Bindungslebenszyklus, Escrow-Verfall).
+    pub(crate) fn unbound_audit_actor(
+        &self,
+        head: &SelectedRegistryHead,
+    ) -> Result<AuthenticatedDevice, OperatorLifecycleError> {
+        self.check(head)?;
+        Ok(AuthenticatedDevice::new(
+            self.organization,
+            self.device,
+            ObjectHash::try_from(self.certificate.as_bytes().as_slice())
+                .map_err(|_| OperatorLifecycleError::TargetMismatch)?,
+            None,
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -763,14 +779,7 @@ impl OperatorBindingService<'_> {
         journal: &Journal,
         outcome: LocalAuditOutcomeV1,
     ) -> Result<(), OperatorLifecycleError> {
-        self.local_device.check(self.head)?;
-        let actor = AuthenticatedDevice::new(
-            self.local_device.organization,
-            self.local_device.device,
-            ObjectHash::try_from(self.local_device.certificate.as_bytes().as_slice())
-                .map_err(|_| OperatorLifecycleError::TargetMismatch)?,
-            None,
-        );
+        let actor = self.local_device.unbound_audit_actor(self.head)?;
         self.record_local_audit(
             &actor,
             TypedLocalAuditEvent {

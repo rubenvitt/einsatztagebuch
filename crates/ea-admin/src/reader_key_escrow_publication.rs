@@ -64,6 +64,7 @@ use crate::{
     native_provider::NativeSigningSlot,
     operator_runtime::{OperatorRuntime, fresh_wall_clock},
     reader_key_escrow_inbox::read_escrow_inbox,
+    reader_key_escrow_opening::purge_expired_reader_key_escrow_results,
 };
 
 /// Die Höchstdauer einer Publikationsfreigabe und zugleich das Fenster, in
@@ -534,6 +535,9 @@ pub fn publish_reader_key_escrow(
     {
         return Err(ReaderKeyEscrowError::Operator);
     }
+    // Verfall beim Kommandostart, hinter dem Cutover-Port (bis (f) nie
+    // erreicht) und vor jeder Reauthentifizierung.
+    purge_expired_reader_key_escrow_results(runtime)?;
     let exact_package = single_package(inbox)?;
     let now = || fresh_wall_clock().map_err(|_| ReaderKeyEscrowError::Operator);
     let fresh = match prepare_reader_key_escrow_package(
