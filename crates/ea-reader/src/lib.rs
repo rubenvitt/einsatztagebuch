@@ -187,6 +187,7 @@ mod key_profile;
 mod mode;
 mod operator_profile;
 mod reader_key_escrow;
+mod reader_key_escrow_restore;
 mod registration_request;
 mod search;
 mod session;
@@ -267,6 +268,9 @@ pub use mode::ReaderMode;
 pub use reader_key_escrow::{
     EscrowSealingKeyMatchV1, ReaderKeyEscrowError, ReaderKeyEscrowPackageFileV1, match_sealing_key,
     seal_escrow_package, seal_reader_key_escrow_package,
+};
+pub use reader_key_escrow_restore::{
+    ReaderKeyEscrowTransportFileV1, ReaderKeyEscrowTransportV1, RestoredReaderKemV1,
 };
 pub use registration_request::{
     READER_REGISTRATION_FILE_SUFFIX_V1, ReaderRegistrationFileV1, reader_registration_request,
