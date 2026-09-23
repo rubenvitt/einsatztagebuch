@@ -201,7 +201,7 @@ fn invalid_subcommands_report_command_specific_choices() {
         (
             "organization",
             "iniit",
-            "einsatzarchiv: unknown organization subcommand iniit; expected init|certify-root|reader-key-escrow-publish",
+            "einsatzarchiv: unknown organization subcommand iniit; expected init|certify-root|reader-key-escrow-publish|web-bundle-release|web-bundle-revoke",
         ),
         (
             "operator",
