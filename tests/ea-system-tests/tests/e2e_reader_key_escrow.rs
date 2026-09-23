@@ -19,8 +19,9 @@
 //! 6. Zeremonie B: Transport-Schlüssel T aus dem eingeführten Bestand, zwei
 //!    Approver binden die Öffnung an T, der echte Öffnungsdienst über das
 //!    SQLCipher-Ledger, der Reader öffnet den Umschlag mit T — der KEM ist der
-//!    des Zertifikats. Ein fremder Schlüssel T′ wird vor jeder HPKE-Operation
-//!    abgewiesen, und nichts ist verbraucht.
+//!    des Zertifikats. Ein Öffnungsversuch mit einem fremden Schlüssel T′
+//!    wird abgewiesen, und NACH ihm ist nichts verbraucht (Verbrauch,
+//!    Ergebnis, Replay-Schlüssel, Audit).
 //! 7. Kanarienvogel: kein Byte des Reader-KEM in Bericht, Export und Audit.
 #![allow(clippy::duplicate_mod)]
 #[path = "../../../crates/ea-audit/tests/support/mod.rs"]
@@ -60,7 +61,7 @@ use ea_format::{
 };
 use ea_key_provider::{InMemoryKeyProvider, KeyProvider, SecretPurpose};
 use ea_local_store::{EncryptedDatabase, StoreValue};
-use ea_recovery::{FsArchiveSource, ReaderKeyEscrowOpeningService};
+use ea_recovery::{FsArchiveSource, ReaderKeyEscrowError, ReaderKeyEscrowOpeningService};
 use ea_sync_server::{
     ObjectStore as _, ServerClock, TrustIndexOutcome,
     trust::{TrustPublishError, TrustServiceError},
@@ -736,29 +737,44 @@ async fn publish_admit_export_import_and_reopen_a_reader_key_escrow() {
         millis(NOW),
     )
     .unwrap();
-    // T′: ein fremder Schlüssel wird VOR jeder HPKE-Operation abgewiesen.
-    let foreign = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new([0x6e; 32]))
-        .unwrap()
-        .public_key();
-    assert!(
-        authorization
-            .require_target_transport_key(*foreign.as_bytes())
-            .is_err()
-    );
-    assert_eq!(
-        host.count("reader_key_escrow_opening"),
-        0,
-        "nothing consumed"
-    );
-    let target = authorization
-        .require_target_transport_key(request.target_transport_public_key)
-        .unwrap();
+    // Ein Öffnungsversuch wie `open_reader_key_escrow`: erst die Typbindung
+    // an den autorisierten Transport-Key, dann der echte Öffnungsdienst über
+    // das SQLCipher-Ledger.
     let ledger = ReaderKeyEscrowLedger::new(&host.database, &host.audit, &host.proof);
     let recovery_kem = fixture::complete_recipient_private_key();
     let session = || Ok(());
-    let envelope = ReaderKeyEscrowOpeningService::new(&recovery_kem, &ledger, &session)
-        .open(&authorization, &target)
-        .unwrap();
+    let service = ReaderKeyEscrowOpeningService::new(&recovery_kem, &ledger, &session);
+    let attempt_opening = |transport_public: [u8; 32]| {
+        authorization
+            .require_target_transport_key(transport_public)
+            .map_err(|_| ReaderKeyEscrowError::TransportMismatch)
+            .and_then(|target| service.open(&authorization, &target))
+    };
+    let ledger_state = || {
+        [
+            "reader_key_escrow_opening",
+            "reader_key_escrow_result",
+            "operator_admin_replay",
+            "local_audit_event",
+        ]
+        .map(|table| host.count(table))
+    };
+    // T′: der Versuch mit einem fremden Schlüssel wird abgewiesen, und NACH
+    // ihm ist nichts verbraucht — kein Verbrauch, kein Ergebnis, kein
+    // Replay-Schlüssel, keine Auditzeile.
+    let foreign = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new([0x6e; 32]))
+        .unwrap()
+        .public_key();
+    let before = ledger_state();
+    let refused = attempt_opening(*foreign.as_bytes());
+    assert_eq!(ledger_state(), before, "nothing consumed");
+    assert!(
+        refused.err() == Some(ReaderKeyEscrowError::TransportMismatch),
+        "the foreign transport key is refused as a transport mismatch"
+    );
+    // Derselbe Weg mit T öffnet — die Autorisierung ist nicht verbrannt.
+    let envelope = attempt_opening(request.target_transport_public_key)
+        .unwrap_or_else(|_| panic!("the bound transport key opens"));
     assert_eq!(host.count("reader_key_escrow_opening"), 1, "consumed once");
     let exact_envelope = encode_reader_key_escrow_envelope(&envelope).unwrap();
     let restored = transport.open(&exact_envelope).unwrap();
