@@ -12,9 +12,11 @@ import init, {
   blobGet,
   blobPut,
   enrollmentBegin,
+  enrollmentBeginRestored,
   enrollmentConfirmFingerprints,
   enrollmentFingerprints,
   enrollmentFinish,
+  enrollmentFinishRestored,
   enrollmentRegisterAuthenticator,
   fileModeBeginDirectory,
   fileModeBundleExtension,
@@ -30,8 +32,13 @@ import init, {
   readerDestructionReceipt,
   readerEntryView,
   readerExportOne,
+  readerKeyEscrowSealPackage,
+  readerKeyEscrowTransportAbort,
+  readerKeyEscrowTransportBegin,
+  readerKeyEscrowTransportOpen,
   readerNoteActivity,
   readerNoteVisibility,
+  readerRegistrationRequest,
   readerSearch,
   readerSessionLock,
   readerSessionStateAt,
@@ -94,6 +101,45 @@ export type EaOpfsRequest =
       readonly authority: string
       readonly createdUnixSeconds: bigint
     }
+  | {
+      readonly id: number
+      readonly kind: 'enrollment-begin-restored'
+      readonly restored: number
+      readonly organizationId: Uint8Array
+      readonly subjectId: Uint8Array
+      readonly pinnedAnchor: Uint8Array
+      readonly bundleFingerprint: Uint8Array
+    }
+  | { readonly id: number; readonly kind: 'enrollment-finish-restored'; readonly handle: number }
+  | {
+      readonly id: number
+      readonly kind: 'reader-registration-request'
+      readonly session: number
+      readonly nowMs: number
+    }
+  | {
+      readonly id: number
+      readonly kind: 'reader-key-escrow-seal-package'
+      readonly session: number
+      readonly source: number
+      readonly subjectId: Uint8Array
+      readonly nowMs: number
+    }
+  | {
+      readonly id: number
+      readonly kind: 'reader-key-escrow-transport-begin'
+      readonly pinnedAnchor: Uint8Array
+      readonly subjectId: Uint8Array
+      readonly source: number
+      readonly nowMs: number
+    }
+  | {
+      readonly id: number
+      readonly kind: 'reader-key-escrow-transport-open'
+      readonly handle: number
+      readonly envelope: Uint8Array
+    }
+  | { readonly id: number; readonly kind: 'reader-key-escrow-transport-abort'; readonly handle: number }
   | {
       readonly id: number
       readonly kind: 'vault-unlock'
@@ -372,6 +418,68 @@ scope.addEventListener('message', (event) => {
               request.createdUnixSeconds,
             ),
           })
+          return
+        case 'enrollment-begin-restored':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: await enrollmentBeginRestored(
+              request.restored,
+              request.organizationId,
+              request.subjectId,
+              request.pinnedAnchor,
+              request.bundleFingerprint,
+            ),
+          })
+          return
+        case 'enrollment-finish-restored':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: await enrollmentFinishRestored(request.handle),
+          })
+          return
+        case 'reader-registration-request':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: readerRegistrationRequest(request.session, request.nowMs),
+          })
+          return
+        case 'reader-key-escrow-seal-package':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: readerKeyEscrowSealPackage(
+              request.session,
+              request.source,
+              request.subjectId,
+              request.nowMs,
+            ),
+          })
+          return
+        case 'reader-key-escrow-transport-begin':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: readerKeyEscrowTransportBegin(
+              request.pinnedAnchor,
+              request.subjectId,
+              request.source,
+              request.nowMs,
+            ),
+          })
+          return
+        case 'reader-key-escrow-transport-open':
+          scope.postMessage({
+            id: request.id,
+            ok: true,
+            status: readerKeyEscrowTransportOpen(request.handle, request.envelope),
+          })
+          return
+        case 'reader-key-escrow-transport-abort':
+          readerKeyEscrowTransportAbort(request.handle)
+          scope.postMessage({ id: request.id, ok: true })
           return
         case 'vault-unlock':
           // Die Sitzungskennung ist eine ZAHL und kein DTO; sie reist als Text

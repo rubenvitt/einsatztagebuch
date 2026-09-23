@@ -624,31 +624,53 @@ function beganEnrollment(): EnrollmentBeginStatusV1 {
  */
 let registeredCredentialIds: readonly EnrollmentBytes[] = []
 
+/** Die Antwort von `enrollmentBegin` und `enrollmentBeginRestored`. */
+type EnrollmentBeginTransportV1 = {
+  handle: number
+  prfSalt: string
+  publicKeyAlgorithms: number[]
+  registeredCredentialIds: string[]
+}
+
+/**
+ * Uebernimmt eine Begin-Antwort in den Modulzustand — fuer BEIDE Anfaenge
+ * gleich, damit das Entsperren nach einem wiederhergestellten Enrollment
+ * dasselbe Salz findet wie nach einem frischen.
+ */
+function adoptBegin(status: EnrollmentBeginTransportV1): EnrollmentBeginStatusV1 {
+  const began: EnrollmentBeginStatusV1 = {
+    handle: status.handle,
+    prfSalt: bytesFromHex(status.prfSalt),
+    publicKeyAlgorithms: status.publicKeyAlgorithms,
+    registeredCredentialIds: status.registeredCredentialIds.map(bytesFromHex),
+  }
+  lastBegin = began
+  registeredCredentialIds = began.registeredCredentialIds
+  return began
+}
+
+/**
+ * Der von der Freigabe gestellte Kontext, fuer die Escrow-Zeremonien
+ * (`features/reader-key-escrow`): Subject-ID und gepinnter Anker kommen aus
+ * derselben Quelle wie beim Enrollment und werden nicht erfunden.
+ */
+export function enrollmentReleaseContext(): EnrollmentContextV1 {
+  return enrollmentContext()
+}
+
 /** Die echte Bruecke: fuenf Aufrufe, jeder eine Nachricht an den Worker. */
 export const enrollmentBridge: EnrollmentBridge = {
   begin: async () => {
     const context = enrollmentContext()
-    const status = await callForStatus<{
-      handle: number
-      prfSalt: string
-      publicKeyAlgorithms: number[]
-      registeredCredentialIds: string[]
-    }>({
-      kind: 'enrollment-begin',
-      organizationId: context.organizationId,
-      subjectId: context.subjectId,
-      pinnedAnchor: context.pinnedAnchor,
-      bundleFingerprint: context.bundleFingerprint,
-    })
-    const began: EnrollmentBeginStatusV1 = {
-      handle: status.handle,
-      prfSalt: bytesFromHex(status.prfSalt),
-      publicKeyAlgorithms: status.publicKeyAlgorithms,
-      registeredCredentialIds: status.registeredCredentialIds.map(bytesFromHex),
-    }
-    lastBegin = began
-    registeredCredentialIds = began.registeredCredentialIds
-    return began
+    return adoptBegin(
+      await callForStatus<EnrollmentBeginTransportV1>({
+        kind: 'enrollment-begin',
+        organizationId: context.organizationId,
+        subjectId: context.subjectId,
+        pinnedAnchor: context.pinnedAnchor,
+        bundleFingerprint: context.bundleFingerprint,
+      }),
+    )
   },
 
   registerAuthenticator: async ({ handle }) => {
@@ -706,6 +728,35 @@ export const enrollmentBridge: EnrollmentBridge = {
     }),
 }
 
+
+/**
+ * Die Bruecke des Enrollments um einen WIEDERHERGESTELLTEN KEM (Escrow-Profil
+ * §6 Schritt 6): `restored` ist die Kennung aus dem Import des Umschlags.
+ * Registrierung, Fingerprints und Bestaetigung sind DIESELBEN Aufrufe wie beim
+ * frischen Enrollment; der Abschluss schreibt den neuen Tresor lokal und ruft
+ * keinen Endpunkt (die Endpunkte sind signiert, der neue Signaturschluessel
+ * hat noch kein Zertifikat).
+ */
+export function restoredEnrollmentBridge(restored: number): EnrollmentBridge {
+  return {
+    ...enrollmentBridge,
+    begin: async () => {
+      const context = enrollmentContext()
+      return adoptBegin(
+        await callForStatus<EnrollmentBeginTransportV1>({
+          kind: 'enrollment-begin-restored',
+          restored,
+          organizationId: context.organizationId,
+          subjectId: context.subjectId,
+          pinnedAnchor: context.pinnedAnchor,
+          bundleFingerprint: context.bundleFingerprint,
+        }),
+      )
+    },
+    finish: async ({ handle }) =>
+      callForStatus<EnrollmentFinishStatusV1>({ kind: 'enrollment-finish-restored', handle }),
+  }
+}
 
 /**
  * Eine FRISCHE PRF-Auswertung fuer eine Bestaetigung — Entsperren oder
