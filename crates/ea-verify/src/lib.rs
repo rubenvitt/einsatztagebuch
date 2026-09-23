@@ -85,6 +85,7 @@ mod json;
 mod recipient;
 mod report;
 mod state;
+mod trust_gate;
 
 /// Die geschlossene Menge der sechs Objektarten, DURCHGEREICHT.
 ///
