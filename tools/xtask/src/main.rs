@@ -2464,9 +2464,9 @@ const STAGE_FOUR_HOST_SCOPE_CLAUSE: &str = concat!(
 /// (PREFLIGHT, GOLIVE-POSTURE, NATIVE-ARCHIVE-COMPONENT) und die Domäne des
 /// `escrow-core-hash` unter DRK-318. Kein bestehender Vektor ändert sich.
 ///
-/// Anders als in Stufe 3 verlangt der Gate hier (noch) KEIN Berichtsliteral
-/// der Familien in `docs/traceability/stage-5-gate.md`; der Bericht zieht mit
-/// Scheibe (f) von DRK-318 nach.
+/// Wie in Stufe 3 verlangt der Gate die Pfade der Familien zusaetzlich als
+/// Berichtsliteral in `docs/traceability/stage-5-gate.md`
+/// ([`STAGE_FIVE_GATE_REPORT_LITERALS`]), seit Scheibe (f) von DRK-318.
 const STAGE_FIVE_VECTOR_FAMILIES: [&str; 3] = [
     "reader-key-escrow",
     "reader-key-escrow-approval",
@@ -2509,20 +2509,18 @@ const STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION: [&str; 5] =
 /// Die Ledgerzeilen, die diese Stufe als DOKUMENTIERTE GRENZE fuehrt und
 /// deshalb auf `planned` stehen lassen darf.
 ///
-/// GENAU EINE, und die Ausnahme ist eng: WR-075 verlangt die Re-Encryption
-/// gegen den gebundenen Transport-Key-Fingerprint, und die zugehoerige
-/// v1.1-Objektfamilie entsteht erst in DRK-318 — vor dessen normativem und
-/// Security-Review gibt es nichts zu belegen. Ruling Ruben vom 2026-09-15:
-/// der Gate schliesst mit dokumentierter Grenze statt auf DRK-318 zu warten.
+/// LEER seit DRK-318 (Scheibe f). Bis dahin stand hier WR-075 — die
+/// Re-Encryption gegen den gebundenen Transport-Key-Fingerprint, deren
+/// v1.1-Objektfamilie erst DRK-318 baute (Ruling Ruben vom 2026-09-15: das
+/// Gate schloss mit dokumentierter Grenze). Mit dem Systemziel
+/// `tests/ea-system-tests/tests/e2e_reader_key_escrow.rs` ist die Zeile
+/// `integrated`, und eine Ausnahme fuer sie waere jetzt eine Freigabe auf
+/// Vorrat.
 ///
-/// Die Ausnahme ist NICHT stillschweigend. [`rows_still_planned_with_boundary`]
-/// laesst diese Zeile nur durch, wenn der Bericht sie mitsamt ihrem
-/// besitzenden Ticket woertlich nennt — sonst waere eine dokumentierte Grenze
-/// von einer vergessenen Zeile nicht zu unterscheiden, und genau diese
-/// Verwechslung ist der Grund, aus dem die Stufe ueberhaupt ein Gate hat.
-///
-/// Jede ANDERE Stufe-5-Zeile auf `planned` bleibt ein Mangel.
-const STAGE_FIVE_DOCUMENTED_BOUNDARY_ROWS: [&str; 1] = ["WR-075"];
+/// Der Mechanismus bleibt ([`rows_still_planned_with_boundary`]), damit die
+/// naechste Grenze nicht neu gebaut werden muss; er ist in `mod tests`
+/// synthetisch bezeugt. Jede Stufe-5-Zeile auf `planned` ist ein Mangel.
+const STAGE_FIVE_DOCUMENTED_BOUNDARY_ROWS: [&str; 0] = [];
 
 /// Die Skripte, die die Wurzel-`package.json` fuehren MUSS.
 ///
@@ -2565,20 +2563,29 @@ const STAGE_FIVE_GATE_REPORT_SECTIONS: [&str; 8] = [
 /// Namen nennt, kann die Zusage „keiner von beiden DARF falsch etikettiert
 /// werden" nicht belegen.
 ///
-/// Die beiden Ticketnummern sind die besitzenden Tickets der zwei
-/// dokumentierten Grenzen. Sie stehen hier und nicht nur im Abschnitt, weil
-/// eine Grenze OHNE Besitzer keine Grenze ist, sondern eine Luecke.
+/// Die beiden Ticketnummern besitzen die dokumentierten Grenzen dieser Stufe:
+/// DRK-320 das Controlled-Network-Archiv, DRK-318 die benannten Grenzen des
+/// Reader-Key-Escrows — und DRK-318 ist das Ticket, das WR-075 geschlossen
+/// hat. Sie stehen hier und nicht nur im Abschnitt, weil eine Grenze OHNE
+/// Besitzer keine Grenze ist, sondern eine Luecke.
+///
+/// Die drei Pfade danach sind die Escrow-Vektorfamilien
+/// ([`STAGE_FIVE_VECTOR_FAMILIES`]) nach dem Muster der Stufe 3: der Bericht
+/// nennt, was die Stufe einfriert.
 ///
 /// Der letzte Eintrag ist die Offenlegungspflicht dieser Stufe, in der
 /// Tradition der Stufen 2 bis 4: ein gruener Stufe-5-Gate ohne diesen Satz
 /// liest sich als Betriebsabnahme, die diese Stufe ausdruecklich nicht
 /// erbringt.
-const STAGE_FIVE_GATE_REPORT_LITERALS: [&str; 10] = [
+const STAGE_FIVE_GATE_REPORT_LITERALS: [&str; 13] = [
     "Fail",
     "Unknown",
     "production_ready",
     "DRK-318",
     "DRK-320",
+    "vectors/reader-key-escrow/v1/",
+    "vectors/reader-key-escrow-approval/v1/",
+    "vectors/reader-key-escrow-recovery/v1/",
     "docs/traceability/v0.1-requirements.csv",
     "crates/ea-admin/src/operator_runtime.rs",
     "apps/cli/tests/operator_administration/clock_repair.rs",
@@ -4164,10 +4171,11 @@ fn run_stage_four_gate(root: &Path) -> Result<(), String> {
 /// [`STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION`] sie namentlich in den
 /// Berichtsvertrag.
 ///
-/// ZWEITENS die dokumentierte Grenze. WR-075 bleibt bis DRK-318 `planned`, und
-/// der Gate laesst genau diese eine Zeile durch — aber nur gegen einen
-/// Bericht, der sie samt Ticket nennt. Siehe
-/// [`rows_still_planned_with_boundary`].
+/// ZWEITENS die dokumentierte Grenze. Bis DRK-318 liess der Gate WR-075 auf
+/// `planned` durch — aber nur gegen einen Bericht, der die Zeile samt Ticket
+/// nannte. Seit Scheibe (f) ist die Liste leer
+/// ([`STAGE_FIVE_DOCUMENTED_BOUNDARY_ROWS`]); der Mechanismus
+/// [`rows_still_planned_with_boundary`] bleibt fuer die naechste Grenze.
 ///
 /// DRITTENS die Posture. Der Bericht muss `Fail` und `Unknown` BEIDE beim
 /// Namen nennen, weil die Zusage dieser Stufe lautet, dass keiner von beiden
@@ -4712,6 +4720,81 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    /// Eine Stufe-5-Zeile mit gegebenem Status, sonst leer.
+    fn stage_five_row(identifier: &str, status: &str) -> super::LedgerRow {
+        let mut values = vec![String::new(); 9];
+        values[0] = identifier.to_owned();
+        values[7] = "5".to_owned();
+        values[8] = status.to_owned();
+        super::LedgerRow {
+            requirement_id: identifier.to_owned(),
+            primary_acceptance_criterion: String::new(),
+            values,
+        }
+    }
+
+    /// Der Mechanismus der dokumentierten Grenze, synthetisch — die echte
+    /// Liste ist seit DRK-318 leer, und ohne diesen Zeugen verfiele er
+    /// unbemerkt, bis ihn die naechste Grenze braucht.
+    #[test]
+    fn a_documented_boundary_is_excused_only_while_planned_and_named() {
+        let rows = [
+            stage_five_row("WR-900", "planned"),
+            stage_five_row("FR-901", "planned"),
+            stage_five_row("FR-902", "integrated"),
+        ];
+        let boundaries = ["WR-900"];
+
+        // Belegt: der Bericht nennt die Grenze — sie wird aufgeschoben, die
+        // andere offene Zeile bleibt ein Mangel.
+        let mut problems = Vec::new();
+        let (unexcused, deferred) = super::rows_still_planned_with_boundary(
+            &rows,
+            "5",
+            &boundaries,
+            Some("… WR-900 …"),
+            &mut problems,
+        );
+        assert_eq!(deferred, ["WR-900"]);
+        assert_eq!(unexcused, ["FR-901"]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("still on planned: FR-901"));
+
+        // Unbelegt: der Bericht schweigt.
+        let mut problems = Vec::new();
+        super::rows_still_planned_with_boundary(
+            &rows,
+            "5",
+            &boundaries,
+            Some("nothing here"),
+            &mut problems,
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("WR-900 as a documented boundary")),
+            "{problems:?}"
+        );
+
+        // Veraltet: die Grenze steht nicht mehr auf `planned`.
+        let moved = [stage_five_row("WR-900", "integrated")];
+        let mut problems = Vec::new();
+        let (unexcused, deferred) = super::rows_still_planned_with_boundary(
+            &moved,
+            "5",
+            &boundaries,
+            Some("WR-900"),
+            &mut problems,
+        );
+        assert!(unexcused.is_empty() && deferred.is_empty());
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("WR-900 is no longer planned")),
+            "{problems:?}"
+        );
+    }
+
     /// Pinnt den Ableiter gegen den ECHTEN Entwurf.
     ///
     /// `tools/xtask/tests/stage_gate.rs` treibt den Gate gegen ein synthetisches

@@ -31,10 +31,11 @@ Die Einzelzusagen aus Plan Task 14 Step 3 stehen zusaetzlich in Abschnitt 3.
 denen der Ledger bis hierher als Riegel hing — der native Clock-Release
 (`5e055d0`, `59b08ac`, `8dae049`), das Audit der abgelaufenen Sitzung
 (`96e0c3c`) und die Einstufung zum Restnachweis im Go-live-Bericht
-(`2d52b5e`) —, sind geschlossen. Achtzehn der neunzehn Zeilen stehen jetzt
-auf `implemented` oder `integrated` (Begruendung je Zeile in `## Ledgerpflege`),
-WR-075 bleibt als dokumentierte Grenze auf `planned`, und
-`cargo run --locked -p xtask -- stage-gate 5` endet mit Exit 0. Keine Zelle
+(`2d52b5e`) —, sind geschlossen. Mit DRK-318 (Reader-Key-Escrow v1.1,
+Scheibe f, 2026-09-23) ist auch WR-075 gewandert: alle neunzehn Zeilen stehen
+jetzt auf `implemented` oder `integrated` (Begruendung je Zeile in
+`## Ledgerpflege`), und `cargo run --locked -p xtask -- stage-gate 5` endet
+mit Exit 0. Keine Zelle
 dieses Berichts sagt mehr `Offen`; was offen bleibt, steht mit Besitzer in
 `## Dokumentierte Grenzen` oder in der Spalte „Offen in spaeterer Stufe".
 
@@ -57,10 +58,10 @@ sie ab.
 | AK 40 | Historische Grant-Autoritaet | `crates/ea-recovery/tests/historical_grant.rs::separate_key_roles_recipient_native_presence_and_durable_audit_are_required` (8/0/0) fuer getrennte Recovery-KEM und Grant-Signatur, `crates/ea-trust/tests/grant_authorization.rs` (5/0/0) fuer die Mehr-Augen-Authorization; Server-Pfad `e2e_historical_grant.rs` (1/0/0) | Die Custody der Produktionsschluessel bleibt Stufe 7 |
 | AK 41 | Destroyed Entry Stub | `process_native::destruction::writer_evidence::native_writer_evidence_reopens_as_real_reader_authorized_destruction` (in 52/0/0) — gueltiger `.eds` mit Writer-Signatur, `entryHash` und Kettenkontinuitaet; die nicht autorisierte Entfernung als sichtbare Luecke: `crates/ea-verify/tests/destruction_stub.rs` (8/0/0) und `receipt_checkpoint.rs` (3/0/0) | Die nativen Minimal- und Maximalfaelle des Stubs bleiben Stufe 7 |
 | AK 44 | Datenschutz-Gate | `tests/ea-system-tests/tests/e2e_destruction_policy.rs::real_current_progress_privacy_gate_exact_replay_and_transaction_fence` (1/0/0, `EA-DESTRUCTION-PRIVACY-GATE`), dazu `e2e_destruction_admission_race.rs` (4/0/0) und `e2e_destruction_catalog_race.rs` (1/0/0), alle mit `xtask integration up` — ohne dokumentierte Freigabe startet kein `.eds`-basierter Vernichtungsprozess. Go-live-Bericht mit Einstufung und Entscheidung zum Restnachweis: `crates/ea-admin/tests/go_live.rs::the_eds_privacy_row_classifies_the_signed_retention_policy` (Anforderung `EA-GOLIVE-EDS-PRIVACY-DECISION` aus `retention_policy.destruction_enabled` und `.eds_privacy_decision_document_hash` des gewählten Kopfes — dieselben signierten Felder wie das Gate; „Restnachweis freigegeben" mit Dokumenthash, „Vernichtung deaktiviert", aktiviert ohne Freigabe `NotMet`), `::flipping_any_single_requirement_flips_production_ready_to_false` und `::the_decision_document_hash_never_enters_the_unresolved_report` (Ziel 12/0/0) | Die externe Datenschutzentscheidung selbst bleibt Stufe 7; das Gate belegt nur, dass ohne sie nichts startet |
-| AK 47 | Organisationsadministration | `crates/ea-admin/tests/authorization.rs` (16/0/0: Root-only, Admin-only, falscher Core und — neu mit `8444a83` — `a_self_rotation_of_the_signing_admin_never_reaches_the_key_port` mit `EA-TRUST-SELF-AUTHORIZATION`), `::root_ceremony.rs` (7/0/0, Einmaligkeit), `::ceremony_steps.rs` (7/0/0), `apps/cli/tests/organization_certify_root.rs` (4/0/0). Nullkontext (gepinntes Admin-Paar vor der Registry, finaler Anchor bindet dieselben Felder, danach keine weitere Nutzung): `crates/ea-trust/tests/bootstrap.rs` (8/0/0), `::certificate_attacks.rs` (14/0/0), `::registry_attacks.rs` (12/0/0), `crates/ea-admin/tests/bootstrap.rs` (53/0/0) | Der Transport-Fingerprint-Anteil haengt an `WR-075` und bleibt bis DRK-318 offen |
+| AK 47 | Organisationsadministration | `crates/ea-admin/tests/authorization.rs` (16/0/0: Root-only, Admin-only, falscher Core und — neu mit `8444a83` — `a_self_rotation_of_the_signing_admin_never_reaches_the_key_port` mit `EA-TRUST-SELF-AUTHORIZATION`), `::root_ceremony.rs` (7/0/0, Einmaligkeit), `::ceremony_steps.rs` (7/0/0), `apps/cli/tests/organization_certify_root.rs` (4/0/0). Nullkontext (gepinntes Admin-Paar vor der Registry, finaler Anchor bindet dieselben Felder, danach keine weitere Nutzung): `crates/ea-trust/tests/bootstrap.rs` (8/0/0), `::certificate_attacks.rs` (14/0/0), `::registry_attacks.rs` (12/0/0), `crates/ea-admin/tests/bootstrap.rs` (53/0/0). Der Transport-Fingerprint-Anteil ist mit DRK-318 geschlossen; seine Zeugen stehen bei `WR-075` in `## Ledgerpflege` | Nichts aus dieser Zeile; die Stufe-7-Vorbehalte gelten global |
 | AK 49 | Registry-Wirksamkeit | `crates/ea-admin/tests/registry_workflows.rs::the_workflow_selects_the_highest_applicable_head` und `::a_wrong_previous_head_blocks` (20/0/0), fuer Forks und future-only Heads `e2e_registry_effectiveness.rs` (7/0/0); den neueren wirksamen Head am Server erzwingen `apps/server/tests/auth_trust_api.rs::a_registry_event_that_is_not_the_next_head_names_the_head_that_is`, `::a_selected_head_behind_the_persisted_pin_is_refused` (13/0/0) und `commit_failures.rs::a_package_binding_an_older_head_names_the_required_head` (17/0/0), beide mit `xtask integration up` | Die unvermeidbare Offline-Grenze ist dokumentiert und bleibt bestehen |
 | AK 52 | Gefuehrter Recovery-Test | `crates/ea-admin/tests/bootstrap.rs::a_partial_recovery_test_never_becomes_a_successful_one` (53/0/0, `EA-CEREMONY-RECOVERY-TEST-FAILED` bei einem fehlenden Medium) und `crates/ea-recovery/tests/recovery_test.rs::real_backup_challenges_are_fresh_bound_to_the_signed_certificate_and_never_productive` (6/0/0). Nativ bindet `process_native::recovery::native_source_capture_binds_real_snapshot_machine_inventory_and_signed_audit_without_readiness` Inventar und signiertes Audit (1/0/0). Die sechs nativen Zeugen `process_native::recovery::guided::` sind `#[ignore]`, weil sie eine echte Fremdmaschine verlangen (0/0/6). Korrigiert: `recovery_input_profiles.rs`, `backup_key.rs`, `offline_sources.rs` belegen Eingabeprofile, KDF und Parser | Die Fremdmaschine der nativen guided-Zeugen und die quartalsweise Uebung bleiben Stufe 7 |
-| AK 53 | Operator-Identitaet | `crates/ea-admin/tests/operator_binding.rs` (21/0/0), `::operator_host.rs` (17/0/0), `::operator_audit.rs` (12/0/0) mit `the_revocation_audit_carries_no_operator_plaintext` (neu, `8444a83`), nativ `process_native::administration::host::` (2/0/0 in 163 s, nur mit `--features desktop-fixture` uebersetzt). Abgelaufene Sitzung (DRK-282): abgelehnt UND als `sessionExpired` (Aktionscode 12, Ausgang `failed`) klartextfrei gebucht — Zeremonie `an_expired_operator_session_is_refused_and_audited_without_plaintext` (entparkt), Gegenproben `a_foreign_purpose_proof_is_refused_without_an_expiry_row` und `an_expired_session_stays_refused_when_its_audit_cannot_be_booked`, Laufzeit `the_runtime_expiry_row_is_device_signed_and_names_only_the_known_binding` und der Modultest `operator_runtime::tests::only_an_expiry_is_booked_once_before_the_unchanged_refusal` (`--lib` 84/0/0); Grenze siehe `## Dokumentierte Grenzen` | Der Ubuntu-UID-Wiederverwendungsfall auf einer installierten OS-Praesenz bleibt Stufe 7; der Transport-Fingerprint-Anteil haengt an `WR-075` |
+| AK 53 | Operator-Identitaet | `crates/ea-admin/tests/operator_binding.rs` (21/0/0), `::operator_host.rs` (17/0/0), `::operator_audit.rs` (12/0/0) mit `the_revocation_audit_carries_no_operator_plaintext` (neu, `8444a83`), nativ `process_native::administration::host::` (2/0/0 in 163 s, nur mit `--features desktop-fixture` uebersetzt). Abgelaufene Sitzung (DRK-282): abgelehnt UND als `sessionExpired` (Aktionscode 12, Ausgang `failed`) klartextfrei gebucht — Zeremonie `an_expired_operator_session_is_refused_and_audited_without_plaintext` (entparkt), Gegenproben `a_foreign_purpose_proof_is_refused_without_an_expiry_row` und `an_expired_session_stays_refused_when_its_audit_cannot_be_booked`, Laufzeit `the_runtime_expiry_row_is_device_signed_and_names_only_the_known_binding` und der Modultest `operator_runtime::tests::only_an_expiry_is_booked_once_before_the_unchanged_refusal` (`--lib` 84/0/0); Grenze siehe `## Dokumentierte Grenzen`. Der Transport-Fingerprint-Anteil ist mit DRK-318 geschlossen; seine Zeugen stehen bei `WR-075` in `## Ledgerpflege` | Der Ubuntu-UID-Wiederverwendungsfall auf einer installierten OS-Praesenz bleibt Stufe 7 |
 
 ## 2. Reichweite der Stufe-5-Abnahme
 
@@ -73,6 +74,12 @@ und keiner davon war ein Produktfehler — es war ein unoptimiertes Test-Setup
 gegen feste Produktfristen (300 s Praesenznachweis, 40 s Antwortfrist). Eine
 Reichweitenklausel, die nur die Toolchain nennt, haette diesen Befund nicht
 ausgeschlossen.
+
+Die drei Vektorfamilien, die Stufe 5 mit dem Reader-Key-Escrow v1.1
+(DRK-318) einfriert, liegen neben `vectors/trust/v1/`:
+`vectors/reader-key-escrow/v1/`, `vectors/reader-key-escrow-approval/v1/`
+und `vectors/reader-key-escrow-recovery/v1/`. Kein bestehender Vektor hat sich
+geändert.
 
 Belastbare Gate-Zahlen aus den beiden gruenen Laeufen auf `db08333`
 (Lauf 34936505876): vollstaendiger Gate-Durchlauf 50 min 26 s beim ersten
@@ -268,7 +275,8 @@ FR-120, FR-121, FR-123, FR-124 und WR-075.
 **Hier und nur hier** bewegt sich der Ledger, ausschliesslich nach
 `implemented` oder `integrated`. Ein frueherer Wechsel macht das Stufengate
 rot; PR #22 hat deshalb keine Zeile bewegt. DRK-282 bewegt achtzehn Zeilen;
-WR-075 bleibt `planned` (siehe `## Dokumentierte Grenzen`).
+DRK-318 bewegt die neunzehnte, WR-075, nach `integrated` (siehe unten und
+`## Dokumentierte Grenzen`).
 
 **Die Regel `implemented` gegen `integrated`.** Sie folgt den Stufen 3 und 4
 und nicht einer eigenen Lesart: `integrated` heisst, der Beleg laeuft ueber
@@ -295,26 +303,30 @@ Produkthaelfte dieser Zeilen und senkt keine auf `implemented`.
 | `AK-40` | integrated | Serverpfad `e2e_historical_grant.rs` neben `historical_grant.rs` und `grant_authorization.rs` |
 | `AK-41` | integrated | Nativer Zeuge `writer_evidence::native_writer_evidence_reopens_as_real_reader_authorized_destruction` oeffnet den echten `.eds` im Reader; die nativen Min-/Max-Faelle sind Stufe-7-Vorbehalt, keine offene Produkthaelfte |
 | `AK-44` | integrated | Drei Systemziele mit `integration up` fuer das Datenschutz-Gate, dazu die Go-live-Zeile aus denselben signierten Feldern (`2d52b5e`); die externe Entscheidung selbst ist Stufe-7-Vorbehalt |
-| `AK-47` | implemented | Die Transport-Fingerprint-Bindung haengt an WR-075 und bleibt bis DRK-318 offen — das WR-041-Muster |
+| `AK-47` | implemented | Der Transport-Fingerprint-Anteil ist mit DRK-318 geschlossen; die Organisationsadministration selbst tragen nur Crate- und In-Process-Zeugen |
 | `AK-49` | integrated | Systemziel plus `auth_trust_api.rs` und `commit_failures.rs` mit `integration up` |
 | `AK-52` | implemented | Die sechs nativen `process_native::recovery::guided::` sind `#[ignore]` (Fremdmaschine); der gefuehrte Pfad ist nativ nicht bezeugt |
-| `AK-53` | implemented | Transport-Fingerprint-Anteil an WR-075 (DRK-318) offen; `sessionExpired` (`96e0c3c`) ist geschlossen |
+| `AK-53` | implemented | Der Transport-Fingerprint-Anteil ist mit DRK-318 geschlossen, `sessionExpired` (`96e0c3c`) ebenso; offen bleibt der Ubuntu-UID-Wiederverwendungsfall auf installierter OS-Praesenz (Ruling Ruben vom 2026-09-23) |
 | `FR-120` | implemented | `crates/ea-admin/tests/amendment.rs` in-process, wie AK 18 |
 | `FR-121` | implemented | Derselbe Zeuge liest Original-ID, -Hash, Sequenz, Grund und Ersteller aus verifizierten Bytes; in-process |
 | `FR-123` | implemented | Derselbe Zeuge, Originalbytes identisch; in-process |
 | `FR-124` | implemented | Derselbe Zeuge, zwei Nachtraege; in-process |
+| `WR-075` | integrated | Systemziel `e2e_reader_key_escrow.rs` gegen den echten Server (DRK-318); offen sind nur benannte Grenzen, keine Produkthaelfte der Zeile (siehe `## Dokumentierte Grenzen`) |
 
 Die Belegspalte jeder bewegten Zeile nennt die Zeugen aus Abschnitt 1 bzw. der
 Tabelle unten im Stil der Stufe-4-Zeilen (`Datei::Test; kurze Aussage`);
 `source`, `title` und die Kriteriumsspalten sind unveraendert. Mitgezogene
-Pins: KEINE. Die WR-Pin-Tabelle `WEB_READER_MUST_ROWS` in
-`tools/xtask/tests/stage_gate.rs` fuehrt `("WR-075", "7.5", "5", "planned")`,
-und das bleibt richtig; der D1-Pin auf die WR-075-Belegspalte
-(`organizationAdminAuthorization`, `2-of-N`) bleibt unberuehrt, weil die Zeile
-unberuehrt bleibt. Kein anderer xtask-Test pinnt Status oder Beleg einer der
-achtzehn Zeilen. Invertiert ist der Zeuge des eingecheckten Baums:
-`stage_five_gate_passes_the_checked_in_tree_with_wr_075_as_the_only_open_row`
-verlangt jetzt Exit 0 statt Exit 2.
+Pins mit DRK-318: die WR-Pin-Tabelle `WEB_READER_MUST_ROWS` in
+`tools/xtask/tests/stage_gate.rs` fuehrt jetzt `("WR-075", "7.5", "5",
+"integrated")`; der D1-Pin auf die WR-075-Belegspalte
+(`organizationAdminAuthorization`, `2-of-N`) bleibt unveraendert und traegt
+weiter, weil die neue Belegspalte D1 woertlich nennt. Die Liste der
+dokumentierten Grenzen des Gates (`STAGE_FIVE_DOCUMENTED_BOUNDARY_ROWS`) ist
+leer. Invertiert sind die Zeugen des eingecheckten Baums
+(`stage_five_gate_passes_the_checked_in_tree_with_no_open_row`) und des gruenen
+Fixtures (`stage_five_gate_accepts_a_ledger_without_open_rows`); ein Ledger mit
+WR-075 auf `planned` ist unentschuldigt
+(`a_planned_wr_075_is_an_unexcused_row`).
 
 **Die fuenf Zeilen ohne primaeres Abnahmekriterium.** FR-120, FR-121, FR-123,
 FR-124 und WR-075 haben kein primaeres Kriterium (FR-120 bis FR-124 nennen
@@ -331,25 +343,53 @@ Bericht.
 | FR-121 | Original-ID/-Hash, Grund, Ersteller | `crates/ea-admin/tests/amendment.rs::amendment_finalization_preserves_original_bytes_and_reader_keeps_multiple_amendments` (1/0/0) liest Original-ID, Original-Hash, Sequenz, Grund und Ersteller aus den verifizierten und entschluesselten Bytes (`9d3716f`) |
 | FR-123 | Original nicht aendern/verbergen | `crates/ea-admin/tests/amendment.rs` (1/0/0) — Originalbytes vor und nach dem Nachtrag identisch, der Reader zeigt Original und Nachtraege gemeinsam |
 | FR-124 | Mehrere Nachtraege unterstuetzen | `crates/ea-admin/tests/amendment.rs` (1/0/0) — zwei Nachtraege auf dasselbe Original, der Reader haelt beide (`amendments().len() == 2`) |
-| WR-075 | Re-Encryption nur bei Uebereinstimmung mit dem gebundenen Transport-Key-Fingerprint | Dokumentierte Grenze, siehe unten |
+| WR-075 | Re-Encryption nur bei Uebereinstimmung mit dem gebundenen Transport-Key-Fingerprint | `tests/ea-system-tests/tests/e2e_reader_key_escrow.rs::publish_admit_export_import_and_reopen_a_reader_key_escrow` (1/0/0, mit `xtask integration up`): Freigabe, Publikationsfreigabe und Escrow gegen den echten Server, Export und Einfuhr in ein frisches Verzeichnis mit identischem Bericht, Öffnung nur an den gebundenen Transport-Key, ein fremder Schlüssel wird vor HPKE und ohne Verbrauch abgewiesen. Dazu `crates/ea-trust/tests/reader_key_escrow_recovery.rs`, `crates/ea-recovery/tests/reader_key_escrow.rs` (mit `--features pkcs11-fixture` 106/0/0 im Crate), `crates/ea-admin/tests/reader_key_escrow_publication.rs`, `crates/ea-admin/tests/web_bundle_release.rs`, `apps/cli/tests/operator_escrow/mod.rs` unter `process_native::escrow::` (12/0/0, mit `pkcs11-fixture` 13/0/0) und `apps/web/tests/e2e/reader-key-escrow.spec.ts` (4/0/0, Chromium) |
 
 ## Dokumentierte Grenzen
 
-Diese Stufe schliesst als erste mit einer offenen Ledgerzeile. Jede Grenze
-hat ein besitzendes Ticket; eine Grenze ohne Besitzer waere keine Grenze,
-sondern eine Luecke.
+Diese Stufe schloss als erste mit einer offenen Ledgerzeile; seit DRK-318 ist
+keine mehr offen. Jede Grenze hat ein besitzendes Ticket; eine Grenze ohne
+Besitzer waere keine Grenze, sondern eine Luecke.
 
-**WR-075 bleibt `planned` — besitzendes Ticket DRK-318.** Die Zeile verlangt
-die Re-Encryption gegen den gebundenen Transport-Key-Fingerprint. Die
-zugehoerige v1.1-Objektfamilie (`readerKeyEscrow` und
-`readerKeyEscrowRecoveryAuthorization`) entsteht erst in DRK-318, und vor
-dessen normativem und Security-Review gibt es nichts zu belegen. Ruling Ruben
-vom 2026-09-15: das Gate schliesst mit dokumentierter Grenze, statt auf
-DRK-318 zu warten. Die Transport-Fingerprint-Anteile von AK 47 und AK 53
-bleiben damit ebenfalls offen und sind in Abschnitt 1 so ausgewiesen.
-`run_stage_five_gate` laesst genau diese eine Zeile auf `planned` durch — aber
-nur gegen einen Bericht, der sie samt Ticket nennt. Jede andere Stufe-5-Zeile
-auf `planned` bleibt ein Mangel.
+**Geschlossen mit DRK-318: WR-075 ist `integrated`.** Bis DRK-318 stand die
+Zeile als dokumentierte Grenze auf `planned` (Ruling Ruben vom 2026-09-15).
+Die v1.1-Objektfamilie (`readerKeyEscrowApproval`, `readerKeyEscrow` und
+`readerKeyEscrowRecoveryAuthorization`) ist gebaut; die Re-Encryption gegen den
+gebundenen Transport-Key-Fingerprint traegt das Systemziel
+`e2e_reader_key_escrow.rs`, die Zeugen stehen in `## Ledgerpflege`. Die
+Transport-Fingerprint-Anteile von AK 47 und AK 53 sind damit ebenfalls
+geschlossen. `run_stage_five_gate` fuehrt keine Ausnahme mehr: jede
+Stufe-5-Zeile auf `planned` ist ein Mangel.
+
+**Die benannten Grenzen des Reader-Key-Escrows — besitzendes Ticket DRK-318.**
+Keine davon ist eine Produkthälfte von WR-075; jede steht auch im PR.
+
+1. Ein einziges ungültiges Objekt der drei Escrow-Familien lässt Gate `trust`
+   für den ganzen Bestand scheitern (Ruling Q11) und blockiert am Server
+   weitere Escrow-Annahmen der Organisation (fail-closed).
+2. Die Cutover-Vorbedingung (aktive `webBundleRelease` einer v1.1-fähigen
+   Fassung, `2026.4.0`) prüft der Offline-Verifizierer nicht; sie ist eine
+   Regel der Publikation, der Serverannahme und des Audits 13. Nach einer
+   Wurzelrotation bleibt die Sperre zu, bis eine neue Freigabe unter der
+   gepinnten Wurzel gilt.
+3. Die native Root-Zeremonie der Bundle-Freigabe und ihres Widerrufs schreibt
+   KEINE eigene Auditzeile (Ruling Ruben, Q2); Aktion 13 trägt den Hash der
+   Freigabe, die die Sperre öffnete. Einen nativen Uploader gibt es nicht; die
+   Reihenfolge Freigabe, Publikationsfreigabe, Escrow ist über die
+   Serverzeugen belegt, die Verteilung nativ ins Archiv (inhaltsadressiert,
+   ohne Überschreiben, ohne Schreibsperre).
+4. Ersatz nach erneutem Enrollment ist Widerruf des alten Zertifikats plus
+   normale Publikation; ein vorzeitiger Widerruf verhindert die
+   Wiederherstellung. Die Öffnung verlangt die exakte Sequenz wie beim Grant.
+5. Es gibt keinen Produktpfad zum Einsammeln der zwei Approver-Signaturen der
+   Öffnungsautorisierung (wie bei `grantAuthorization`).
+6. Server: der Katalogzaun macht einen gleichzeitigen Trust-Upload derselben
+   Organisation zu einem wiederholbaren 503; die Publikationsfreigabe gilt
+   300 s gegen die Serveruhr; zwei Zertifikate einer Person schützt nur der
+   Zaun; kein Serverimport (Import ist Offline-Einfuhr).
+7. Browser: Zeremonie B endet lokal (Neuzertifizierung und Server-Tresor
+   fehlen); `web:browser-test` ist nicht ausgeführt, `web:e2e` läuft mit
+   Rust-Peer.
 
 **DRK-320 (Controlled-Network-Archiv) ist eine dokumentierte Grenze und
 bekommt KEINE eigene Ledgerzeile.** Ruling Ruben vom 2026-09-15. Begruendung:

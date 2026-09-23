@@ -536,9 +536,10 @@ fn stage_one_gate_requires_a_complete_requirement_ledger() {
 /// - `WR-063` `planned` -> `implemented`
 /// - `WR-082` `planned` -> `integrated`
 ///
-/// `WR-042D` (Stufe 3, `implemented`), `WR-052` (Stufe 2, `integrated`),
-/// `WR-064` (Stufe 3, `implemented`) und `WR-075` (Stufe 5, `planned`) bleiben
-/// UNANGETASTET. Die geschlossenen Gate-Berichte der Stufen 1 bis 3 werden
+/// `WR-042D` (Stufe 3, `implemented`), `WR-052` (Stufe 2, `integrated`) und
+/// `WR-064` (Stufe 3, `implemented`) bleiben UNANGETASTET. `WR-075` (Stufe 5)
+/// ist mit DRK-318 von `planned` nach `integrated` gewandert, getragen vom
+/// Systemziel `e2e_reader_key_escrow`. Die geschlossenen Gate-Berichte der Stufen 1 bis 3 werden
 /// dafuer nicht angefasst; `docs/traceability/stage-2-gate.md:348` traegt
 /// diesen Mechanismus als Praezedenz.
 const WEB_READER_MUST_ROWS: [(&str, &str, &str, &str); 11] = [
@@ -551,7 +552,7 @@ const WEB_READER_MUST_ROWS: [(&str, &str, &str, &str); 11] = [
     ("WR-054", "5.4", "4", "integrated"),
     ("WR-063", "6.3", "4", "implemented"),
     ("WR-064", "6.4", "3", "implemented"),
-    ("WR-075", "7.5", "5", "planned"),
+    ("WR-075", "7.5", "5", "integrated"),
     ("WR-082", "8.2", "4", "integrated"),
 ];
 
@@ -3256,18 +3257,18 @@ fn stage_four_gate_report_records_the_measured_full_gate_run() {
 // ---------------------------------------------------------------------------
 // Stufe 5 — Administration, Recovery und Vernichtung (Task 14).
 //
-// Diese Stufe ist die erste, die mit einer OFFENEN Ledgerzeile schliesst. Die
-// Tests darunter halten deshalb zwei Dinge auseinander, die im Ledger
-// identisch aussehen: eine Zeile, die die Stufe bewusst als dokumentierte
-// Grenze fuehrt, und eine Zeile, die schlicht vergessen wurde. Sie duerfen
-// nie dasselbe Ergebnis erzeugen.
+// Diese Stufe schloss als erste mit einer OFFENEN Ledgerzeile: WR-075 stand
+// bis DRK-318 als dokumentierte Grenze auf `planned`. Seit Scheibe (f) ist die
+// Zeile `integrated`, und die Tests darunter halten fest, dass sie keine
+// Ausnahme mehr ist. Den Mechanismus der Grenze bezeugt `mod tests` in
+// `tools/xtask/src/main.rs` synthetisch.
 
 /// Die zwei Skripte, die Stufe 5 verlangt.
 const STAGE_FIVE_SCRIPTS: [&str; 2] = ["stage-gate:5", "test:recovery"];
 
 /// Die drei Vektorfamilien, die Stufe 5 mit dem Reader-Key-Escrow v1.1
-/// (DRK-318, Profil §9) einfriert. Das Berichtsliteral in
-/// `docs/traceability/stage-5-gate.md` zieht erst Scheibe (f) nach.
+/// (DRK-318, Profil §9) einfriert. Seit Scheibe (f) verlangt der Gate ihre
+/// Pfade auch als Berichtsliteral in `docs/traceability/stage-5-gate.md`.
 const STAGE_FIVE_FAMILIES: [&str; 3] = [
     "reader-key-escrow",
     "reader-key-escrow-approval",
@@ -3289,8 +3290,17 @@ const STAGE_FIVE_WORKSTREAMS: [&str; 3] =
 const STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION: [&str; 5] =
     ["FR-120", "FR-121", "FR-123", "FR-124", "WR-075"];
 
-/// Die eine Zeile, die diese Stufe als dokumentierte Grenze fuehrt.
-const STAGE_FIVE_DOCUMENTED_BOUNDARY: &str = "WR-075";
+/// Die Zeile, die diese Stufe bis DRK-318 als dokumentierte Grenze fuehrte.
+/// Seit Scheibe (f) ist sie `integrated` und ohne Ausnahme; ein Ledger, das sie
+/// auf `planned` fuehrt, ist ein Mangel wie jede andere offene Zeile.
+const STAGE_FIVE_FORMER_BOUNDARY: &str = "WR-075";
+
+/// Die Pfade der drei Escrow-Familien, die der Bericht woertlich nennt.
+const STAGE_FIVE_FAMILY_PATHS: [&str; 3] = [
+    "vectors/reader-key-escrow/v1/",
+    "vectors/reader-key-escrow-approval/v1/",
+    "vectors/reader-key-escrow-recovery/v1/",
+];
 
 /// Schreibt ein Stufe-5-Ledger, in dem JEDE Stufe-5-Zeile auf `integrated`
 /// steht — ausser den namentlich genannten, die auf `planned` bleiben.
@@ -3337,9 +3347,9 @@ fn write_stage_five_ledger(root: &Path, still_planned: &[&str]) {
 
 /// Baut eine gruene Stufe-5-Grundlage.
 ///
-/// Wie [`stage_four_fixture`], mit zwei Unterschieden: es gibt kein
-/// Szenarienmanifest, und das Ledger haelt GENAU die dokumentierte Grenze auf
-/// `planned`.
+/// Wie [`stage_four_fixture`], mit einem Unterschied: es gibt kein
+/// Szenarienmanifest. Seit DRK-318 haelt das Ledger KEINE Stufe-5-Zeile mehr
+/// auf `planned`.
 fn stage_five_fixture(label: &str) -> PathBuf {
     let root = fixture_root(label);
     for family in STAGE_FIVE_FAMILIES {
@@ -3347,7 +3357,7 @@ fn stage_five_fixture(label: &str) -> PathBuf {
     }
     copy_from_the_workspace(&root, DESIGN_DOCUMENT_RELATIVE);
     copy_from_the_workspace(&root, STAGE_FIVE_GATE_REPORT_PATH);
-    write_stage_five_ledger(&root, &[STAGE_FIVE_DOCUMENTED_BOUNDARY]);
+    write_stage_five_ledger(&root, &[]);
     write_package_manifest(&root, &STAGE_FIVE_SCRIPTS);
     root
 }
@@ -3366,7 +3376,7 @@ fn mutate_stage_five_report(root: &Path, from: &str, to: &str) -> usize {
 }
 
 /// Haelt fest, dass `stage-gate 5` den eingecheckten Baum ANNIMMT und dabei
-/// WR-075 als einzige offene Stufe-5-Zeile fuehrt.
+/// KEINE offene Stufe-5-Zeile mehr fuehrt.
 ///
 /// Bis DRK-282 war das der RED dieser Stufe
 /// (`stage_five_gate_refuses_the_checked_in_tree_until_the_ledger_moves`):
@@ -3375,14 +3385,15 @@ fn mutate_stage_five_report(root: &Path, from: &str, to: &str) -> usize {
 /// `59b08ac`, `8dae049`, `96e0c3c`, `2d52b5e`) sind die achtzehn Zeilen auf
 /// `implemented` oder `integrated` gewandert, und der Test ist BEWUSST
 /// invertiert — mit der Begruendung je Zeile im Abschnitt `## Ledgerpflege`
-/// von `docs/traceability/stage-5-gate.md`.
+/// von `docs/traceability/stage-5-gate.md`. Mit DRK-318 (Scheibe f) ist auch
+/// WR-075 gewandert; die Liste der dokumentierten Grenzen ist leer.
 ///
 /// Phase-1-Form der Stufe 4: der ECHTE Arbeitsbaum, Exit 0, JSON-Bericht. Die
 /// Mutationsproben darunter laufen weiter gegen Fixtures und bleiben rot.
 /// `evidenced_acceptance_criteria` ist eine Menge ueber das GANZE Ledger und
 /// wird deshalb nur auf ENTHALTEN der vierzehn geprueft, nie auf Gleichheit.
 #[test]
-fn stage_five_gate_passes_the_checked_in_tree_with_wr_075_as_the_only_open_row() {
+fn stage_five_gate_passes_the_checked_in_tree_with_no_open_row() {
     let output = run_stage_gate_in_the_workspace("5");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
@@ -3420,16 +3431,15 @@ fn stage_five_gate_passes_the_checked_in_tree_with_wr_075_as_the_only_open_row()
         report["stage_five_rows_without_primary_criterion"],
         serde_json::json!(STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION)
     );
-    // Die Grenze steht als Grenze da und NICHT als unbelegte Zeile.
+    // Keine Grenze mehr, und keine offene Zeile.
     assert_eq!(
         report["stage_five_documented_boundaries"],
-        serde_json::json!([STAGE_FIVE_DOCUMENTED_BOUNDARY])
+        serde_json::json!([] as [&str; 0])
     );
     assert_eq!(
         report["stage_five_rows_still_planned"],
         serde_json::json!([] as [&str; 0]),
-        "no stage 5 ledger row other than the documented boundary may still be planned; \
-         stdout: {stdout}"
+        "no stage 5 ledger row may still be planned; stdout: {stdout}"
     );
     // Seit DRK-318 friert Stufe 5 die drei Escrow-Familien ein.
     assert_eq!(
@@ -3438,17 +3448,16 @@ fn stage_five_gate_passes_the_checked_in_tree_with_wr_075_as_the_only_open_row()
     );
 }
 
-/// Haelt fest, dass der Gate ein Ledger ANNIMMT, dessen einzige offene
-/// Stufe-5-Zeile die dokumentierte Grenze ist.
+/// Haelt fest, dass der Gate ein Ledger ANNIMMT, das keine Stufe-5-Zeile mehr
+/// offen fuehrt.
 #[test]
-fn stage_five_gate_accepts_a_ledger_whose_only_open_row_is_the_documented_boundary() {
+fn stage_five_gate_accepts_a_ledger_without_open_rows() {
     let root = stage_five_fixture("stage-five-green");
     let output = run_stage_gate(&root, "5");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         output.status.success(),
-        "the gate must accept a ledger whose only open stage 5 row is the documented \
-         boundary; stderr: {stderr}"
+        "the gate must accept a ledger without open stage 5 rows; stderr: {stderr}"
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     let report: serde_json::Value = serde_json::from_str(&stdout)
@@ -3467,15 +3476,14 @@ fn stage_five_gate_accepts_a_ledger_whose_only_open_row_is_the_documented_bounda
         report["stage_five_rows_without_primary_criterion"],
         serde_json::json!(STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION)
     );
-    // Die zwei Schluessel sind GETRENNT und tragen Verschiedenes.
+    // Beide Schluessel stehen da — und sind leer.
     assert_eq!(
         report["stage_five_documented_boundaries"],
-        serde_json::json!([STAGE_FIVE_DOCUMENTED_BOUNDARY])
+        serde_json::json!([] as [&str; 0])
     );
     assert_eq!(
         report["stage_five_rows_still_planned"],
-        serde_json::json!([] as [&str; 0]),
-        "a documented boundary must never be counted as an unevidenced row"
+        serde_json::json!([] as [&str; 0])
     );
     // Seit DRK-318 friert Stufe 5 die drei Escrow-Familien ein.
     assert_eq!(
@@ -3507,60 +3515,53 @@ fn stage_five_gate_names_a_missing_reader_key_escrow_family() {
     }
 }
 
-/// Haelt fest, dass die Ausnahme fuer die dokumentierte Grenze an der
-/// Belegpflicht haengt und nicht an der Liste allein.
+/// Haelt fest, dass WR-075 seit DRK-318 KEINE Ausnahme mehr ist: ein Ledger,
+/// das die Zeile auf `planned` fuehrt, ist unentschuldigt — auch wenn der
+/// Bericht sie nennt.
 ///
-/// Das ist die tragende Zusicherung des ganzen Mechanismus. Eine Liste
-/// erlaubter Ausnahmen OHNE Belegpflicht waere eine Freigabe auf Vorrat: sie
-/// liesse WR-075 auch dann durch, wenn der Bericht ueber die Grenze schweigt,
-/// und ein Leser koennte eine bewusste Entscheidung nicht mehr von einer
-/// vergessenen Zeile unterscheiden.
+/// Der Mechanismus der dokumentierten Grenze bleibt im Gate und ist dort
+/// synthetisch bezeugt (`tools/xtask/src/main.rs`, `mod tests`); die Liste
+/// ist leer.
 #[test]
-fn the_documented_boundary_needs_the_report_to_name_it() {
-    let root = stage_five_fixture("stage-five-silent-boundary");
-    // Die Grenze aus dem Bericht schneiden — und NUR sie.
-    let hits = mutate_stage_five_report(&root, STAGE_FIVE_DOCUMENTED_BOUNDARY, "WR-000");
-    assert!(
-        hits > 0,
-        "the mutation must really remove the boundary from the report"
-    );
+fn a_planned_wr_075_is_an_unexcused_row() {
+    let root = stage_five_fixture("stage-five-planned-wr-075");
+    write_stage_five_ledger(&root, &[STAGE_FIVE_FORMER_BOUNDARY]);
     let output = run_stage_gate(&root, "5");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(
         output.status.code(),
         Some(2),
-        "a boundary the report does not name must not pass; stderr: {stderr}"
+        "a planned WR-075 must not pass; stderr: {stderr}"
     );
     assert!(
-        stderr.contains("documented boundary")
-            && stderr.contains(STAGE_FIVE_DOCUMENTED_BOUNDARY)
-            && stderr.contains(STAGE_FIVE_GATE_REPORT_PATH),
-        "the gate must say which boundary is unnamed and where it belongs; stderr: {stderr}"
+        stderr.contains("still on planned: WR-075"),
+        "the gate must name WR-075 as an unexcused open row; stderr: {stderr}"
     );
 }
 
-/// Haelt fest, dass eine Grenze, die KEINE mehr ist, ebenfalls auffaellt.
-///
-/// Der Gegenfall zum Test darueber, und aus demselben Grund tragend: ein
-/// Bericht, der eine Grenze behauptet, die es nicht mehr gibt, fuehrt eine
-/// erbrachte Leistung als offen. Die Stufe wuerde sich aermer machen, als sie
-/// ist, und der naechste Leser suchte nach einem Blocker, der weg ist.
+/// Haelt fest, dass der Bericht die Pfade der drei Escrow-Familien nennt —
+/// jeden einzeln, weil eine Pruefung nur des ersten die beiden anderen still
+/// verloere.
 #[test]
-fn a_documented_boundary_that_is_no_longer_planned_is_a_defect() {
-    let root = stage_five_fixture("stage-five-stale-boundary");
-    // Diesmal bewegt das Fixture ALLE Stufe-5-Zeilen, die Grenze eingeschlossen.
-    write_stage_five_ledger(&root, &[]);
-    let output = run_stage_gate(&root, "5");
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "a boundary that is no longer planned must not pass silently; stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("is no longer planned") && stderr.contains(STAGE_FIVE_DOCUMENTED_BOUNDARY),
-        "the gate must name the boundary that has become stale; stderr: {stderr}"
-    );
+fn stage_five_gate_requires_each_escrow_family_path_in_the_report() {
+    for path in STAGE_FIVE_FAMILY_PATHS {
+        let root = stage_five_fixture(&format!(
+            "stage-five-family-path-{}",
+            path.replace('/', "-")
+        ));
+        let hits = mutate_stage_five_report(&root, path, "vectors/elsewhere/");
+        assert!(
+            hits > 0,
+            "the mutation must really remove {path} from the report"
+        );
+        let output = run_stage_gate(&root, "5");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(2), "{path}; stderr: {stderr}");
+        assert!(
+            stderr.contains("does not carry the required literal") && stderr.contains(path),
+            "the gate must name the missing family path {path}; stderr: {stderr}"
+        );
+    }
 }
 
 /// Haelt fest, dass der Gate JEDE der fuenf Zeilen ohne primaeres Kriterium
@@ -3573,10 +3574,6 @@ fn a_documented_boundary_that_is_no_longer_planned_is_a_defect() {
 #[test]
 fn stage_five_gate_requires_every_row_without_a_primary_criterion_in_the_report() {
     for identifier in STAGE_FIVE_ROWS_WITHOUT_PRIMARY_CRITERION {
-        // Die Grenze traegt ihre eigene Pruefung und ist dort abgedeckt.
-        if identifier == STAGE_FIVE_DOCUMENTED_BOUNDARY {
-            continue;
-        }
         let root = stage_five_fixture(&format!("stage-five-row-{identifier}"));
         let hits = mutate_stage_five_report(&root, identifier, "FR-000");
         assert!(
