@@ -31,15 +31,15 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use ea_crypto::{CanonicalPublicCoseKey, VerificationContext};
+use ea_crypto::{CanonicalPublicCoseKey, HpkeRecipientPublicKey, VerificationContext};
 use ea_format::{
     CertificateKindV1, DecodedTrustPayloadV1, ParsedArchiveObject, ReaderKeyEscrowApprovalCoreV1,
     ReaderKeyEscrowCoreV1, ReaderKeyEscrowHpkeContextV1, ReaderKeyEscrowPayloadV1,
     RegistryChangeV1, TrustObjectV1, TrustSubtypeV1,
 };
 use ea_types::{
-    CertificateHash, ChainSequence, Hash32, ObjectHash, OrganizationId, RegistryVersion, SubjectId,
-    UnixMillis,
+    CertificateHash, ChainSequence, Hash32, KeyThumbprint, ObjectHash, OrganizationId,
+    RegistryVersion, SubjectId, UnixMillis,
 };
 
 use crate::{
@@ -749,6 +749,223 @@ pub fn verify_signed_reader_key_escrow(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Das Siegelziel der Zeremonie A im Browser (Scheibe e)
+// ---------------------------------------------------------------------------
+
+/// Das Ziel eines Escrows, bevor ein Chiffrat entsteht: das EINE im Kopf
+/// aktive Reader-Zertifikat mit dem KEM-Abdruck des Tresors, sein
+/// Aktivierungszustand, der EINE zum Enrollment aktive Recovery-Empfänger und
+/// die Wurzel des Kopfes.
+///
+/// Der Browser kennt weder Zertifikatshash noch Aktivierungszustand; er hat
+/// nur seinen Tresor. Dieses Ziel leitet beides aus einem GEPRÜFTEN Katalog ab
+/// und bindet es über dieselbe Enrollment-Regel, die das veröffentlichte
+/// Escrow später besteht. Die Subject-ID ist Eingabe: das Reader-Zertifikat
+/// trägt keine, gebunden wird sie erst durch die Publikationsfreigabe.
+///
+/// Nur in diesem Modul konstruierbar:
+///
+/// ```compile_fail
+/// let _ = ea_trust::ReaderKeyEscrowSealingTarget { inner: panic!() };
+/// ```
+pub struct ReaderKeyEscrowSealingTarget {
+    inner: SealingTargetInner,
+}
+
+struct SealingTargetInner {
+    organization_id: OrganizationId,
+    reader_certificate_object_hash: CertificateHash,
+    reader_subject_id: SubjectId,
+    reader_kem_key: CanonicalPublicCoseKey,
+    enrollment: (RegistryVersion, Hash32, ChainSequence),
+    recovery_certificate_object_hash: CertificateHash,
+    recovery_kem_public_key: HpkeRecipientPublicKey,
+    recovery_kem_key_thumbprint: KeyThumbprint,
+    root_key_thumbprint: KeyThumbprint,
+}
+
+impl ReaderKeyEscrowSealingTarget {
+    #[must_use]
+    pub const fn organization_id(&self) -> OrganizationId {
+        self.inner.organization_id
+    }
+
+    #[must_use]
+    pub const fn reader_certificate_object_hash(&self) -> CertificateHash {
+        self.inner.reader_certificate_object_hash
+    }
+
+    /// Die Subject-ID, für die das Ziel geprüft wurde (Eingabe, nicht aus dem
+    /// Zertifikat).
+    #[must_use]
+    pub const fn reader_subject_id(&self) -> SubjectId {
+        self.inner.reader_subject_id
+    }
+
+    /// Der X25519-KEM des Reader-Zertifikats — der Wert, dem der aus dem
+    /// Tresor abgeleitete öffentliche Schlüssel gleichen MUSS, bevor
+    /// versiegelt wird (Profil §5 Schritt 2).
+    #[must_use]
+    pub const fn reader_kem_public_key(&self) -> &CanonicalPublicCoseKey {
+        &self.inner.reader_kem_key
+    }
+
+    /// Der Pin des aktivierenden Ereignisses: Registry-Version, Kopfhash und
+    /// wirksame Sequenz.
+    #[must_use]
+    pub const fn enrollment(&self) -> (RegistryVersion, Hash32, ChainSequence) {
+        self.inner.enrollment
+    }
+
+    #[must_use]
+    pub const fn recovery_certificate_object_hash(&self) -> CertificateHash {
+        self.inner.recovery_certificate_object_hash
+    }
+
+    /// Der öffentliche HPKE-Schlüssel des Recovery-Empfängers — Empfänger
+    /// des Escrows.
+    #[must_use]
+    pub const fn recovery_kem_public_key(&self) -> HpkeRecipientPublicKey {
+        self.inner.recovery_kem_public_key
+    }
+
+    #[must_use]
+    pub const fn recovery_kem_key_thumbprint(&self) -> KeyThumbprint {
+        self.inner.recovery_kem_key_thumbprint
+    }
+
+    #[must_use]
+    pub const fn root_key_thumbprint(&self) -> KeyThumbprint {
+        self.inner.root_key_thumbprint
+    }
+}
+
+/// Leitet das Siegelziel eines Browser-Escrows aus einem geprüften Katalog ab
+/// (Profil §5, Ruling Q1 der Scheibe e).
+///
+/// Reihenfolge: erst der ganze Escrow-Bestand ([`verify_reader_key_escrows`],
+/// fail-closed); dann im Kopfzustand GENAU EIN nicht widerrufenes
+/// Reader-Zertifikat mit X25519-KEM dieses Abdrucks — dieselbe Lesart von
+/// „widerrufen“ wie der Stand eines Escrows; dann GENAU EIN aktivierendes
+/// `registryEvent` dazu im Katalog. Dessen Tripel ist nur ein Vorschlag: die
+/// Enrollment-Regel des Escrows spielt den Pin nach und prüft es wie jedes
+/// Core-Tripel, samt dem EINEN zum Enrollment aktiven Recovery-Empfänger.
+/// Zuletzt die Eindeutigkeit: ein gültiges Escrow zum Zertifikat oder zur
+/// Subject-ID schließt ein zweites aus.
+///
+/// # Errors
+///
+/// Jeder Befund von [`verify_reader_key_escrows`];
+/// [`TrustError::EscrowEnrollmentMismatch`] ohne eindeutiges aktives
+/// Reader-Zertifikat, ohne eindeutige Aktivierung, ohne eindeutigen
+/// Recovery-Empfänger oder für jeden Befund der Enrollment-Regel;
+/// [`TrustError::EscrowConflict`], wenn Zertifikat oder Subject-ID schon ein
+/// gültiges Escrow tragen.
+pub fn verify_reader_key_escrow_sealing_target(
+    trust: &VerifiedTrust,
+    head: ReaderKeyEscrowHead<'_>,
+    reader_kem_key_thumbprint: KeyThumbprint,
+    reader_subject_id: SubjectId,
+) -> Result<ReaderKeyEscrowSealingTarget, TrustError> {
+    let existing = verify_reader_key_escrows(trust, head)?;
+    let line_tip;
+    let head_state = match head {
+        ReaderKeyEscrowHead::Selected(selected) => selected.candidate_state(),
+        ReaderKeyEscrowHead::CatalogLineTip => {
+            line_tip = replay_to_line_tip(trust)
+                .map_err(|error| pin_error(error, TrustError::ActionMismatch))?;
+            &line_tip
+        }
+    };
+    let mut readers = head_state
+        .certificates
+        .iter()
+        .filter(|(_, certificate)| {
+            certificate.fields.certificate_kind == CertificateKindV1::Reader
+                && certificate.fields.revoked_from_sequence.is_none()
+                && matches!(
+                    parse_key(certificate.fields.kem_public_cose_key.as_deref()),
+                    Some(key @ CanonicalPublicCoseKey::X25519(_))
+                        if key.thumbprint() == reader_kem_key_thumbprint
+                )
+        })
+        .map(|(hash, _)| *hash);
+    let (Some(reader_certificate), None) = (readers.next(), readers.next()) else {
+        return Err(TrustError::EscrowEnrollmentMismatch);
+    };
+    let enrollment = activating_event(trust, reader_certificate)?;
+    let mut pins = PinStates::new(trust);
+    let binding = enrollment_binding(
+        &mut pins,
+        reader_certificate,
+        enrollment,
+        RecoveryBinding::Sole,
+    )?;
+    if existing
+        .valid_for_reader_certificate(reader_certificate)
+        .is_some()
+        || existing.valid_for_subject(reader_subject_id).is_some()
+    {
+        return Err(TrustError::EscrowConflict);
+    }
+    let CanonicalPublicCoseKey::X25519(recovery_public) = binding.recovery_kem_key else {
+        return Err(TrustError::EscrowEnrollmentMismatch);
+    };
+    Ok(ReaderKeyEscrowSealingTarget {
+        inner: SealingTargetInner {
+            organization_id: trust.organization_id(),
+            reader_certificate_object_hash: reader_certificate,
+            reader_subject_id,
+            reader_kem_key: binding.reader_kem_key,
+            enrollment,
+            recovery_certificate_object_hash: binding.recovery_certificate,
+            recovery_kem_public_key: HpkeRecipientPublicKey::from_bytes(recovery_public)
+                .map_err(|_| TrustError::EscrowEnrollmentMismatch)?,
+            recovery_kem_key_thumbprint: binding.recovery_kem_key.thumbprint(),
+            root_key_thumbprint: head_state.root.fields.root_key_thumbprint,
+        },
+    })
+}
+
+/// Das EINE `registryEvent` des Katalogs, das `reader_certificate` aktiviert:
+/// Version, Objekthash als Kopfhash und wirksame Sequenz.
+fn activating_event(
+    trust: &VerifiedTrust,
+    reader_certificate: CertificateHash,
+) -> Result<(RegistryVersion, Hash32, ChainSequence), TrustError> {
+    let catalog = &trust.inner.catalog;
+    let mut found = None;
+    for object_hash in catalog.hashes_for_subtype(TrustSubtypeV1::RegistryEvent) {
+        let record = catalog.get(object_hash).ok_or(TrustError::Source)?;
+        let DecodedTrustPayloadV1::RegistryEvent(event) = record
+            .value()
+            .decoded_payload()
+            .map_err(|_| TrustError::Source)?
+        else {
+            return Err(TrustError::Source);
+        };
+        let fields = event.fields();
+        if matches!(
+            fields.change,
+            RegistryChangeV1::Certificate { object_hash }
+                if CertificateHash::from(object_hash) == reader_certificate
+        ) {
+            if found.is_some() {
+                return Err(TrustError::EscrowEnrollmentMismatch);
+            }
+            let head_hash = Hash32::try_from(object_hash.as_bytes().as_slice())
+                .map_err(|_| TrustError::Source)?;
+            found = Some((
+                fields.registry_version,
+                head_hash,
+                fields.effective_from_sequence,
+            ));
+        }
+    }
+    found.ok_or(TrustError::EscrowEnrollmentMismatch)
+}
+
 /// Die nachgespielten Pin-Zustände eines Prüflaufs, je `(version, hash)`
 /// einmal.
 pub(crate) struct PinStates<'t> {
@@ -874,29 +1091,94 @@ fn escrow_binding_rule(
         return Err(TrustError::ActionMismatch);
     }
 
-    // E3: der Registry-Zustand, in dem das Reader-Zertifikat aktiv wurde.
-    let enrollment_state = pins
-        .state(
+    // E3/E4: Enrollment und Recovery-Empfänger — die EINE Regel, die auch das
+    // Siegelziel des Browsers bindet.
+    let binding = enrollment_binding(
+        pins,
+        core.reader_certificate_object_hash,
+        (
             core.enrollment_registry_version,
             core.enrollment_registry_head_hash,
-        )
+            core.enrollment_sequence,
+        ),
+        RecoveryBinding::Named {
+            certificate: core.recovery_certificate_object_hash,
+            kem_key_thumbprint: core.recovery_kem_key_thumbprint,
+        },
+    )?;
+    // Die Freigabe liegt nicht vor dem Enrollment, und zur Freigabe ist der
+    // Reader weiter aktiv: eine Freigabe für ein bereits widerrufenes
+    // Zertifikat bindet nichts.
+    if core.enrollment_registry_version > approval.registry_version
+        || approval_state
+            .active_certificate(
+                core.reader_certificate_object_hash,
+                ChainSequence::new(approval.authorization_sequence),
+            )
+            .is_none()
+    {
+        return Err(TrustError::EscrowEnrollmentMismatch);
+    }
+
+    // E5: die Wurzel des Freigabe-Pins. Sie überlebt eine spätere Rotation.
+    if core.root_key_thumbprint != approval_state.root.fields.root_key_thumbprint {
+        return Err(TrustError::ActionMismatch);
+    }
+    Ok(binding.reader_kem_key)
+}
+
+/// Welcher Recovery-Empfänger an ein Enrollment gebunden wird.
+#[derive(Clone, Copy)]
+enum RecoveryBinding {
+    /// Der im Core genannte, mit seinem Abdruck — das veröffentlichte Escrow.
+    Named {
+        certificate: CertificateHash,
+        kem_key_thumbprint: KeyThumbprint,
+    },
+    /// Der EINE zum Enrollment aktive Empfänger — das Siegelziel.
+    Sole,
+}
+
+/// Was [`enrollment_binding`] beweist.
+struct EnrollmentBinding {
+    reader_kem_key: CanonicalPublicCoseKey,
+    recovery_certificate: CertificateHash,
+    recovery_kem_key: CanonicalPublicCoseKey,
+}
+
+/// E3/E4 des Profils (§3.1): das Reader-Zertifikat wurde GENAU im Zustand
+/// `(version, head_hash)` mit wirksamer Sequenz `sequence` aktiviert, ist ein
+/// Reader mit Ed25519-Signatur- und X25519-KEM-Schlüssel, und zu diesem
+/// Enrollment ist ein Recovery-Empfänger mit X25519-KEM aktiv.
+///
+/// Die EINE Stelle dieser Bindung: [`escrow_binding_rule`] ruft sie für ein
+/// veröffentlichtes Escrow, [`verify_reader_key_escrow_sealing_target`] für
+/// das Ziel, bevor der Browser versiegelt. Jeder Befund ist
+/// [`TrustError::EscrowEnrollmentMismatch`]; ein nicht nachspielbarer Pin
+/// ebenso, außer der Trust-Kern selbst hat abgewiesen.
+fn enrollment_binding(
+    pins: &mut PinStates<'_>,
+    reader_certificate: CertificateHash,
+    (version, head_hash, sequence): (RegistryVersion, Hash32, ChainSequence),
+    recovery: RecoveryBinding,
+) -> Result<EnrollmentBinding, TrustError> {
+    // E3: der Registry-Zustand, in dem das Reader-Zertifikat aktiv wurde.
+    let enrollment_state = pins
+        .state(version, head_hash)
         .map_err(|error| pin_error(error, TrustError::EscrowEnrollmentMismatch))?;
     let activated_reader = enrollment_state.head_event.as_ref().is_some_and(|event| {
         matches!(
             event.change,
             RegistryChangeV1::Certificate { object_hash }
-                if CertificateHash::from(object_hash) == core.reader_certificate_object_hash
+                if CertificateHash::from(object_hash) == reader_certificate
         )
     });
-    if !activated_reader
-        || enrollment_state.effective_from_sequence != core.enrollment_sequence
-        || core.enrollment_registry_version > approval.registry_version
-    {
+    if !activated_reader || enrollment_state.effective_from_sequence != sequence {
         return Err(TrustError::EscrowEnrollmentMismatch);
     }
     let reader = enrollment_state
         .certificates
-        .get(&core.reader_certificate_object_hash)
+        .get(&reader_certificate)
         .ok_or(TrustError::EscrowEnrollmentMismatch)?;
     if reader.fields.certificate_kind != CertificateKindV1::Reader
         || !matches!(
@@ -911,38 +1193,47 @@ fn escrow_binding_rule(
     else {
         return Err(TrustError::EscrowEnrollmentMismatch);
     };
-    // Zur Freigabe ist der Reader weiter aktiv: eine Freigabe für ein bereits
-    // widerrufenes Zertifikat bindet nichts.
-    if approval_state
-        .active_certificate(
-            core.reader_certificate_object_hash,
-            ChainSequence::new(approval.authorization_sequence),
-        )
-        .is_none()
-    {
-        return Err(TrustError::EscrowEnrollmentMismatch);
-    }
 
     // E4: der Recovery-Empfänger, aktiv zum Enrollment.
-    let recovery = enrollment_state
-        .active_certificate(
-            core.recovery_certificate_object_hash,
-            core.enrollment_sequence,
-        )
+    let recovery_certificate = match recovery {
+        RecoveryBinding::Named { certificate, .. } => certificate,
+        RecoveryBinding::Sole => {
+            let mut active = enrollment_state
+                .active_certificates(sequence)
+                .filter(|(_, certificate)| {
+                    certificate.fields.certificate_kind == CertificateKindV1::RecoveryRecipient
+                })
+                .map(|(hash, _)| hash);
+            match (active.next(), active.next()) {
+                (Some(only), None) => only,
+                _ => return Err(TrustError::EscrowEnrollmentMismatch),
+            }
+        }
+    };
+    let recovery_state = enrollment_state
+        .active_certificate(recovery_certificate, sequence)
         .ok_or(TrustError::EscrowEnrollmentMismatch)?;
-    let recovery_kem = parse_key(recovery.fields.kem_public_cose_key.as_deref());
-    if recovery.fields.certificate_kind != CertificateKindV1::RecoveryRecipient
-        || !matches!(recovery_kem, Some(CanonicalPublicCoseKey::X25519(_)))
-        || recovery_kem.map(|key| key.thumbprint()) != Some(core.recovery_kem_key_thumbprint)
+    let Some(recovery_kem_key @ CanonicalPublicCoseKey::X25519(_)) =
+        parse_key(recovery_state.fields.kem_public_cose_key.as_deref())
+    else {
+        return Err(TrustError::EscrowEnrollmentMismatch);
+    };
+    let expected_thumbprint = match recovery {
+        RecoveryBinding::Named {
+            kem_key_thumbprint, ..
+        } => kem_key_thumbprint,
+        RecoveryBinding::Sole => recovery_kem_key.thumbprint(),
+    };
+    if recovery_state.fields.certificate_kind != CertificateKindV1::RecoveryRecipient
+        || recovery_kem_key.thumbprint() != expected_thumbprint
     {
         return Err(TrustError::EscrowEnrollmentMismatch);
     }
-
-    // E5: die Wurzel des Freigabe-Pins. Sie überlebt eine spätere Rotation.
-    if core.root_key_thumbprint != approval_state.root.fields.root_key_thumbprint {
-        return Err(TrustError::ActionMismatch);
-    }
-    Ok(reader_kem_key)
+    Ok(EnrollmentBinding {
+        reader_kem_key,
+        recovery_certificate,
+        recovery_kem_key,
+    })
 }
 
 fn parse_key(exact: Option<&[u8]>) -> Option<CanonicalPublicCoseKey> {
