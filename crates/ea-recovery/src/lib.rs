@@ -31,7 +31,12 @@ mod grant;
 mod historical_grant;
 mod key_inventory;
 mod key_source;
+mod reader_key_escrow;
 pub use backup_key::RecoveryBackupKdf;
+pub use reader_key_escrow::{
+    ConsumedEscrowOpening, ConsumptionReceipt, EscrowOpeningLedger, ReaderKeyEscrowError,
+    ReaderKeyEscrowKem, ReaderKeyEscrowOpeningService, reader_key_escrow_envelope,
+};
 mod completion;
 mod failure;
 mod source_verification;

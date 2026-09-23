@@ -68,3 +68,7 @@ ea-local-store.workspace = true
 ea-time.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
+# Die Fixture-Bauer der Reader-Key-Escrow-Familien für die Zeugen der zweiten
+# getypten Operation (`tests/reader_key_escrow.rs`, DRK-458). Nur Dev-Kante:
+# `ea-testkit` hängt nicht an `ea-recovery`, der Lib-Graph bleibt unberührt.
+ea-testkit.workspace = true
