@@ -1570,3 +1570,79 @@ pub async fn seed_indexed_trust_object(
     .expect("recording a seeded trust object must succeed");
     hash
 }
+
+/// Die Kulisse der Escrow-Zeugen: der Abschluss MIT zweitem Reader (nur er
+/// erfüllt die Enrollment-Regel) und mit den beiden Key Approvern.
+pub async fn stand_up_escrow_server(database: &TestDatabase) -> ReadyServer {
+    stand_up_read_server_with_closure(
+        database,
+        READ_SERVER_NOW_MILLIS,
+        trust_closure::build_with(true, true),
+        None,
+    )
+    .await
+}
+
+/// Legt eine v1.1-fähige `webBundleRelease` in den Katalog und nimmt dann
+/// Freigabe, Escrow und Öffnung ÜBER DEN ENDPUNKT an — in dieser Reihenfolge,
+/// jedes einzeln. Zurück kommen die exakten Bytes mit ihrem Subtyp.
+///
+/// # Panics
+///
+/// Wenn der Server eines der drei Objekte nicht mit `201` annimmt.
+pub async fn publish_escrow_family(
+    database: &TestDatabase,
+    ready: &ReadyServer,
+) -> Vec<(&'static str, Vec<u8>)> {
+    use ea_sync_protocol::{EndpointV1, TrustEventUploadV1};
+
+    let closure = &ready.closure;
+    let release =
+        trust_closure::web_bundle_release(closure, ea_trust::MIN_ESCROW_BUNDLE_VERSION, 1, 0xb7);
+    seed_indexed_trust_object(database.pool(), closure.organization_id, &release).await;
+    let core = trust_closure::escrow_core(
+        closure,
+        trust_closure::ESCROW_READER_SUBJECT,
+        READ_SERVER_NOW_MILLIS,
+    );
+    let approval = trust_closure::escrow_approval_core(
+        closure,
+        0xf1,
+        (READ_SERVER_NOW_MILLIS - 100, READ_SERVER_NOW_MILLIS + 200),
+    );
+    let (approval_bytes, escrow_bytes) = trust_closure::escrow_objects(&core, &approval);
+    let recovery_bytes = trust_closure::escrow_recovery_authorization(
+        closure,
+        &escrow_bytes,
+        &core,
+        0xf2,
+        (READ_SERVER_NOW_MILLIS - 100, READ_SERVER_NOW_MILLIS + 800),
+        &[0, 1],
+    );
+    let family = vec![
+        ("readerKeyEscrowApproval", approval_bytes),
+        ("readerKeyEscrow", escrow_bytes),
+        ("readerKeyEscrowRecoveryAuthorization", recovery_bytes),
+    ];
+    for (index, (name, bytes)) in family.iter().enumerate() {
+        let upload = TrustEventUploadV1::new(bytes.clone()).expect("the upload frame must build");
+        let mut request_id = [0xf7_u8; 16];
+        request_id[15] = u8::try_from(index).expect("three objects");
+        let response = call(&ApiCall {
+            ready,
+            signer_seed: trust_closure::ADMIN_SEED,
+            endpoint: EndpointV1::TrustEvents,
+            target: EndpointV1::TrustEvents.path_template(),
+            body: Some(upload.exact_bytes()),
+            request_id,
+        })
+        .await;
+        assert_eq!(
+            response.status,
+            201,
+            "{name} must be admitted; the server answered {:?}",
+            error_code(&response.body)
+        );
+    }
+    family
+}
