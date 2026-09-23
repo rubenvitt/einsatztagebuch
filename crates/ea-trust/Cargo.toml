@@ -24,3 +24,7 @@ minicbor.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
+# Die Fixture-Bauer der Reader-Key-Escrow-Familien (`reader_key_escrow_fixture`):
+# EINE Kodierung für Trust-Kern, native Zeremonie und Server. Die Kante zeigt
+# in die zulässige Richtung — `ea-testkit` hängt nicht an `ea-trust`.
+ea-testkit.workspace = true

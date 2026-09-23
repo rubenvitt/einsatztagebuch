@@ -2280,6 +2280,7 @@ dependencies = [
  "ea-cbor",
  "ea-crypto",
  "ea-format",
+ "ea-testkit",
  "ea-time",
  "ea-types",
  "ed25519-dalek",

@@ -508,6 +508,7 @@ pub use registry::verify_historical_registry_authority;
 #[cfg_attr(not(test), allow(dead_code))]
 mod operator_binding;
 mod policy;
+mod reader_key_escrow;
 mod registry;
 mod writer_registry;
 pub use registry::select_stale_writer_registry_head;
@@ -535,6 +536,10 @@ pub use error::{ClockReleaseError, RegistryError, TrustError, TrustSourceError};
 pub use grant_authorization::{
     GrantAuthorizationError, VerifiedGrantAuthorization, distinct_authority_subjects,
     verify_archived_grant_authorization, verify_grant_authorization,
+};
+pub use reader_key_escrow::{
+    VerifiedReaderKeyEscrowApproval, consume_reader_key_escrow_approval,
+    verify_reader_key_escrow_approval,
 };
 pub use registry::{
     AdvancedRegistryHead, PendingFutureSuccessor, PreexistingEffectiveNow,

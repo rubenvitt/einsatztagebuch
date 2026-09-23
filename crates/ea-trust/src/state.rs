@@ -1,6 +1,8 @@
 use core::fmt;
 
-use ea_format::{ClockReleaseAuditV1, OrganizationAdminAuthorizationFieldsV1};
+use ea_format::{
+    ClockReleaseAuditV1, OrganizationAdminAuthorizationFieldsV1, ReaderKeyEscrowApprovalCoreV1,
+};
 use ea_time::TrustedTimeState;
 use ea_types::{AuthorizationId, DeviceId, ObjectHash, OrganizationId, RegistryVersion};
 
@@ -162,6 +164,19 @@ pub enum AdminAuthorizationReplayDimension {
 /// [`VerifiedAdminAuthorization::replay_keys`](crate::VerifiedAdminAuthorization::replay_keys)
 /// heraus. Ein Aufrufer, der ihn selbst zusammensetzen koennte, koennte eine
 /// fremde Autorisierung als verbraucht markieren.
+///
+/// # Ein Namensraum für drei Familien
+///
+/// Die Publikationsfreigabe und die Öffnungsautorisierung des
+/// Reader-Key-Escrows (v1.1-Profil §3.1) verbrauchen `authorization-id` und
+/// `nonce` UNVERÄNDERT in diesem Speicher — dieselben zwei Dimensionen,
+/// dieselbe Reihenfolge, derselbe Port. Der Typname stammt aus der Zeit vor
+/// dem Escrow und bleibt. Der geteilte Namensraum ist strenger als je einer
+/// pro Familie: eine als Freigabe verbrauchte Nonce trägt keine Öffnung und
+/// umgekehrt, wie `design.md` §16.3 („organisationsweit einmal") es ohne
+/// Familientrennung verlangt. Die dauerhafte Ablage
+/// (`CHECK(dimension IN (0,1))`) und jeder erschöpfende `match` über
+/// [`AdminAuthorizationReplayDimension`] bleiben damit unberührt.
 pub struct AdminAuthorizationReplayKey {
     organization_id: OrganizationId,
     dimension: AdminAuthorizationReplayDimension,
@@ -176,6 +191,18 @@ impl AdminAuthorizationReplayKey {
     /// im ersten Zug, bevor irgendein Wert gesetzt wurde.
     pub(crate) const fn pair_from_verified_authorization(
         fields: &OrganizationAdminAuthorizationFieldsV1,
+    ) -> [Self; 2] {
+        Self::pair_of(
+            fields.organization_id,
+            fields.authorization_id,
+            fields.nonce,
+        )
+    }
+
+    /// Die beiden Sperrzeilen einer geprüften Publikationsfreigabe des
+    /// Reader-Key-Escrows — dieselbe Reihenfolge, derselbe Namensraum.
+    pub(crate) const fn pair_from_verified_escrow_approval(
+        fields: &ReaderKeyEscrowApprovalCoreV1,
     ) -> [Self; 2] {
         Self::pair_of(
             fields.organization_id,
