@@ -43,7 +43,7 @@ use ea_types::{ObjectHash, OrganizationId, RegistryVersion, UnixMillis};
 
 use crate::{
     RepositoryError, ServerClock, StoreError,
-    models::{TrustEventCommandV1, TrustIndexOutcome},
+    models::{TrustEventCommandV1, TrustIndexOutcome, ValidatedTrustEventV1},
     ports::{ObjectStore, TrustEventStore},
 };
 
@@ -257,13 +257,21 @@ pub trait TrustEventValidator: Send + Sync {
     /// muss belegen, dass die geteilte Pruefung ueber genau diese Bytes eine
     /// Aussage getroffen hat, und ein Objekt abweisen, ueber das sie keine
     /// treffen kann.
+    ///
+    /// Fällt die Prüfung ein Urteil über die GANZE Objektmenge — die drei
+    /// Reader-Key-Escrow-Familien, deren Eindeutigkeit von allen gültigen
+    /// Escrows abhängt —, nennt die Antwort den Katalogstand, gegen den sie
+    /// lief ([`ValidatedTrustEventV1::catalog_fence`]). Der Index nimmt das
+    /// Objekt nur auf diesem Stand an; sonst antwortet der Dienst
+    /// `EA-TRUST-STATE-CONFLICT`, und die Wiederholung prüft gegen die neue
+    /// Menge.
     async fn validate_exact_etb(
         &self,
         organization_id: OrganizationId,
         object_hash: ObjectHash,
         exact_etb_bytes: &[u8],
         now: UnixMillis,
-    ) -> Result<(), TrustPublishError>;
+    ) -> Result<ValidatedTrustEventV1, TrustPublishError>;
 
     /// Rueckt den PERSISTENTEN Registrierungskopf nach.
     ///
@@ -296,7 +304,8 @@ pub struct TrustPorts<'a> {
 /// 2. Organisationsbindung des Objekts gegen die des Aufrufers stellen,
 /// 3. die GETEILTE Trust-Pruefung fuehren — LESEND,
 /// 4. die Bytes content-addressed ablegen,
-/// 5. transaktional indizieren,
+/// 5. transaktional indizieren — fuer ein Urteil ueber die ganze Objektmenge
+///    nur auf dem Katalogstand, gegen den Schritt 3 lief,
 /// 6. und ganz zuletzt den persistenten Kopf nachruecken.
 ///
 /// Ein ungeprueftes Objekt wird nie abgelegt. Faellt Schritt 5, bleibt
@@ -327,7 +336,7 @@ pub async fn publish_trust_event(
     }
 
     let now = ports.clock.now();
-    ports
+    let validated = ports
         .validator
         .validate_exact_etb(
             organization_id,
@@ -357,10 +366,16 @@ pub async fn publish_trust_event(
             registry_version,
             effective_from: effective_from(&payload).unwrap_or(now),
             received_at: now,
+            catalog_fence: validated.catalog_fence,
         })
         .await?;
-    if outcome == TrustIndexOutcome::Conflict {
-        return Err(TrustServiceError::Conflict.into());
+    match outcome {
+        TrustIndexOutcome::Conflict => return Err(TrustServiceError::Conflict.into()),
+        // Ein verlorenes Rennen um den Katalogstand, keine Aussage über das
+        // Objekt: 503, wiederholbar. Die Wiederholung prüft gegen die neue
+        // Menge und endet dort mit dem eigentlichen Befund.
+        TrustIndexOutcome::CatalogMoved => return Err(TrustServiceError::StateConflict.into()),
+        TrustIndexOutcome::Indexed | TrustIndexOutcome::AlreadyIndexed => {}
     }
 
     // Erst JETZT — die Bytes liegen, die Zeile steht. Ein Fehlschlag hier

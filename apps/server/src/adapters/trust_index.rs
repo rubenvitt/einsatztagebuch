@@ -53,6 +53,15 @@ impl TrustEventStore for PostgresRepository {
         .await
         .map_err(|e| unavailable(&e))?
         .ok_or(RepositoryError::Unavailable)?;
+        // Unter der eben genommenen Sperre: kein anderer Index kann die
+        // Revision jetzt noch heben (sein Trigger braucht dieselbe Zeile).
+        let catalog_revision: i64 = sqlx::query_scalar(
+            "SELECT trust_catalog_revision FROM organizations WHERE organization_id=$1",
+        )
+        .bind(event.organization_id.as_bytes().as_slice())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|e| unavailable(&e))?;
 
         let existing = sqlx::query(
             "SELECT event_code FROM trust_events WHERE organization_id = $1 AND object_hash = $2",
@@ -70,6 +79,17 @@ impl TrustEventStore for PostgresRepository {
             } else {
                 TrustIndexOutcome::Conflict
             });
+        }
+
+        // Ein Urteil über die GANZE Objektmenge gilt nur für den Katalogstand,
+        // gegen den es fiel. Nach der AlreadyIndexed-Prüfung, damit eine
+        // byte-gleiche Wiederholung idempotent bleibt; unter der
+        // Organisationssperre, damit kein zweites Objekt dazwischenkommt.
+        if let Some(fence) = event.catalog_fence
+            && fence.catalog_revision != catalog_revision
+        {
+            transaction.rollback().await.map_err(|e| unavailable(&e))?;
+            return Ok(TrustIndexOutcome::CatalogMoved);
         }
 
         sqlx::query(
