@@ -91,6 +91,18 @@ fn offline_authority_and_exchange_require_explicit_public_configuration() {
     assert!(config.admin_certificate_hash.is_some());
 }
 
+/// DRK-458: die Öffnung eines Reader-Key-Escrows verlangt ihren EIGENEN
+/// Wiederanmeldungszweck; die Konfiguration nennt ihn über sein Etikett.
+#[test]
+fn config_names_the_reader_key_escrow_recovery_purpose_by_its_label() {
+    let mut value = config();
+    value["role"] = json!("organization-admin");
+    value["purpose"] = json!("reader-key-escrow-recovery");
+    let config = OperatorRuntimeConfig::from_json(&serde_json::to_vec(&value).unwrap())
+        .expect("der zwölfte Zweck ist ein bekanntes Etikett");
+    assert_eq!(config.purpose.label(), "reader-key-escrow-recovery");
+}
+
 #[test]
 fn offline_authority_must_pin_its_expected_requesting_device_independently() {
     let mut value = config();

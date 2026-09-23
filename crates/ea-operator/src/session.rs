@@ -115,6 +115,10 @@ pub enum ReauthPurpose {
     ArchiveProfileMigration,
     /// Purpose-limited documentation of unmeasurable Go-live prerequisites.
     GoLivePostureDocumentation,
+    /// Öffnung eines Reader-Key-Escrows (Profil §6 Schritt 3): gebunden an den
+    /// exakten Autorisierungs-Objekthash und den Transport-Abdruck, nur für die
+    /// Rolle `OrganizationAdmin`.
+    ReaderKeyEscrowRecovery,
 }
 
 impl ReauthPurpose {
@@ -124,13 +128,13 @@ impl ReauthPurpose {
             Self::Finalize | Self::DiscardDraft | Self::RegistryStaleFinalize
         )
     }
-    /// Alle elf Zwecke, in Deklarationsreihenfolge.
+    /// Alle zwölf Zwecke, in Deklarationsreihenfolge.
     ///
-    /// Die Laenge ist Teil des Typs: ein elfter Zweck bricht dieses Literal und
+    /// Die Laenge ist Teil des Typs: ein dreizehnter Zweck bricht dieses Literal und
     /// erzwingt damit, dass der Namensvergleich in
     /// `every_purpose_carries_a_distinct_label` ihn mitnimmt statt ihn
     /// stillschweigend auszulassen.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Finalize,
         Self::DiscardDraft,
         Self::RegistryStaleFinalize,
@@ -142,6 +146,7 @@ impl ReauthPurpose {
         Self::ClockSkewRelease,
         Self::ArchiveProfileMigration,
         Self::GoLivePostureDocumentation,
+        Self::ReaderKeyEscrowRecovery,
     ];
 
     /// Die Zeichenkette, die den Zweck in der Challenge NENNT.
@@ -165,6 +170,7 @@ impl ReauthPurpose {
             Self::ClockSkewRelease => "clock-skew-release",
             Self::ArchiveProfileMigration => "archive-profile-migration",
             Self::GoLivePostureDocumentation => "go-live-posture-documentation",
+            Self::ReaderKeyEscrowRecovery => "reader-key-escrow-recovery",
         }
     }
 }
@@ -536,9 +542,23 @@ mod tests {
         let mut sorted = labels.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        // Elf Zwecke, elf Namen: ein doppeltes Label liesse eine Signatur fuer
+        // Zwölf Zwecke, zwölf Namen: ein doppeltes Label liesse eine Signatur fuer
         // den einen Zweck als eine fuer den anderen durchgehen.
         assert_eq!(sorted.len(), labels.len());
+    }
+
+    #[test]
+    fn reader_key_escrow_recovery_has_its_own_label() {
+        assert_eq!(
+            ReauthPurpose::ReaderKeyEscrowRecovery.label(),
+            "reader-key-escrow-recovery"
+        );
+        assert_eq!(ReauthPurpose::ALL.len(), 12);
+        assert_eq!(
+            ReauthPurpose::ALL.last(),
+            Some(&ReauthPurpose::ReaderKeyEscrowRecovery)
+        );
+        assert!(!ReauthPurpose::ReaderKeyEscrowRecovery.is_writer_purpose());
     }
 
     #[test]
