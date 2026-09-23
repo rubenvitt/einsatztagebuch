@@ -81,7 +81,7 @@ pub enum ReaderKeyEscrowError {
     /// Zu Reader-Zertifikat oder Person liegt schon ein anderes Escrow vor.
     PublicationConflict,
     /// Die Cutover-Vorbedingung (aktive v1.1-`webBundleRelease`) ist nicht
-    /// erfüllt — bis Scheibe (f) immer.
+    /// erfüllt.
     CutoverNotReady,
 }
 

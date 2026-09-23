@@ -389,7 +389,21 @@ Keine davon ist eine Produkthälfte von WR-075; jede steht auch im PR.
    Zaun; kein Serverimport (Import ist Offline-Einfuhr).
 7. Browser: Zeremonie B endet lokal (Neuzertifizierung und Server-Tresor
    fehlen); `web:browser-test` ist nicht ausgeführt, `web:e2e` läuft mit
-   Rust-Peer.
+   Rust-Peer, dessen Ledger im Speicher liegt und dessen Sitzung immer gilt
+   (Verbrauch und Sitzung sind dort nicht belegt, nur nativ).
+   `authorization-object-hash` ist nur über die AAD gebunden; das Entsperren
+   nach einem Neuladen ist nicht verdrahtet.
+8. Codes und Reihenfolge: die Zeremonie meldet `EA-TRUST-SIGNATURE`, die
+   Annahme `EA-TRUST-SIGNER-INACTIVE`; ein später wirksamer Signierer im
+   Lease wird abgewiesen. Die Verfall-Löschung der Öffnungsergebnisse läuft
+   nach der Reauthentifizierung statt beim Kommandostart. Publikation nur auf
+   dem Autoritätswirt; die Escrow-Inbox ist im Desktop nicht verdrahtet.
+   `bundle_release.rs` übergeht fremde Subtypen, statt sie als `Unsigned`
+   abzuweisen.
+9. Zeugenlücken der nativen Publikation: der Fall „zweiter Port-Lauf nennt
+   eine ANDERE aktive Freigabe" und das Scheitern der Nachprüfung nach dem
+   Commit haben keinen eigenen Zeugen; scheitert die Verteilung nach dem
+   Commit, heilt sie erst das exakte Wiedereinspielen.
 
 **DRK-320 (Controlled-Network-Archiv) ist eine dokumentierte Grenze und
 bekommt KEINE eigene Ledgerzeile.** Ruling Ruben vom 2026-09-15. Begruendung:
