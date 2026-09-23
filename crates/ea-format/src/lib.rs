@@ -13,6 +13,7 @@ mod local_audit;
 mod object;
 mod parser;
 mod reader_key_escrow;
+mod reader_key_escrow_transfer;
 mod trust_view;
 
 pub use archive_profile::{
@@ -69,5 +70,14 @@ pub use reader_key_escrow::{
     READER_KEY_ESCROW_RESTORE_SUITE_ID, READER_KEY_ESCROW_SUITE_ID, ReaderKeyEscrowApprovalCoreV1,
     ReaderKeyEscrowCoreV1, ReaderKeyEscrowHpkeContextV1, ReaderKeyEscrowPayloadV1,
     ReaderKeyEscrowRecoveryAuthorizationCoreV1, ReaderKeyEscrowRestoreContextV1,
+};
+pub use reader_key_escrow_transfer::{
+    READER_KEY_ESCROW_ENVELOPE_LITERAL, READER_KEY_ESCROW_PACKAGE_LITERAL,
+    READER_KEY_ESCROW_TRANSFER_MAX_BYTES, READER_KEY_ESCROW_TRANSPORT_LITERAL,
+    ReaderKeyEscrowEnvelopeV1, ReaderKeyEscrowPackageV1, ReaderKeyEscrowTransferKindV1,
+    ReaderKeyEscrowTransportRequestV1, decode_reader_key_escrow_envelope,
+    decode_reader_key_escrow_package, decode_reader_key_escrow_transport_request,
+    encode_reader_key_escrow_envelope, encode_reader_key_escrow_package,
+    encode_reader_key_escrow_transport_request, reader_key_escrow_transfer_file_name,
 };
 pub use trust_view::{AuthorizedTrustCoreV1, DecodedTrustPayloadV1};

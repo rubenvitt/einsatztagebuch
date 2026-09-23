@@ -26,6 +26,11 @@ fn cddl_registers_every_v1_wire_type() {
         "reader-key-escrow-recovery-authorization-core-v1",
         "reader-key-escrow-hpke-context-v1",
         "reader-key-escrow-restore-context-v1",
+        // Die drei Übergabedateien (Profil §5/§6, Ruling U3): keine
+        // Archivobjekte, keine Trust-Familie.
+        "reader-key-escrow-package-v1",
+        "reader-key-escrow-transport-request-v1",
+        "reader-key-escrow-envelope-v1",
     ] {
         assert!(trust.contains(subtype), "missing {subtype}");
     }
@@ -2528,6 +2533,143 @@ fn reader_key_escrow_cddl_pins_arity_cardinality_and_context_form() {
             "{root} binds its own suite literal"
         );
     }
+}
+
+/// Eine Übergabedatei des Reader-Key-Escrows, von Hand kodiert: `1`, das
+/// Literal, die Nutzlast und — wenn gewünscht — der leere Extension-Slot.
+fn escrow_transfer_fixture(
+    literal: &str,
+    body: &dyn Fn(&mut minicbor::Encoder<Vec<u8>>),
+    body_items: u64,
+    extension_slot: bool,
+) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(2 + body_items + u64::from(extension_slot))
+        .unwrap();
+    encoder.u8(1).unwrap();
+    encoder.str(literal).unwrap();
+    body(&mut encoder);
+    if extension_slot {
+        encoder.array(0).unwrap();
+    }
+    encoder.into_writer()
+}
+
+/// DRK-458, Ruling U3: die drei Übergabedateien stehen in `trust.cddl`, und
+/// der Codec in `ea-format` liest und schreibt GENAU diese Grammatik — die
+/// Handkodierung besteht die CDDL, dekodiert, und ihre Neukodierung ist
+/// bitgleich.
+#[test]
+fn reader_key_escrow_transfer_files_match_the_trust_grammar_and_the_codec() {
+    let cddl = archive_cddl();
+    let package_literal = "EINSATZARCHIV-READER-KEY-ESCROW-PACKAGE-1";
+    let transport_literal = "EINSATZARCHIV-READER-KEY-ESCROW-TRANSPORT-1";
+    let envelope_literal = "EINSATZARCHIV-READER-KEY-ESCROW-ENVELOPE-1";
+    let restore = escrow_restore_context("EINSATZARCHIV-READER-KEY-ESCROW-RESTORE-1", true);
+
+    let package_body = |encoder: &mut minicbor::Encoder<Vec<u8>>| encode_escrow_core(encoder, 0);
+    let transport_body = |encoder: &mut minicbor::Encoder<Vec<u8>>| {
+        encoder.bytes(&[1; 16]).unwrap();
+        encoder.bytes(&[2; 32]).unwrap();
+        encoder.bytes(&[3; 32]).unwrap();
+    };
+    let envelope_body = |encoder: &mut minicbor::Encoder<Vec<u8>>| {
+        encoder.writer_mut().extend_from_slice(&restore);
+        encoder.bytes(&[4; 32]).unwrap();
+        encoder.bytes(&[5; 48]).unwrap();
+    };
+
+    let package = escrow_transfer_fixture(package_literal, &package_body, 1, true);
+    let transport = escrow_transfer_fixture(transport_literal, &transport_body, 3, true);
+    let envelope = escrow_transfer_fixture(envelope_literal, &envelope_body, 3, true);
+    for (root, bytes) in [
+        ("reader-key-escrow-package-v1", &package),
+        ("reader-key-escrow-transport-request-v1", &transport),
+        ("reader-key-escrow-envelope-v1", &envelope),
+    ] {
+        assert!(
+            validate_payload_cbor(root, &cddl, bytes),
+            "{root} accepts its own form"
+        );
+    }
+    assert_eq!(
+        ea_format::encode_reader_key_escrow_package(
+            ea_format::decode_reader_key_escrow_package(&package)
+                .unwrap()
+                .core()
+        )
+        .unwrap(),
+        package
+    );
+    assert_eq!(
+        ea_format::encode_reader_key_escrow_transport_request(
+            &ea_format::decode_reader_key_escrow_transport_request(&transport).unwrap()
+        )
+        .unwrap(),
+        transport
+    );
+    assert_eq!(
+        ea_format::encode_reader_key_escrow_envelope(
+            &ea_format::decode_reader_key_escrow_envelope(&envelope).unwrap()
+        )
+        .unwrap(),
+        envelope
+    );
+
+    // Pflicht-Slot, eigenes Literal, keine Datei im Kleid eines Nachbarn.
+    for (root, literal, body, items) in [
+        (
+            "reader-key-escrow-package-v1",
+            package_literal,
+            &package_body as &dyn Fn(&mut minicbor::Encoder<Vec<u8>>),
+            1,
+        ),
+        (
+            "reader-key-escrow-transport-request-v1",
+            transport_literal,
+            &transport_body,
+            3,
+        ),
+        (
+            "reader-key-escrow-envelope-v1",
+            envelope_literal,
+            &envelope_body,
+            3,
+        ),
+    ] {
+        assert!(
+            !validate_cbor(
+                root,
+                &cddl,
+                &escrow_transfer_fixture(literal, body, items, false)
+            ),
+            "{root} requires the empty extension slot"
+        );
+        for foreign in [package_literal, transport_literal, envelope_literal] {
+            if foreign != literal {
+                assert!(
+                    !validate_cbor(
+                        root,
+                        &cddl,
+                        &escrow_transfer_fixture(foreign, body, items, true)
+                    ),
+                    "{root} binds its own literal"
+                );
+            }
+        }
+    }
+    // Die Transportdatei trägt den rohen Schlüssel mit genau 32 Byte.
+    let short_key = |encoder: &mut minicbor::Encoder<Vec<u8>>| {
+        encoder.bytes(&[1; 16]).unwrap();
+        encoder.bytes(&[2; 32]).unwrap();
+        encoder.bytes(&[3; 31]).unwrap();
+    };
+    assert!(!validate_cbor(
+        "reader-key-escrow-transport-request-v1",
+        &cddl,
+        &escrow_transfer_fixture(transport_literal, &short_key, 3, true)
+    ));
 }
 
 #[test]
