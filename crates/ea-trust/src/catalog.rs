@@ -53,6 +53,22 @@ impl TrustCatalog {
                 ParsedArchiveObject::Trust(parsed) => parsed,
                 _ => return Err(TrustError::Source),
             };
+            // WÄCHTER bis Scheibe (b) von DRK-318: die drei Escrow-Familien
+            // dekodieren seit dem Codec, aber noch prüft niemand Signatur,
+            // Freigabe, Enrollment-Bindung oder Organisation. Ohne diese
+            // Zeile führte der Katalog sie ungeprüft mit, und `verify_trust`,
+            // `ea-verify`, der Reader und die Recovery übersprängen sie still —
+            // genau das Überspringen, das Profil §9 verbietet. Die Ablehnung
+            // ist bitgleich das Verhalten vor dem Codec (`EA-TRUST-SOURCE`).
+            // Scheibe (b) ERSETZT diesen Wächter durch die echte Aufnahme.
+            if matches!(
+                parsed.value().subtype(),
+                TrustSubtypeV1::ReaderKeyEscrow
+                    | TrustSubtypeV1::ReaderKeyEscrowApproval
+                    | TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization
+            ) {
+                return Err(TrustError::Source);
+            }
             by_subtype
                 .entry(parsed.value().subtype().as_str())
                 .or_default()
@@ -100,11 +116,19 @@ mod tests {
         sync::Arc,
     };
 
-    use ea_crypto::{CanonicalPublicCoseKey, CoseSigner, SecretBytes, object_hash, trust_digest};
-    use ea_format::{
-        RootCertificateFieldsV1, TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, encode_trust,
+    use ea_crypto::{
+        CanonicalPublicCoseKey, ContentType, CoseSigner, ProtectedHeader, SecretBytes, object_hash,
+        trust_digest,
     };
-    use ea_types::{ObjectHash, OrganizationId, RegistryVersion};
+    use ea_format::{
+        ParsedArchiveObject, ReaderKeyEscrowApprovalCoreV1, ReaderKeyEscrowCoreV1,
+        ReaderKeyEscrowRecoveryAuthorizationCoreV1, RootCertificateFieldsV1, TrustObjectV1,
+        TrustPayloadV1, TrustSubtypeV1, encode_trust,
+    };
+    use ea_types::{
+        AuthorizationId, CertificateHash, ChainSequence, Hash32, KeyThumbprint, ObjectHash,
+        OrganizationId, RegistryVersion, SubjectId, UnixMillis,
+    };
 
     use super::{TrustCatalog, admit_exact_trust_bytes};
     use crate::{
@@ -254,6 +278,172 @@ mod tests {
             assert_eq!(error.to_string(), "EA-TRUST-SOURCE", "{label}");
             assert_eq!(format!("{error:?}"), "EA-TRUST-SOURCE", "{label}");
         }
+    }
+
+    /// Ein Escrow-Objekt dekodiert seit dem Codec, und der Katalog ist der
+    /// einzige Einlass für `verify_trust`. Bis Scheibe (b) die echte Aufnahme
+    /// baut, muss er jedes der drei Objekte ablehnen wie vor dem Codec
+    /// (`EA-TRUST-SOURCE`), statt es ungeprüft in `by_subtype` zu führen.
+    #[test]
+    fn every_reader_key_escrow_object_is_refused_until_the_trust_core_admits_it() {
+        for (subtype, payload, signatures) in escrow_fixtures() {
+            let bytes = escrow_object(&payload, signatures);
+            let ParsedArchiveObject::Trust(parsed) = ea_format::decode_exact_object(&bytes)
+                .unwrap_or_else(|error| {
+                    panic!("the {} fixture decodes: {}", subtype.as_str(), error.code())
+                })
+            else {
+                panic!("the {} fixture is a trust object", subtype.as_str())
+            };
+            assert_eq!(parsed.value().subtype(), subtype);
+
+            let hash = object_hash(&bytes);
+            let source = FakeSource::new(vec![hash], [(hash, bytes)]);
+            let error = match TrustCatalog::load(&source) {
+                Ok(_) => panic!("{} must not enter the catalog", subtype.as_str()),
+                Err(error) => error,
+            };
+            assert_eq!(error.code(), "EA-TRUST-SOURCE", "{}", subtype.as_str());
+
+            // Neben einem gültigen Objekt ändert sich nichts: der ganze
+            // Katalog fällt, wie bei jedem undekodierbaren Objekt.
+            let root = exact_initial_root_object(0x11);
+            let root_hash = object_hash(&root);
+            let mut hashes = vec![root_hash, hash];
+            hashes.sort_unstable();
+            let source = FakeSource::new(
+                hashes,
+                [
+                    (root_hash, root),
+                    (hash, escrow_object(&payload, signatures)),
+                ],
+            );
+            assert!(
+                TrustCatalog::load(&source).is_err(),
+                "{} beside a valid root",
+                subtype.as_str()
+            );
+        }
+    }
+
+    fn escrow_fixtures() -> [(TrustSubtypeV1, TrustPayloadV1, usize); 3] {
+        let organization_id = OrganizationId::try_from([0x31; 16].as_slice()).unwrap();
+        let subject = SubjectId::try_from([0x33; 16].as_slice()).unwrap();
+        let hash = |fill: u8| ObjectHash::try_from([fill; 32].as_slice()).unwrap();
+        let certificate = |fill: u8| CertificateHash::try_from([fill; 32].as_slice()).unwrap();
+        let hash32 = |fill: u8| Hash32::try_from([fill; 32].as_slice()).unwrap();
+        let thumbprint = |fill: u8| KeyThumbprint::try_from([fill; 32].as_slice()).unwrap();
+        let escrow = TrustPayloadV1::reader_key_escrow(
+            ReaderKeyEscrowCoreV1 {
+                organization_id,
+                reader_certificate_object_hash: certificate(0x32),
+                reader_subject_id: subject,
+                enrollment_registry_version: RegistryVersion::new(4),
+                enrollment_registry_head_hash: hash32(0x35),
+                enrollment_sequence: ChainSequence::new(6),
+                recovery_certificate_object_hash: certificate(0x37),
+                recovery_kem_key_thumbprint: thumbprint(0x38),
+                encapsulated_key: [0x39; 32],
+                encrypted_reader_kem_key: [0x3a; 48],
+                issued_at: UnixMillis::new(1_000),
+                root_key_thumbprint: thumbprint(0x3b),
+            },
+            hash(0x3c),
+        )
+        .unwrap();
+        let approval = TrustPayloadV1::reader_key_escrow_approval(ReaderKeyEscrowApprovalCoreV1 {
+            authorization_id: AuthorizationId::try_from([0x41; 16].as_slice()).unwrap(),
+            organization_id,
+            registry_version: RegistryVersion::new(3),
+            registry_head_hash: hash32(0x44),
+            authorization_sequence: 5,
+            admin_key_thumbprint: thumbprint(0x46),
+            admin_certificate_object_hash: certificate(0x47),
+            admin_operator_binding_object_hash: hash(0x48),
+            escrow_core_hash: hash32(0x49),
+            reader_certificate_object_hash: certificate(0x32),
+            reader_subject_id: subject,
+            issued_at: UnixMillis::new(1_000),
+            expires_at: UnixMillis::new(2_000),
+            nonce: [0x4a; 32],
+        })
+        .unwrap();
+        let recovery = TrustPayloadV1::reader_key_escrow_recovery_authorization(
+            ReaderKeyEscrowRecoveryAuthorizationCoreV1 {
+                authorization_id: AuthorizationId::try_from([0x51; 16].as_slice()).unwrap(),
+                organization_id,
+                registry_version: RegistryVersion::new(3),
+                registry_head_hash: hash32(0x54),
+                authorization_sequence: 5,
+                escrow_object_hash: hash(0x56),
+                reader_certificate_object_hash: certificate(0x32),
+                reader_subject_id: subject,
+                enrollment_registry_version: RegistryVersion::new(4),
+                enrollment_registry_head_hash: hash32(0x35),
+                target_transport_key_thumbprint: thumbprint(0x5b),
+                issued_at: UnixMillis::new(1_000),
+                expires_at: UnixMillis::new(2_000),
+                nonce: [0x5c; 32],
+            },
+        )
+        .unwrap();
+        [
+            (TrustSubtypeV1::ReaderKeyEscrow, escrow, 1),
+            (TrustSubtypeV1::ReaderKeyEscrowApproval, approval, 1),
+            (
+                TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization,
+                recovery,
+                2,
+            ),
+        ]
+    }
+
+    /// Das Objekt mit `signatures` Normalprofil-Signaturen über den
+    /// Trust-Digest. Von Hand, weil es für diese Familien bewusst keine
+    /// `CoseSigner`-Methode gibt.
+    fn escrow_object(payload: &TrustPayloadV1, signatures: usize) -> Arc<[u8]> {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0xa0; 32]);
+        let public_key =
+            CanonicalPublicCoseKey::ed25519(signing_key.verifying_key().to_bytes()).unwrap();
+        let digest = trust_digest(payload.exact_digest_input());
+        let signatures = (0..signatures)
+            .map(|index| {
+                let protected = ProtectedHeader::normal(
+                    ContentType::TrustDigest,
+                    public_key.thumbprint(),
+                    CertificateHash::try_from([0x60 + u8::try_from(index).unwrap(); 32].as_slice())
+                        .unwrap(),
+                );
+                let signature = ed25519_dalek::Signer::sign(
+                    &signing_key,
+                    &protected.sig_structure_bytes(digest.as_bytes()),
+                )
+                .to_bytes();
+                let mut encoded = vec![0xd2, 0x84];
+                encoded.extend_from_slice(&cbor_bytes(&protected.to_deterministic_cbor()));
+                encoded.push(0xa0);
+                encoded.extend_from_slice(&cbor_bytes(digest.as_bytes()));
+                encoded.extend_from_slice(&cbor_bytes(&signature));
+                encoded
+            })
+            .collect();
+        let object = TrustObjectV1::new(payload.clone(), signatures).unwrap();
+        Arc::from(encode_trust(&object).unwrap().into_vec())
+    }
+
+    fn cbor_bytes(value: &[u8]) -> Vec<u8> {
+        let length = value.len();
+        let mut encoded = match length {
+            0..=23 => vec![0x40 | u8::try_from(length).unwrap()],
+            24..=255 => vec![0x58, u8::try_from(length).unwrap()],
+            _ => {
+                let mut header = vec![0x59];
+                header.extend_from_slice(&u16::try_from(length).unwrap().to_be_bytes());
+                header
+            }
+        };
+        encoded.extend_from_slice(value);
+        encoded
     }
 
     struct FakeSource {
