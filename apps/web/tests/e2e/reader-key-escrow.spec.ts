@@ -60,8 +60,17 @@ async function saved(download: Promise<Download>, directory: string): Promise<st
   return target
 }
 
+/**
+ * Die Subject-ID steht nie im DOM. In den Dateien steht sie dagegen per
+ * Grammatik (`reader-subject-id` in Core und Restore-Bindung) — dort ist ein
+ * Kanarienvogel strukturell unmoeglich.
+ */
+async function expectNoSubjectInDom(page: Page, subjectId: string): Promise<void> {
+  expect(await page.content()).not.toContain(subjectId)
+}
+
 /** Enrollment im Browser, entsperren, dann zur Hinterlegung — ohne Neuladen. */
-async function enrolledOnEscrowPage(page: Page): Promise<void> {
+async function enrolledOnEscrowPage(page: Page): Promise<PeerReleaseContext> {
   const release = peer<PeerReleaseContext>(['anchor'])
   const { cdp, ids } = await twoAuthenticators(page)
   await stubEnrollmentEndpoints(page)
@@ -73,6 +82,7 @@ async function enrolledOnEscrowPage(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Tresor entsperren' }).click()
   await expect(page.getByText('Tresor entsperrt.')).toBeVisible()
   await page.getByRole('link', { name: 'Schlüsselhinterlegung' }).click()
+  return release
 }
 
 type OpfsFile = { readonly name: string; readonly hex: string }
@@ -103,7 +113,7 @@ async function opfsFiles(page: Page): Promise<OpfsFile[]> {
 
 test('ceremony A: a browser-enrolled vault seals a package the native side accepts', async ({ page }) => {
   const work = workdir()
-  await enrolledOnEscrowPage(page)
+  const release = await enrolledOnEscrowPage(page)
 
   const requested = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Registrierungsantrag herunterladen' }).click()
@@ -121,11 +131,12 @@ test('ceremony A: a browser-enrolled vault seals a package the native side accep
   const checked = peer<{ ok: boolean; escrowCoreHash: string }>(['check-package', escrowPackage, request])
   expect(checked.ok).toBe(true)
   await expect(page.getByText(checked.escrowCoreHash)).toBeVisible()
+  await expectNoSubjectInDom(page, release.subjectId)
 })
 
 test('ceremony A: a certificate with a foreign key yields no package and no download', async ({ page }) => {
   const work = workdir()
-  await enrolledOnEscrowPage(page)
+  const release = await enrolledOnEscrowPage(page)
   const requested = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Registrierungsantrag herunterladen' }).click()
   const request = await saved(requested, work)
@@ -140,6 +151,7 @@ test('ceremony A: a certificate with a foreign key yields no package and no down
   await page.getByRole('button', { name: 'Hinterlegungspaket erzeugen' }).click()
   await expect(page.getByRole('alert').filter({ hasText: 'EA-TRUST-ESCROW-ENROLLMENT-MISMATCH' })).toBeVisible()
   expect(downloads).toBe(0)
+  await expectNoSubjectInDom(page, release.subjectId)
 })
 
 type EscrowLineV1 = PeerReleaseContext & { readonly expectedKemFingerprint: string }
@@ -193,17 +205,19 @@ test('ceremony B: the envelope opens once and a new vault is sealed locally with
   }
   expect(await page.evaluate(() => localStorage.length)).toBe(0)
   expect(await page.evaluate(async () => (await indexedDB.databases()).length)).toBe(0)
+  await expectNoSubjectInDom(page, line.subjectId)
 })
 
 test('ceremony B: a foreign envelope is refused, the transport is gone, and a reload leaves nothing to import', async ({ page }) => {
   const work = workdir()
-  const { state } = await beganRestore(page, work)
+  const { line, state } = await beganRestore(page, work)
   const foreign = path.join(work, 'foreign.cbor')
   peer(['open-foreign', state, foreign])
   await page.getByLabel('Umschlag importieren').setInputFiles(foreign)
   await expect(page.getByRole('alert').filter({ hasText: 'EA-READER-ESCROW-RESTORE-BINDING' })).toBeVisible()
   await page.getByLabel('Umschlag importieren').setInputFiles(foreign)
   await expect(page.getByRole('alert').filter({ hasText: 'EA-READER-ESCROW-BRIDGE-ARGUMENT' })).toBeVisible()
+  await expectNoSubjectInDom(page, line.subjectId)
 
   await page.reload()
   await expect(page.getByLabel('Umschlag importieren')).toBeDisabled()
