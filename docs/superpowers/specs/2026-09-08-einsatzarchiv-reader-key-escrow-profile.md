@@ -4,7 +4,9 @@
 2026-09-08 (Status „proposed") ab. Grundlage ist das unabhängige normative und Security-Review
 gegen HEAD `3257385` (Anhang `drk-318-escrow-review.md` an DRK-318); die zwölf offenen Fragen sind
 in Abschnitt 1 entschieden. Die Umsetzung folgt TDD und dem Cutover aus Abschnitt 9; die Existenz
-dieses Profils autorisiert für sich genommen keine Emission.
+dieses Profils autorisiert für sich genommen keine Emission. Die Rulings vom 2026-09-23, die vier
+Lücken der Umsetzung schließen, stehen in Abschnitt 1.3 und sind in die betroffenen Abschnitte
+eingearbeitet.
 
 Kurzformen: `PLAN5` = `docs/superpowers/plans/2026-08-13-einsatzarchiv-stage-5-administration-recovery.md`,
 `WEBREADER` = `docs/superpowers/specs/2026-08-15-einsatzarchiv-web-reader-design.md`,
@@ -70,6 +72,27 @@ Erweiterung *wäre* Aktion 7.
 Daraus folgt die tatsächliche Gestalt: **alle drei Familien sind direkte Familien** nach dem
 Vorbild `webBundleRelease` (`crates/ea-crypto/src/cose.rs:1612-1659`,
 `schemas/archive/v1/trust.cddl:195-199`). `root_trust_bindings` wird **nicht angefasst**.
+
+### 1.3 Rulings zur Umsetzung (2026-09-23)
+
+Die Vermessung der sechs Umsetzungsscheiben gegen den Baum fand vier Stellen, die dieses Profil
+offen ließ. Entschieden (Ruben, 2026-09-23):
+
+| # | Frage | Entscheidung |
+| --- | --- | --- |
+| U1 | Serverannahme | Der Ausschluss aus dem Registrierungsabschluss bleibt (`ActionMismatch`, Abschnitt 3.1). Die drei Familien haben einen **eigenen** Prüfeinstieg im Trust-Kern, den der Server je Subtyp aufruft; es gibt genau eine Umsetzung der Regeln. |
+| U2 | Gültigkeit nach Widerruf | **Widerrufsbewusst.** Ein Escrow, dessen Reader-Zertifikat im gewählten Kopf widerrufen ist, zählt nicht zur Eindeutigkeit und ist nicht zu öffnen. Ersatz ist Widerruf des alten Zertifikats und danach eine normale Publikation mit eigener Freigabe. |
+| U3 | Übergabe Browser ↔ nativ | **Datei über die Admin-Inbox** nach dem Muster der Registrierungsanträge. Kein Serverendpunkt. |
+| U4 | Cutover-Vorbedingung | Eine minimale native Root-Zeremonie für `webBundleRelease` samt Serverannahme wird gebaut. „v1.1-fähig" heißt `bundle-version` nicht kleiner als die gepinnte Mindestversion. Der Auditkontext trägt den Objekthash der Freigabe (Abschnitt 8). |
+
+Technische Festlegungen der Umsetzung, die aus diesen Rulings folgen:
+
+- Ein einziges ungültiges Objekt einer der drei Familien lässt die **ganze** Escrow-Menge
+  scheitern; zwei widersprüchliche gültige Escrows ebenso (Abschnitt 9: kein Überspringen).
+- Die Freigabe eines Escrows wird historisch zum wurzelsignierten `issued-at` des Escrows bewertet.
+- Die Sequenz einer Autorisierung liegt im Lease des gewählten Kopfes; eine **frische** Annahme
+  verlangt zusätzlich, dass jeder Signierer zum aktuellen Kopf noch aktiv ist.
+- Die Totalordnung der Öffnungssignaturen ist streng aufsteigend nach Zertifikatshash ohne Duplikat.
 
 ## 2. Der korrigierte Satz zur Root-Zeremonie (Entscheidung 1)
 
@@ -175,9 +198,9 @@ Kettenauflösung, kein `VerificationContext`, kein Katalog. Zusätzlich MUSS gel
   `reader-subject-id` feldgleich sind.
 - Das Reader-Zertifikat ist das exakte, bereits Root/Admin-autorisierte, Registry-aktivierte
   Zertifikat mit X25519- und Ed25519-Public-Key.
-- Das Recovery-Zertifikat ist zum Enrollment aktiv, von der Art `RecoveryRecipient`, trägt einen
-  X25519-KEM-Public-Key, dessen kanonischer Abdruck dem Corefeld gleicht, und hat die bestehende
-  Recovery-Recipient-Capability.
+- Das Recovery-Zertifikat ist zum Enrollment aktiv, von der Art `RecoveryRecipient` und trägt einen
+  X25519-KEM-Public-Key, dessen kanonischer Abdruck dem Corefeld gleicht. (Eine eigene
+  Recovery-Recipient-Capability gibt es in der Capability-Allowlist nicht; die Art ist die Bindung.)
 - **Enrollment-Bindung (MUSS):** `enrollment-registry-version`, `enrollment-registry-head-hash`
   und `enrollment-sequence` sind gleich dem Registry-Zustand, in dem das genannte
   Reader-Zertifikat aktiv wurde. Eine selbst gewählte Zahl in der AAD verhindert kein
@@ -190,6 +213,12 @@ Kettenauflösung, kein `VerificationContext`, kein Katalog. Zusätzlich MUSS gel
   gültiges Escrow. Ein exakt byte-gleiches Objekt ist idempotent. Ein Ersatz nach erneutem
   Enrollment ist ein eigener, benannter Vorgang mit eigener Freigabe; er schreibt das alte Objekt
   nie um (append-only).
+- **Gültigkeit nach Widerruf (MUSS, U2):** „gültig" heißt in den beiden vorigen Regeln: vollständig
+  geprüft und mit einem Reader-Zertifikat, das im gewählten Kopf nicht widerrufen ist. Ein Escrow
+  zu einem widerrufenen Reader-Zertifikat zählt nicht zur Eindeutigkeit und ist nicht zu öffnen.
+  Der Ersatz aus der vorigen Regel ist damit: Widerruf des alten Reader-Zertifikats (ein bestehender
+  Registry-Vorgang mit eigener Admin-Autorisierung), danach eine normale Publikation mit eigener
+  `readerKeyEscrowApproval`.
 
 **`readerKeyEscrowApproval`** — genau eine Signatur des benannten aktiven
 `OrganizationAdmin`-Zertifikats mit `organizationAdminApprove`, gepaart mit der benannten aktiven
@@ -213,7 +242,9 @@ wird.
 Alle drei Familien sind vom Registrierungsabschluss ausgenommen
 (`crates/ea-trust/src/admission.rs:230-240`, künftig fünf statt zwei Arme mit
 `TrustError::ActionMismatch`), sind kein zulässiges `target-trust-subtype` und tragen keinen Arm
-in `registry-change-v1`. `organization_of` im Server MUSS alle drei kennen
+in `registry-change-v1`. Angenommen werden sie über einen **eigenen** Prüfeinstieg des Trust-Kerns,
+den der Server je Subtyp aufruft (U1); dieser Einstieg prüft dieselben Regeln wie die
+Bestandsprüfung. `organization_of` im Server MUSS alle drei kennen
 (`crates/ea-sync-server/src/trust.rs:416-439`); heute antwortet es für unbekannte Subtypen `None`
 und würde ein Escrow ohne Organisationsprüfung indizieren.
 
@@ -279,6 +310,12 @@ Reihenfolge, als Ergänzung von `WEBREADER` §6.6 Schritt 5:
 4. Der Administrator signiert die `readerKeyEscrowApproval` über genau diesen Corehash.
 5. Root signiert die Escrow-Nutzlast, die den Objekthash der Freigabe nennt.
 
+**Übergabe (U3).** Der Browser übergibt Core, Encapsulated Key und Chiffrat als Datei, die die
+native Administration aus ihrem Inbox-Verzeichnis liest — nach dem Muster der
+Registrierungsanträge. Die Datei trägt kein Geheimnis, das nicht ohnehin im Escrow steht; ihre
+Echtheit kommt aus der Gegenprobe gegen das geprüfte Reader-Zertifikat und aus Freigabe und
+Root-Signatur, nicht aus dem Transportweg.
+
 Die Publikation verbraucht `authorization-id` und `nonce` der Freigabe in einem verschlüsselten
 append-only Repository, atomar mit ihrem signierten Audit und den vorbereiteten exakten
 Escrow-Bytes, bevor das Ergebnis der Root-Zeremonie zurückkehrt. Ein exakter Wiedereinspielversuch
@@ -288,7 +325,10 @@ Widersprüchliches Material zu derselben Autorisierung scheitert.
 **Cutover-Vorbedingung (MUSS, Entscheidung 9):** Vor der ersten Escrow-Publikation einer
 Organisation MUSS eine aktive `webBundleRelease` eines v1.1-fähigen Bundles gelten, deren
 `effective-from-registry-version` nicht größer ist als die Registry-Version der Publikation. Die
-Zeremonie hält diese Vorbedingung im Audit fest. Der Mechanismus liegt fertig da
+Zeremonie hält diese Vorbedingung im Audit fest (Feld `bundle-release-object-hash`, Abschnitt 8).
+„v1.1-fähig" heißt: `bundle-version` ist nicht kleiner als die gepinnte Mindestversion, die die
+drei Familien trägt (U4). Die Freigabe erzeugt eine minimale native Root-Zeremonie; der Server nimmt
+sie über den Weg der direkten Familien an. Die Prüfhälfte liegt fertig da
 (`schemas/archive/v1/trust.cddl:200-205`, `crates/ea-reader/src/bundle_release.rs`,
 `WEBREADER` §4.2); ohne ihn ist das erste Escrow ein Verfügbarkeitskliff für jeden älteren
 Verifizierer, der am gesamten Trust-Store scheitert.
@@ -308,7 +348,9 @@ Voraussetzung ist der Verlust **aller** Authenticators eines Readers (`WEBREADER
    mit einem signierten lokalen Audit, **bevor** der private Provider angesprochen wird.
 5. Der Recovery-Schlüssel entkapselt das Escrow. Der Dienst prüft den entschlüsselten X25519-
    Schlüssel gegen das Reader-Zertifikat des Escrows und versiegelt ihn unmittelbar per HPKE an
-   den Ziel-Transport-Key. Der einzige Rückgabewert ist der verschlüsselte Umschlag.
+   den Ziel-Transport-Key. Der einzige Rückgabewert ist der verschlüsselte Umschlag. Der
+   Transport-Public-Key geht als Datei über die Admin-Inbox hinein, der Umschlag samt öffentlicher
+   Bindung als Datei zurück (U3); der Browser importiert ihn.
 6. Der Browser öffnet die Antwort nur mit seinem lebenden privaten Transport-Schlüssel, prüft
    jedes AAD-Feld und den wiederhergestellten KEM-Fingerprint, erzeugt einen **neuen
    Ed25519-Schlüssel** und einen neuen Vault mit zwei bestätigten unabhängigen Authenticators.
@@ -365,7 +407,8 @@ local-audit-action-v1 = 0..14          ; 13 Publikation, 14 Öffnung
 reader-key-escrow-context-v1 = [
   escrow-object-hash: bstr .size 32,
   authorization-object-hash: bstr .size 32,
-  target-transport-key-thumbprint: (bstr .size 32) / null
+  target-transport-key-thumbprint: (bstr .size 32) / null,
+  bundle-release-object-hash: (bstr .size 32) / null
 ]
 reader-key-escrow-audit-context-v1 = [9, reader-key-escrow-context-v1]
 
@@ -374,7 +417,9 @@ reader-key-escrow-audit-context-v1 = [9, reader-key-escrow-context-v1]
 ;   local-audit-event-core-for-v1<14, reader-key-escrow-audit-context-v1>
 ```
 
-Aktion 13 trägt bei `target-transport-key-thumbprint` `null`; Aktion 14 trägt den Abdruck. Der
+Aktion 13 trägt bei `target-transport-key-thumbprint` `null` und bei `bundle-release-object-hash`
+den Objekthash der aktiven `webBundleRelease`, die die Cutover-Vorbedingung erfüllt (Abschnitt 5,
+U4); Aktion 14 trägt den Abdruck und bei `bundle-release-object-hash` `null`. Der
 Kontext trägt ausschließlich Hashes — kein PIN, kein Pfad, kein Klartext, kein Schlüssellabel.
 
 **Ergebnis und Verfall (Entscheidung 6).** Ein dauerhaftes verschlüsseltes Ergebnis darf durch
