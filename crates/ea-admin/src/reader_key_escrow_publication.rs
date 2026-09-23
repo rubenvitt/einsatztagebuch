@@ -510,7 +510,7 @@ fn single_package(inbox: &Path) -> Result<Vec<u8>, ReaderKeyEscrowError> {
     Ok(package.exact_bytes)
 }
 
-fn trust_digest_signer(
+pub(crate) fn trust_digest_signer(
     runtime: &OperatorRuntime,
     slot: NativeSigningSlot,
 ) -> impl Fn(CertificateHash, Hash32) -> Result<Vec<u8>, ReaderKeyEscrowError> + '_ {
