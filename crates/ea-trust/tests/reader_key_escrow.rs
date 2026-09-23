@@ -1138,3 +1138,321 @@ fn an_approval_verified_against_an_older_head_carries_no_intent() {
         "EA-TRUST-ACTION-MISMATCH"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bestand: Eindeutigkeit, Widerruf, Ersatz (Entscheidungen 3a/5, Ruling F4)
+// ---------------------------------------------------------------------------
+
+use escrow_support::{SECOND_READER_KEM_SEED, push_reader, push_revocation};
+
+/// Eine Linie mit ZWEI aktiven Readern.
+fn two_reader_line() -> (EscrowLine, Enrollment) {
+    let mut escrow = escrow_line(EscrowLineOptions::default());
+    let second = push_reader(&mut escrow.line, 0x82, SECOND_READER_KEM_SEED);
+    (escrow, second)
+}
+
+/// Pflichtzeuge: ein zweites Escrow zu derselben Subject-ID mit anderem
+/// Reader-Zertifikat. Beide Objekte sind je für sich voll gültig.
+#[test]
+fn second_escrow_for_the_same_subject_with_another_certificate_is_a_conflict() {
+    let (mut escrow, second) = two_reader_line();
+    let first_core = reader_core(&escrow);
+    publish(&mut escrow, &first_core, 0xc1);
+    let mut control = EscrowLine {
+        line: escrow.line.clone(),
+        recovery: escrow.recovery,
+        approvers: escrow.approvers.clone(),
+        reader: escrow.reader,
+        decoy: None,
+    };
+
+    let same_subject = escrow_core(
+        &escrow,
+        &second,
+        SECOND_READER_KEM_SEED,
+        reader_subject(),
+        ESCROW_ISSUED_AT,
+    );
+    publish(&mut escrow, &same_subject, 0xc2);
+    assert_eq!(
+        set_code(escrows_at_tip(&escrow)),
+        "EA-TRUST-ESCROW-CONFLICT"
+    );
+
+    // Positivkontrolle: dasselbe zweite Escrow unter einem anderen Subjekt.
+    let other_subject = escrow_core(
+        &control,
+        &second,
+        SECOND_READER_KEM_SEED,
+        subject(0xc9),
+        ESCROW_ISSUED_AT,
+    );
+    publish(&mut control, &other_subject, 0xc2);
+    assert_eq!(escrows_at_tip(&control).unwrap().len(), 2);
+}
+
+/// Pflichtzeuge: ein zweites Escrow zu demselben Reader-Zertifikat — mit
+/// anderer Subject-ID und, als Zweitescrow, mit derselben in anderen Bytes.
+#[test]
+fn second_escrow_for_the_same_certificate_is_a_conflict() {
+    for (label, second_subject, second_issued_at) in [
+        ("another subject", subject(0xc3), ESCROW_ISSUED_AT),
+        (
+            "same subject, other bytes",
+            reader_subject(),
+            ESCROW_ISSUED_AT + 50,
+        ),
+    ] {
+        let mut escrow = escrow_line(EscrowLineOptions::default());
+        let first = reader_core(&escrow);
+        publish(&mut escrow, &first, 0xc4);
+        let second = escrow_core(
+            &escrow,
+            &escrow.reader,
+            READER_KEM_SEED,
+            second_subject,
+            second_issued_at,
+        );
+        publish(&mut escrow, &second, 0xc5);
+        assert_eq!(
+            set_code(escrows_at_tip(&escrow)),
+            "EA-TRUST-ESCROW-CONFLICT",
+            "{label}"
+        );
+    }
+}
+
+/// F4: ein Widerspruch lässt den GANZEN Bestand scheitern, auch wenn ein
+/// drittes, unbeteiligtes Escrow gültig ist.
+#[test]
+fn two_contradicting_valid_escrows_fail_the_whole_set() {
+    let (mut escrow, second) = two_reader_line();
+    let third = push_reader(&mut escrow.line, 0x83, [0xb5; 32]);
+    let unrelated = reader_core(&escrow);
+    publish(&mut escrow, &unrelated, 0xc6);
+    for (enrollment, kem, id) in [
+        (second, SECOND_READER_KEM_SEED, 0xc7),
+        (third, [0xb5; 32], 0xc8),
+    ] {
+        let core = escrow_core(&escrow, &enrollment, kem, subject(0xca), ESCROW_ISSUED_AT);
+        publish(&mut escrow, &core, id);
+    }
+    assert_eq!(
+        set_code(escrows_at_tip(&escrow)),
+        "EA-TRUST-ESCROW-CONFLICT"
+    );
+}
+
+/// F4: ist das Reader-Zertifikat im gewählten Kopf widerrufen, ist das
+/// Escrow voll geprüft, zählt aber nicht zur Eindeutigkeit.
+#[test]
+fn escrow_of_a_revoked_reader_is_revoked_standing_and_not_counted() {
+    let mut escrow = escrow_line(EscrowLineOptions::default());
+    let core = reader_core(&escrow);
+    let escrow_hash = publish(&mut escrow, &core, 0xcb);
+    push_revocation(&mut escrow.line, escrow.reader.certificate);
+    let set = escrows_at_tip(&escrow).unwrap();
+    assert_eq!(
+        set.get(escrow_hash).unwrap().standing(),
+        ReaderKeyEscrowStanding::ReaderRevoked
+    );
+    assert!(
+        set.valid_for_reader_certificate(escrow.reader.certificate)
+            .is_none()
+    );
+    assert!(set.valid_for_subject(reader_subject()).is_none());
+}
+
+/// F4/E: Ersatz = altes Zertifikat widerrufen, neues aktivieren, normale
+/// Publikation mit EIGENER Freigabe. Das alte Objekt bleibt unverändert.
+#[test]
+fn replacement_after_revocation_with_its_own_approval_is_valid() {
+    let mut escrow = escrow_line(EscrowLineOptions::default());
+    let old_core = reader_core(&escrow);
+    let old_hash = publish(&mut escrow, &old_core, 0xcc);
+    let before_revocation = *escrow.line.heads().last().unwrap();
+    push_revocation(&mut escrow.line, escrow.reader.certificate);
+    let replacement_reader = push_reader(&mut escrow.line, 0x84, SECOND_READER_KEM_SEED);
+    let new_core = escrow_core(
+        &escrow,
+        &replacement_reader,
+        SECOND_READER_KEM_SEED,
+        reader_subject(),
+        ESCROW_ISSUED_AT,
+    );
+    let new_hash = publish(&mut escrow, &new_core, 0xcd);
+
+    let set = escrows_at_tip(&escrow).unwrap();
+    assert_eq!(set.len(), 2);
+    assert_eq!(
+        set.get(old_hash).unwrap().standing(),
+        ReaderKeyEscrowStanding::ReaderRevoked
+    );
+    assert_eq!(
+        set.get(new_hash).unwrap().standing(),
+        ReaderKeyEscrowStanding::Valid
+    );
+    assert!(
+        set.valid_for_subject(reader_subject())
+            .unwrap()
+            .object_hash()
+            == new_hash
+    );
+
+    // F4: ein Kopf VOR dem Widerruf sieht das alte Escrow gültig und das
+    // neue noch nicht wirksam — und scheitert nicht.
+    let (trust, head) = select(&escrow.line, before_revocation.effective_from.get());
+    let old_view = escrows_at(&trust, &head).unwrap();
+    assert_eq!(
+        old_view.get(old_hash).unwrap().standing(),
+        ReaderKeyEscrowStanding::Valid
+    );
+    assert_eq!(
+        old_view.get(new_hash).unwrap().standing(),
+        ReaderKeyEscrowStanding::NotYetEffective
+    );
+}
+
+/// Q2: ein Pin jenseits des gewählten Kopfes wird trotzdem VOLL geprüft.
+#[test]
+fn an_escrow_beyond_the_selected_head_is_fully_checked() {
+    let mut escrow = escrow_line(EscrowLineOptions::default());
+    let before = escrow.line.heads()[escrow.line.heads().len() - 2];
+    let core = reader_core(&escrow);
+    let valid_hash = publish(&mut escrow, &core, 0xce);
+    let (trust, head) = select(&escrow.line, before.effective_from.get());
+    assert_eq!(
+        escrows_at(&trust, &head)
+            .unwrap()
+            .get(valid_hash)
+            .unwrap()
+            .standing(),
+        ReaderKeyEscrowStanding::NotYetEffective
+    );
+
+    // Dasselbe, aber mit gefälschter Wurzelsignatur: der Bestand scheitert
+    // auch am alten Kopf.
+    let mut forged_line = escrow_line(EscrowLineOptions::default());
+    let core = reader_core(&forged_line);
+    let approval = approval_core(
+        &forged_line.line,
+        tip_basis(&forged_line),
+        APPROVAL_WINDOW,
+        0xcf,
+    );
+    let (approval_bytes, _) = escrow_bytes(&forged_line, &core, &approval);
+    let forged = signed_reader_key_escrow(
+        &core,
+        ea_crypto::object_hash(&approval_bytes),
+        &FixtureTrustSigner {
+            seed: [0x0a; 32],
+            certificate_hash: CertificateHash::from(forged_line.line.current_root_hash()),
+        },
+    );
+    forged_line.line.add_object(approval_bytes);
+    forged_line.line.add_object(forged);
+    let (trust, head) = select(&forged_line.line, before.effective_from.get());
+    assert_eq!(set_code(escrows_at(&trust, &head)), "EA-TRUST-SIGNATURE");
+}
+
+/// Kein Familienobjekt wird übersprungen: auch eine Freigabe, die kein
+/// Escrow nennt, wird geprüft.
+#[test]
+fn a_forged_orphan_approval_fails_the_set() {
+    let mut escrow = escrow_line(EscrowLineOptions::default());
+    let core = approval_core(&escrow.line, tip_basis(&escrow), APPROVAL_WINDOW, 0xd0);
+    let forged = signed_reader_key_escrow_approval(
+        &core,
+        &FixtureTrustSigner {
+            seed: [0x09; 32],
+            certificate_hash: CertificateHash::from(escrow.line.second_bootstrap_admin_hash()),
+        },
+    );
+    escrow.line.add_object(forged);
+    assert_eq!(set_code(escrows_at_tip(&escrow)), "EA-TRUST-SIGNATURE");
+
+    // Positivkontrolle: eine echte verwaiste Freigabe ist unauffällig.
+    let mut control = escrow_line(EscrowLineOptions::default());
+    let core = approval_core(&control.line, tip_basis(&control), APPROVAL_WINDOW, 0xd0);
+    let approval = signed_approval(&control.line, &core);
+    control.line.add_object(approval);
+    assert!(escrows_at_tip(&control).unwrap().is_empty());
+}
+
+/// Ohne gewählten Kopf (Datei-Modus) gilt das Ende der Katalog-Linie — und es
+/// sieht dasselbe wie der gewählte letzte Kopf.
+#[test]
+fn catalog_line_tip_equals_the_selected_tip() {
+    let mut escrow = escrow_line(EscrowLineOptions::default());
+    let core = reader_core(&escrow);
+    let escrow_hash = publish(&mut escrow, &core, 0xd1);
+    push_revocation(&mut escrow.line, escrow.reader.certificate);
+    let (trust, head) = select(&escrow.line, tip_sequence(&escrow.line));
+    let selected = escrows_at(&trust, &head).unwrap();
+    let tip = verify_reader_key_escrows(&trust, ReaderKeyEscrowHead::CatalogLineTip).unwrap();
+    assert_eq!(selected.len(), tip.len());
+    assert_eq!(
+        tip.get(escrow_hash).unwrap().standing(),
+        selected.get(escrow_hash).unwrap().standing()
+    );
+    assert_eq!(
+        tip.get(escrow_hash).unwrap().standing(),
+        ReaderKeyEscrowStanding::ReaderRevoked
+    );
+}
+
+/// Zeremonie A gegen den Bestand: ein Intent für ein Reader-Zertifikat, das
+/// schon ein anderes gültiges Escrow trägt, scheitert; für ein widerrufenes
+/// Reader-Zertifikat gibt es keinen Intent.
+#[test]
+fn an_intent_respects_uniqueness_and_revocation() {
+    let mut escrow = escrow_line(EscrowLineOptions::default());
+    let existing = reader_core(&escrow);
+    publish(&mut escrow, &existing, 0xd2);
+    let (trust, head) = select(&escrow.line, tip_sequence(&escrow.line));
+    let second = escrow_core(
+        &escrow,
+        &escrow.reader,
+        READER_KEM_SEED,
+        subject(0xd3),
+        ESCROW_ISSUED_AT,
+    );
+    let intent_for = |core: &ReaderKeyEscrowCoreV1,
+                      trust: &VerifiedTrust,
+                      head: &SelectedRegistryHead,
+                      line: &EscrowLine| {
+        let mut fields = approval_core(&line.line, Basis::of_selected(head), APPROVAL_WINDOW, 0xd4);
+        fields.escrow_core_hash = escrow_core_hash(core);
+        fields.reader_certificate_object_hash = core.reader_certificate_object_hash;
+        fields.reader_subject_id = core.reader_subject_id;
+        let approval = verify_reader_key_escrow_approval(
+            trust,
+            head,
+            &signed_approval(&line.line, &fields),
+            millis(1_100),
+        )
+        .unwrap();
+        code(verify_intended_reader_key_escrow(
+            trust,
+            head,
+            &approval,
+            &intended_payload(core, approval.object_hash()),
+        ))
+    };
+    assert_eq!(
+        intent_for(&second, &trust, &head, &escrow),
+        "EA-TRUST-ESCROW-CONFLICT"
+    );
+
+    let mut revoked = escrow_line(EscrowLineOptions::default());
+    push_revocation(&mut revoked.line, revoked.reader.certificate);
+    let (trust, head) = select(&revoked.line, tip_sequence(&revoked.line));
+    let core = reader_core(&revoked);
+    // Die Freigabe selbst scheitert schon daran, dass der Reader zu ihrer
+    // Sequenz nicht mehr aktiv ist — die Enrollment-Regel.
+    assert_eq!(
+        intent_for(&core, &trust, &head, &revoked),
+        "EA-TRUST-ESCROW-ENROLLMENT-MISMATCH"
+    );
+}

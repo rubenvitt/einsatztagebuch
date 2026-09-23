@@ -1373,6 +1373,37 @@ pub(crate) fn replay_to_exact_pin(
     Ok(state)
 }
 
+/// Der Zustand am Ende der EINEN Linie des Katalogs — der letzte Kopf, der
+/// sich von v1 an lückenlos nachspielen lässt. Ohne Registry-Ereignis ist es
+/// der aus dem Anker bewiesene Bootstrap-Stand.
+///
+/// Für Prüfer ohne gewählten Kopf (Datei-Modus): „der letzte bekannte
+/// Stand“. Eine Lücke oder ein Fork lässt die Linie scheitern.
+pub(crate) fn replay_to_line_tip(
+    trust: &VerifiedTrust,
+) -> Result<PreviousHeadState, RegistryError> {
+    let topology = RegistryTopology::build(trust)?;
+    let mut state = trust.previous_head().clone();
+    let mut replay = AdminAuthorizationReplay::default();
+    let mut version = RegistryVersion::new(1);
+    let mut previous = None;
+    while let Some(topology_event) = topology.exact(version, previous)? {
+        let event = load_registry_event(&trust.inner.catalog, topology_event.object_hash)?;
+        verify_and_apply_registry_event(trust, &mut state, &event, &mut replay)?;
+        previous = Some(object_hash_as_hash32(topology_event.object_hash)?);
+        version = RegistryVersion::new(
+            version
+                .get()
+                .checked_add(1)
+                .ok_or(RegistryError::Overflow)?,
+        );
+    }
+    if topology.has_later_than(version) {
+        return Err(RegistryError::Gap);
+    }
+    Ok(state)
+}
+
 fn replay_to_pin(
     trust: &VerifiedTrust,
     topology: &RegistryTopology,
