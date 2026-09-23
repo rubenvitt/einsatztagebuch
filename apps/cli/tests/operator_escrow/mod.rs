@@ -267,6 +267,11 @@ impl EscrowInstallation {
     }
 
     fn pickup(&self, authorization: &Path) -> std::process::Output {
+        self.pickup_marked(authorization, None)
+    }
+
+    /// Eine Abholung mit einem Fixture-Marker für den Laufzeitöffner.
+    fn pickup_marked(&self, authorization: &Path, marker: Option<&str>) -> std::process::Output {
         self.run(
             &[
                 "reader-key-escrow",
@@ -280,7 +285,7 @@ impl EscrowInstallation {
                 "--escrow-outbox",
                 self.outbox.to_str().unwrap(),
             ],
-            None,
+            marker,
         )
     }
 
@@ -857,9 +862,19 @@ fn reader_key_escrow_open_refuses_a_session_expiring_after_consumption() {
 /// Abschlusszeile (Grund 1).
 #[test]
 fn an_expired_result_is_purged_before_a_failing_reauthentication() {
-    let installation = EscrowInstallation::new("escrow-purge", "reader-key-escrow-recovery");
+    expired_result_is_purged_before_reauthentication("escrow-purge-open", 0xf5, false);
+}
+
+/// Dasselbe für die Abholung: auch `pickup` löscht vor der Reauthentifizierung.
+#[test]
+fn an_expired_result_is_purged_before_a_failing_pickup() {
+    expired_result_is_purged_before_reauthentication("escrow-purge-pickup", 0xf6, true);
+}
+
+fn expired_result_is_purged_before_reauthentication(name: &str, id: u8, pickup: bool) {
+    let installation = EscrowInstallation::new(name, "reader-key-escrow-recovery");
     installation.transport(TRANSPORT_SEED);
-    let authorization = installation.authorization(0xf5, TRANSPORT_SEED);
+    let authorization = installation.authorization(id, TRANSPORT_SEED);
     let recovery = installation.software_recovery_key();
 
     // Ein Verbrauch ohne Ergebnis; dann ein Ergebnis dazu, das seit
@@ -886,21 +901,33 @@ fn an_expired_result_is_purged_before_a_failing_reauthentication() {
 
     // Die Reauthentifizierung scheitert (abgelaufene Laufzeit) — das
     // verfallene Ergebnis ist trotzdem weg.
-    let refused = installation.open_marked(&recovery, &authorization, Some("escrow-stale-runtime"));
+    let refused = if pickup {
+        installation.pickup_marked(&authorization, Some("escrow-stale-runtime"))
+    } else {
+        installation.open_marked(&recovery, &authorization, Some("escrow-stale-runtime"))
+    };
     assert_eq!(
         refused.status.code(),
         Some(12),
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("EA-ESCROW-OPERATOR-UNAUTHORIZED"));
-    assert!(
-        installation
-            .audit_rows()
-            .iter()
-            .any(|row| matches!(row.action(), LocalAuditActionV1::SessionExpired(_))),
-        "the reauthentication failed"
-    );
+    if pickup {
+        // Die Abholung endet schon am gelöschten Ergebnis, vor der
+        // Reauthentifizierung; ohne den Verfall beim Start läge es noch da.
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("EA-ESCROW-RESULT-EXPIRED"));
+    } else {
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("EA-ESCROW-OPERATOR-UNAUTHORIZED")
+        );
+        assert!(
+            installation
+                .audit_rows()
+                .iter()
+                .any(|row| matches!(row.action(), LocalAuditActionV1::SessionExpired(_))),
+            "the reauthentication failed"
+        );
+    }
     assert_eq!(installation.count("reader_key_escrow_result"), 0);
     let closure = installation
         .database()
