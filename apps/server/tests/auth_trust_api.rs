@@ -2012,3 +2012,65 @@ async fn a_foreign_organization_release_is_refused_before_validation() {
 
     database.cleanup().await;
 }
+
+/// review-d P3-1: die Cutover-Sperre gilt für das Escrow auch zum AKTUELLEN
+/// Kopf, nicht nur zur Registry-Version seiner Freigabe.
+///
+/// Die Freigabe wird bei V angenommen, solange die v1.1-Freigabe wirkt. Dann
+/// rückt der Kopf per Registry-Ereignis auf V+1, und die Wurzel widerruft die
+/// Bundle-Freigabe ab V+1. Historisch (bei V) wäre die Sperre offen; zum Kopf
+/// ist sie zu. Ohne den Schritt über V+1 fiele schon die historische Prüfung,
+/// und der Zeuge bewiese die Kopfprüfung nicht.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bundle_revocation_after_the_approval_holds_the_escrow_at_the_current_head() {
+    let database = common::fresh_database().await;
+    let ready = escrow_server(&database).await;
+    let release = trust_closure::web_bundle_release(
+        &ready.closure,
+        ea_trust::MIN_ESCROW_BUNDLE_VERSION,
+        1,
+        0xd1,
+    );
+    let response = post_escrow_object(&ready, &release, 0x30).await;
+    assert_eq!(status_and_code(&response), (201, None), "release");
+
+    let core = trust_closure::escrow_core(
+        &ready.closure,
+        trust_closure::ESCROW_READER_SUBJECT,
+        ESCROW_ISSUED_AT,
+    );
+    let approval =
+        trust_closure::escrow_approval_core(&ready.closure, 0xd2, ESCROW_APPROVAL_WINDOW);
+    let (approval_bytes, escrow_bytes) = trust_closure::escrow_objects(&core, &approval);
+    let response = post_escrow_object(&ready, &approval_bytes, 0x31).await;
+    assert_eq!(status_and_code(&response), (201, None), "approval at V");
+
+    // Kopf V -> V+1 über den Endpunkt.
+    for (index, object) in trust_closure::late_reader_transition(&ready.closure)
+        .iter()
+        .enumerate()
+    {
+        let response = post_escrow_object(
+            &ready,
+            &object.bytes,
+            0x32 + u8::try_from(index).expect("four"),
+        )
+        .await;
+        assert_eq!(status_and_code(&response), (201, None), "{}", object.name);
+    }
+    let next = ready.closure.registry_version.get() + 1;
+    let revocation = trust_closure::web_bundle_revocation(&ready.closure, &release, next, 0xd3);
+    let response = post_escrow_object(&ready, &revocation, 0x36).await;
+    assert_eq!(status_and_code(&response), (201, None), "revocation at V+1");
+
+    let response = post_escrow_object(&ready, &escrow_bytes, 0x37).await;
+    assert_eq!(
+        status_and_code(&response),
+        (422, Some("EA-TRUST-EVENT-NOT-VALID-NOW".to_owned())),
+        "the escrow after the revocation"
+    );
+    assert!(!indexed(database.pool(), &escrow_bytes).await);
+    assert!(!stored(ea_crypto::object_hash(&escrow_bytes)).await);
+
+    database.cleanup().await;
+}
