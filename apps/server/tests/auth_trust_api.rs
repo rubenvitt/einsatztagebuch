@@ -1346,3 +1346,257 @@ async fn a_foreign_organization_escrow_family_is_refused_before_validation() {
 
     database.cleanup().await;
 }
+
+/// Eine v1.1-fähige Freigabe des Web-Bundles, direkt im Katalog: bis Scheibe
+/// (f) gibt es keinen Annahmeweg für `webBundleRelease`.
+async fn seed_capable_release(ready: &common::ReadyServer, database: &common::TestDatabase) {
+    let release = trust_closure::web_bundle_release(
+        &ready.closure,
+        ea_trust::MIN_ESCROW_BUNDLE_VERSION,
+        1,
+        0xb1,
+    );
+    common::seed_indexed_trust_object(database.pool(), ready.closure.organization_id, &release)
+        .await;
+}
+
+/// Ob `trust_events` eine Zeile für diese Bytes trägt.
+async fn indexed(pool: &PgPool, bytes: &[u8]) -> bool {
+    sqlx::query("SELECT count(*) AS n FROM trust_events WHERE object_hash = $1")
+        .bind(&ea_crypto::object_hash(bytes).as_bytes()[..])
+        .fetch_one(pool)
+        .await
+        .expect("counting a trust event must succeed")
+        .get::<i64, _>("n")
+        == 1
+}
+
+fn status_and_code(response: &common::HttpResponse) -> (u16, Option<String>) {
+    (response.status, error_code(&response.body))
+}
+
+/// Der positive Weg (Profil §11 „Live-Server-Admission“): hinter einer
+/// aktiven v1.1-fähigen Freigabe nimmt der Server erst die Publikationsfreigabe,
+/// dann das Escrow, dann eine Öffnung mit zwei Approvern an — jedes über
+/// seinen eigenen Einstieg des Trust-Kerns.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_escrow_family_is_admitted_through_its_own_entry() {
+    let database = common::fresh_database().await;
+    let ready = escrow_server(&database).await;
+    seed_capable_release(&ready, &database).await;
+
+    let core = trust_closure::escrow_core(
+        &ready.closure,
+        trust_closure::ESCROW_READER_SUBJECT,
+        ESCROW_ISSUED_AT,
+    );
+    let approval =
+        trust_closure::escrow_approval_core(&ready.closure, 0xa1, ESCROW_APPROVAL_WINDOW);
+    let (approval_bytes, escrow_bytes) = trust_closure::escrow_objects(&core, &approval);
+    let recovery_bytes = trust_closure::escrow_recovery_authorization(
+        &ready.closure,
+        &escrow_bytes,
+        &core,
+        0xa2,
+        ESCROW_RECOVERY_WINDOW,
+        &[0, 1],
+    );
+
+    for (marker, (name, bytes)) in [
+        ("readerKeyEscrowApproval", &approval_bytes),
+        ("readerKeyEscrow", &escrow_bytes),
+        ("readerKeyEscrowRecoveryAuthorization", &recovery_bytes),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response =
+            post_escrow_object(&ready, bytes, u8::try_from(marker).expect("three cases")).await;
+        assert_eq!(status_and_code(&response), (201, None), "{name}");
+        assert!(indexed(database.pool(), bytes).await, "{name} is indexed");
+        assert!(
+            stored(ea_crypto::object_hash(bytes)).await,
+            "{name} is stored"
+        );
+    }
+
+    // Eine byte-gleiche Wiederholung ist idempotent.
+    let replay = post_escrow_object(&ready, &escrow_bytes, 0x10).await;
+    assert_eq!(status_and_code(&replay), (201, None), "exact replay");
+
+    database.cleanup().await;
+}
+
+/// Die Cutover-Vorbedingung (Profil §5, §11 „Publikation ohne aktive
+/// v1.1-webBundleRelease“): ohne Freigabe, mit einer nicht v1.1-fähigen und
+/// für ein Escrow, dessen Freigabe am Annahmeweg vorbei im Katalog liegt,
+/// bleibt die Annahme zu — 422 NOT-VALID-NOW, keine Zeile.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_escrow_gate_stays_shut_without_a_capable_release() {
+    let database = common::fresh_database().await;
+    let ready = escrow_server(&database).await;
+    let core = trust_closure::escrow_core(
+        &ready.closure,
+        trust_closure::ESCROW_READER_SUBJECT,
+        ESCROW_ISSUED_AT,
+    );
+    let approval =
+        trust_closure::escrow_approval_core(&ready.closure, 0xa3, ESCROW_APPROVAL_WINDOW);
+    let (approval_bytes, escrow_bytes) = trust_closure::escrow_objects(&core, &approval);
+
+    // 1. Gar keine Freigabe.
+    let response = post_escrow_object(&ready, &approval_bytes, 0).await;
+    assert_eq!(
+        status_and_code(&response),
+        (422, Some("EA-TRUST-EVENT-NOT-VALID-NOW".to_owned())),
+        "no release"
+    );
+    assert!(!indexed(database.pool(), &approval_bytes).await);
+
+    // 2. Eine aktive Freigabe der eingefrorenen, nicht v1.1-fähigen Fassung.
+    let old = trust_closure::web_bundle_release(&ready.closure, "2026.3.1", 1, 0xb2);
+    common::seed_indexed_trust_object(database.pool(), ready.closure.organization_id, &old).await;
+    let response = post_escrow_object(&ready, &approval_bytes, 1).await;
+    assert_eq!(
+        status_and_code(&response),
+        (422, Some("EA-TRUST-EVENT-NOT-VALID-NOW".to_owned())),
+        "an old bundle version"
+    );
+    assert!(!indexed(database.pool(), &approval_bytes).await);
+
+    // 3. Das Escrow selbst ist ebenfalls gesperrt, auch wenn seine Freigabe
+    //    (am Annahmeweg vorbei) im Katalog liegt.
+    common::seed_indexed_trust_object(
+        database.pool(),
+        ready.closure.organization_id,
+        &approval_bytes,
+    )
+    .await;
+    let response = post_escrow_object(&ready, &escrow_bytes, 2).await;
+    assert_eq!(
+        status_and_code(&response),
+        (422, Some("EA-TRUST-EVENT-NOT-VALID-NOW".to_owned())),
+        "the escrow behind an old bundle version"
+    );
+    assert!(!indexed(database.pool(), &escrow_bytes).await);
+    assert!(!stored(ea_crypto::object_hash(&escrow_bytes)).await);
+
+    database.cleanup().await;
+}
+
+/// Review b, P3-2: die Freigabe wird einzeln und VOR ihrem Escrow angenommen,
+/// nie im selben Zug. Ein Escrow ohne angenommene Freigabe ist ungültig.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_escrow_before_its_approval_is_refused() {
+    let database = common::fresh_database().await;
+    let ready = escrow_server(&database).await;
+    seed_capable_release(&ready, &database).await;
+    let core = trust_closure::escrow_core(
+        &ready.closure,
+        trust_closure::ESCROW_READER_SUBJECT,
+        ESCROW_ISSUED_AT,
+    );
+    let approval =
+        trust_closure::escrow_approval_core(&ready.closure, 0xa4, ESCROW_APPROVAL_WINDOW);
+    let (approval_bytes, escrow_bytes) = trust_closure::escrow_objects(&core, &approval);
+
+    let early = post_escrow_object(&ready, &escrow_bytes, 0).await;
+    assert_eq!(
+        status_and_code(&early),
+        (422, Some("EA-TRUST-EVENT-INVALID".to_owned())),
+        "an escrow before its approval"
+    );
+    assert!(!indexed(database.pool(), &escrow_bytes).await);
+    assert!(!stored(ea_crypto::object_hash(&escrow_bytes)).await);
+
+    let approval_response = post_escrow_object(&ready, &approval_bytes, 1).await;
+    assert_eq!(status_and_code(&approval_response), (201, None));
+    let late = post_escrow_object(&ready, &escrow_bytes, 2).await;
+    assert_eq!(status_and_code(&late), (201, None), "after its approval");
+
+    database.cleanup().await;
+}
+
+/// Profil §11: abweichende Enrollment-Version, Freigabe genau auf dem
+/// Randwert `expiresAt` und einen Tick danach, Öffnung mit nur einem Approver.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_escrow_family_negatives_leave_no_row() {
+    let database = common::fresh_database().await;
+    let ready = escrow_server(&database).await;
+    seed_capable_release(&ready, &database).await;
+    let now = common::READ_SERVER_NOW_MILLIS;
+
+    // Genau auf dem Randwert: abgelaufen ist erst `now > expiresAt`.
+    let on_edge = trust_closure::escrow_approval_core(&ready.closure, 0xa5, (now - 300, now));
+    let edge_core = trust_closure::escrow_core(&ready.closure, [0x5c; 16], now - 1);
+    let (edge_approval, _) = trust_closure::escrow_objects(&edge_core, &on_edge);
+    let response = post_escrow_object(&ready, &edge_approval, 0).await;
+    assert_eq!(status_and_code(&response), (201, None), "expiresAt == now");
+
+    // Einen Tick später.
+    let past = trust_closure::escrow_approval_core(&ready.closure, 0xa6, (now - 301, now - 1));
+    let past_core = trust_closure::escrow_core(&ready.closure, [0x5d; 16], now - 2);
+    let (past_approval, _) = trust_closure::escrow_objects(&past_core, &past);
+    let response = post_escrow_object(&ready, &past_approval, 1).await;
+    assert_eq!(
+        status_and_code(&response),
+        (422, Some("EA-TRUST-EVENT-NOT-VALID-NOW".to_owned())),
+        "expiresAt + 1 == now"
+    );
+    assert!(!indexed(database.pool(), &past_approval).await);
+
+    // Abweichende Enrollment-Version: die Freigabe bindet genau diesen Core
+    // und wird angenommen, das Escrow nicht.
+    let mut drifted = trust_closure::escrow_core(
+        &ready.closure,
+        trust_closure::ESCROW_READER_SUBJECT,
+        ESCROW_ISSUED_AT,
+    );
+    drifted.enrollment_registry_version =
+        RegistryVersion::new(drifted.enrollment_registry_version.get() - 1);
+    let approval =
+        trust_closure::escrow_approval_core(&ready.closure, 0xa7, ESCROW_APPROVAL_WINDOW);
+    let (drift_approval, drift_escrow) = trust_closure::escrow_objects(&drifted, &approval);
+    let response = post_escrow_object(&ready, &drift_approval, 2).await;
+    assert_eq!(status_and_code(&response), (201, None), "its approval");
+    let response = post_escrow_object(&ready, &drift_escrow, 3).await;
+    assert_eq!(
+        status_and_code(&response),
+        (422, Some("EA-TRUST-EVENT-INVALID".to_owned())),
+        "a deviating enrollment version"
+    );
+    assert!(!indexed(database.pool(), &drift_escrow).await);
+
+    // Eine Öffnung mit einem einzigen Approver über ein gültiges Escrow.
+    let core = trust_closure::escrow_core(&ready.closure, [0x5e; 16], ESCROW_ISSUED_AT);
+    let approval =
+        trust_closure::escrow_approval_core(&ready.closure, 0xa8, ESCROW_APPROVAL_WINDOW);
+    let (approval_bytes, escrow_bytes) = trust_closure::escrow_objects(&core, &approval);
+    for (marker, bytes) in [(4, &approval_bytes), (5, &escrow_bytes)] {
+        let response = post_escrow_object(&ready, bytes, marker).await;
+        assert_eq!(
+            status_and_code(&response),
+            (201, None),
+            "the escrow to open"
+        );
+    }
+    let lonely = trust_closure::escrow_recovery_authorization(
+        &ready.closure,
+        &escrow_bytes,
+        &core,
+        0xa9,
+        ESCROW_RECOVERY_WINDOW,
+        // Das Format verlangt schon zwei Signaturen; ein Approver, der
+        // zweimal zeichnet, bleibt eine Person.
+        &[0, 0],
+    );
+    let response = post_escrow_object(&ready, &lonely, 6).await;
+    assert_eq!(
+        status_and_code(&response),
+        (422, Some("EA-TRUST-EVENT-INVALID".to_owned())),
+        "a recovery authorization signed twice by one approver"
+    );
+    assert!(!indexed(database.pool(), &lonely).await);
+
+    database.cleanup().await;
+}
