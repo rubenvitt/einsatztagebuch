@@ -113,7 +113,6 @@ impl RestoredReaderKemV1 {
     }
 
     /// Übergibt das Geheimnis an den neuen Tresor (`ReaderEnrollment`).
-    #[expect(dead_code, reason = "der neue Tresor übernimmt das Geheimnis in E5")]
     pub(crate) fn into_secret(self) -> SecretBytes<32> {
         self.secret
     }
