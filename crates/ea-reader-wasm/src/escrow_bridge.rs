@@ -8,6 +8,10 @@
 //! - `readerKeyEscrowTransportBegin`, `…Open`, `…Abort` (`ReaderKeyEscrow`):
 //!   Zeremonie B mit dem flüchtigen Transport-Schlüssel.
 //!
+//! Unter `ReaderKeyEscrow` steht außerdem `enrollmentBeginRestored` in
+//! [`crate::webauthn`]: es entnimmt den wiederhergestellten KEM aus dieser
+//! Tabelle (review-e F3).
+//!
 //! # Was hier NICHT entschieden wird
 //!
 //! Ziel, Gate, Versiegeln, Bindungsprüfung und Öffnen stehen vollständig in
