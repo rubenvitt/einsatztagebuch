@@ -184,6 +184,24 @@ pub fn verify_reader_key_escrow_recovery_authorization(
     )
 }
 
+/// Dieselbe Regel für die Familien-Admission: die Sequenz liegt nur im
+/// Lease des gewählten Kopfes, wie bei der Aufnahme einer
+/// `grantAuthorization`.
+pub(crate) fn verify_recovery_for_admission(
+    trust: &VerifiedTrust,
+    head: &SelectedRegistryHead,
+    exact_authorization_bytes: &[u8],
+    now: UnixMillis,
+) -> Result<VerifiedReaderKeyEscrowRecoveryAuthorization, TrustError> {
+    verify_against_head(
+        trust,
+        head,
+        exact_authorization_bytes,
+        SequenceRule::Lease,
+        now,
+    )
+}
+
 fn verify_against_head(
     trust: &VerifiedTrust,
     head: &SelectedRegistryHead,

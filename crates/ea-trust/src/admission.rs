@@ -237,7 +237,9 @@ pub fn verify_catalogue_admission(
         // Registry-Wirkung, sind kein zulässiges `target-trust-subtype` und
         // haben ihre eigene Regel im Modul `reader_key_escrow`. Seit der
         // Katalog sie gruppiert, ist dieser Arm zur Laufzeit erreichbar und
-        // lehnt sie hier ausdrücklich ab.
+        // lehnt sie hier ausdrücklich ab (Ruling F1). Ihr Einstieg ist
+        // `verify_reader_key_escrow_family_admission`; ein Aufnehmender
+        // verteilt pro Subtyp dorthin wie beim Registry-Ereignis.
         DecodedTrustPayloadV1::DestructionAuthorization(_)
         | DecodedTrustPayloadV1::DestructionTransition(_)
         | DecodedTrustPayloadV1::DeletionAttestation(_)
