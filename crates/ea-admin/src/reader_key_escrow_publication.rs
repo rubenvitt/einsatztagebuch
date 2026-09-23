@@ -72,7 +72,25 @@ pub const READER_KEY_ESCROW_PACKAGE_WINDOW_MS: i64 = 300_000;
 
 /// Der Cutover-Port: die aktive v1.1-`webBundleRelease`, die die
 /// Vorbedingung erfüllt (Profil §5, U4), als ihr Objekthash.
-pub trait ReaderKeyEscrowCutover {
+///
+/// VERSIEGELT: außerhalb dieser Crate lässt sich kein Port bauen, der die
+/// Sperre öffnet — produktiv gibt es allein [`CutoverPending`], die
+/// Fixture-Variante nur hinter `test-support`. Scheibe (f) setzt hier den
+/// echten Port ein.
+///
+/// ```compile_fail
+/// struct Open;
+/// impl ea_admin::reader_key_escrow_publication::ReaderKeyEscrowCutover for Open {
+///     fn active_v11_bundle_release(
+///         &self,
+///         _trust: &ea_trust::VerifiedTrust,
+///         _head: &ea_trust::SelectedRegistryHead,
+///     ) -> Result<ea_types::ObjectHash, ea_recovery::ReaderKeyEscrowError> {
+///         unimplemented!()
+///     }
+/// }
+/// ```
+pub trait ReaderKeyEscrowCutover: sealed::Sealed {
     /// # Errors
     ///
     /// `EA-ESCROW-CUTOVER-NOT-READY`, solange die Vorbedingung nicht erfüllt
@@ -84,9 +102,16 @@ pub trait ReaderKeyEscrowCutover {
     ) -> Result<ObjectHash, ReaderKeyEscrowError>;
 }
 
+mod sealed {
+    /// Nur diese Crate implementiert den Cutover-Port.
+    pub trait Sealed {}
+}
+
 /// Der produktive Port bis Scheibe (f): die Vorbedingung gilt nie als
 /// erfüllt.
 pub struct CutoverPending;
+
+impl sealed::Sealed for CutoverPending {}
 
 impl ReaderKeyEscrowCutover for CutoverPending {
     fn active_v11_bundle_release(
@@ -103,6 +128,9 @@ impl ReaderKeyEscrowCutover for CutoverPending {
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub struct FixtureBundleRelease(pub ObjectHash);
+
+#[cfg(feature = "test-support")]
+impl sealed::Sealed for FixtureBundleRelease {}
 
 #[cfg(feature = "test-support")]
 impl ReaderKeyEscrowCutover for FixtureBundleRelease {
@@ -527,9 +555,12 @@ pub fn publish_reader_key_escrow(
     let audit = runtime.audit_service();
     let admin_sign = trust_digest_signer(runtime, NativeSigningSlot::Admin);
     let root_sign = trust_digest_signer(runtime, NativeSigningSlot::Root);
+    // Vor dem Commit: dieselbe Autorität wie beim Öffnen — Kopf, Version,
+    // vorgeschlagene Sequenz, Konto und persistierte Zeitgrenzen frisch
+    // nachgelesen (Bauplan §5.2 Schritt 7, Vorbild `operator_ceremony`).
     let session_current = || {
         runtime
-            .ensure_current()
+            .ensure_same_action_authority()
             .map_err(|_| ReaderKeyEscrowError::Operator)?;
         if !session
             .proof()
