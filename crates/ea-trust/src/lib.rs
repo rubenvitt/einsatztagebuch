@@ -533,6 +533,7 @@ extern crate self as ea_trust;
 mod admin_authorization;
 mod admission;
 mod anchor;
+mod bundle_release;
 #[cfg_attr(not(test), allow(dead_code))]
 mod certificate;
 // Task 5 is the first production consumer of the private, validated index.
@@ -577,6 +578,9 @@ pub use admission::{bootstrap_active_certificates, verify_catalogue_admission};
 pub use anchor::{
     PreAnchorV1, TrustAnchorV1, VerifiedTrust, decode_pre_anchor, decode_trust_anchor,
     encode_pre_anchor_v1, verify_pre_anchor_bootstrap_objects, verify_trust,
+};
+pub use bundle_release::{
+    BundleActivationDecisionV1, BundleRejectionCodeV1, ReaderBundleError, ReaderBundlePin,
 };
 pub use clock_release::{VerifiedClockRelease, verify_clock_release};
 pub use clock_repair::{ClockRepairRegistryAuthority, verify_clock_repair_authority};
