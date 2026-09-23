@@ -2647,6 +2647,14 @@ enum AuditContextFixture {
         independent_reference: (u8, [u8; 32], i64),
     },
     LegacyClockRelease,
+    /// Kontextarm 9 (DRK-458): Escrow-, Autorisierungs-Objekthash, Transport-
+    /// Abdruck oder `null`, Bundle-Release-Objekthash oder `null`.
+    ReaderKeyEscrow {
+        transport: bool,
+        bundle_release: bool,
+    },
+    /// Kontextarm 9 mit nur drei Feldern — die Form vor dem vierten Feld.
+    ThreeFieldReaderKeyEscrow,
 }
 
 fn audit_fixture(action: u8, context: AuditContextFixture) -> Vec<u8> {
@@ -2734,6 +2742,31 @@ fn audit_fixture(action: u8, context: AuditContextFixture) -> Vec<u8> {
             encoder.i64(900).unwrap();
             encoder.i64(1_200).unwrap();
         }
+        AuditContextFixture::ReaderKeyEscrow {
+            transport,
+            bundle_release,
+        } => {
+            encoder.array(2).unwrap();
+            encoder.u8(9).unwrap();
+            encoder.array(4).unwrap();
+            encoder.bytes(&[4; 32]).unwrap();
+            encoder.bytes(&[5; 32]).unwrap();
+            for present in [transport, bundle_release] {
+                if present {
+                    encoder.bytes(&[8; 32]).unwrap();
+                } else {
+                    encoder.null().unwrap();
+                }
+            }
+        }
+        AuditContextFixture::ThreeFieldReaderKeyEscrow => {
+            encoder.array(2).unwrap();
+            encoder.u8(9).unwrap();
+            encoder.array(3).unwrap();
+            encoder.bytes(&[4; 32]).unwrap();
+            encoder.bytes(&[5; 32]).unwrap();
+            encoder.bytes(&[8; 32]).unwrap();
+        }
         AuditContextFixture::LegacyClockRelease => {
             encoder.array(2).unwrap();
             encoder.u8(2).unwrap();
@@ -2795,7 +2828,7 @@ fn local_audit_cddl_correlates_action_and_context_tag() {
         &audit_fixture(6, AuditContextFixture::LegacyClockRelease)
     ));
     // DRK-282: `sessionExpired` ist Aktion 12, additiv am Ende, mit dem
-    // generischen Kontext — und die Liste bleibt geschlossen: 13 gibt es nicht.
+    // generischen Kontext.
     assert!(validate_cbor(
         "local-audit-event-v1",
         cddl,
@@ -2806,11 +2839,62 @@ fn local_audit_cddl_correlates_action_and_context_tag() {
         cddl,
         &audit_fixture(12, AuditContextFixture::Destruction)
     ));
+    // DRK-458: 13 (Publikation) und 14 (Öffnung) des Reader-Key-Escrows sind
+    // additiv am Ende angehängt und tragen NUR den Kontextarm 9.
+    let publication = AuditContextFixture::ReaderKeyEscrow {
+        transport: false,
+        bundle_release: true,
+    };
+    let opening = AuditContextFixture::ReaderKeyEscrow {
+        transport: true,
+        bundle_release: false,
+    };
+    for (action, context) in [(13, publication), (14, opening)] {
+        assert!(
+            validate_cbor(
+                "local-audit-event-v1",
+                cddl,
+                &audit_fixture(action, context)
+            ),
+            "action {action} with context 9"
+        );
+        for foreign in [
+            AuditContextFixture::Generic,
+            AuditContextFixture::Destruction,
+            AuditContextFixture::ThreeFieldReaderKeyEscrow,
+        ] {
+            assert!(
+                !validate_cbor(
+                    "local-audit-event-v1",
+                    cddl,
+                    &audit_fixture(action, foreign)
+                ),
+                "action {action} with a foreign context"
+            );
+        }
+    }
+    // Kontextarm 9 gehört keiner älteren Aktion.
     assert!(!validate_cbor(
         "local-audit-event-v1",
         cddl,
-        &audit_fixture(13, AuditContextFixture::Generic)
+        &audit_fixture(12, publication)
     ));
+    // Die Nullregel je Aktion (Profil §8) ist STRENGER als die Grammatik: die
+    // CDDL lässt beide Felder `/ null`, erst die Signaturgrenze und der
+    // Decoder weisen die vertauschte Belegung ab (Entscheidung D1).
+    assert!(validate_cbor(
+        "local-audit-event-v1",
+        cddl,
+        &audit_fixture(13, opening)
+    ));
+    // Die Liste bleibt geschlossen: 15 gibt es nicht.
+    for context in [AuditContextFixture::Generic, publication, opening] {
+        assert!(!validate_cbor(
+            "local-audit-event-v1",
+            cddl,
+            &audit_fixture(15, context)
+        ));
+    }
 }
 
 /// Eine eingefrorene Datei der Familie `local-audit/v1`.
