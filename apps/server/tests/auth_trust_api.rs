@@ -1844,3 +1844,68 @@ async fn the_escrow_index_keeps_one_escrow_per_reader_certificate() {
 
     database.cleanup().await;
 }
+
+/// Profil §11 „Nebenläufigkeit“: zwei Escrows zum selben Reader-Zertifikat,
+/// jedes mit eigener angenommener Freigabe, gleichzeitig über den Endpunkt.
+/// Genau eines wird angenommen; das andere endet mit 409 oder mit einem
+/// wiederholbaren 503, dessen Wiederholung 409 ergibt. Genau eine Indexzeile.
+#[tokio::test(flavor = "multi_thread")]
+async fn exactly_one_of_two_concurrent_escrows_is_admitted() {
+    let database = common::fresh_database().await;
+    let ready = escrow_server(&database).await;
+    seed_capable_release(&ready, &database).await;
+    let (approval_a, escrow_a) =
+        rival_escrow(&ready.closure, 0xe1, trust_closure::ESCROW_READER_SUBJECT);
+    let (approval_b, escrow_b) =
+        rival_escrow(&ready.closure, 0xe2, trust_closure::ESCROW_READER_SUBJECT);
+    for (marker, approval) in [(0, &approval_a), (1, &approval_b)] {
+        let response = post_escrow_object(&ready, approval, marker).await;
+        assert_eq!(status_and_code(&response), (201, None), "approval {marker}");
+    }
+
+    let (first, second) = tokio::join!(
+        post_escrow_object(&ready, &escrow_a, 2),
+        post_escrow_object(&ready, &escrow_b, 3),
+    );
+    let outcomes = [
+        (status_and_code(&first), &escrow_a),
+        (status_and_code(&second), &escrow_b),
+    ];
+    let admitted: Vec<_> = outcomes
+        .iter()
+        .filter(|((status, _), _)| *status == 201)
+        .collect();
+    assert_eq!(
+        admitted.len(),
+        1,
+        "exactly one of two concurrent escrows is admitted: {:?}",
+        outcomes
+            .iter()
+            .map(|(outcome, _)| outcome)
+            .collect::<Vec<_>>()
+    );
+    let (loser_outcome, loser) = outcomes
+        .iter()
+        .find(|((status, _), _)| *status != 201)
+        .expect("one loser");
+    let final_outcome = match loser_outcome {
+        (409, Some(code)) if code == "EA-TRUST-EVENT-CONFLICT" => loser_outcome.clone(),
+        (503, Some(code)) if code == "EA-TRUST-STATE-CONFLICT" => {
+            status_and_code(&post_escrow_object(&ready, loser, 4).await)
+        }
+        other => panic!("the loser must be a conflict or a retryable race: {other:?}"),
+    };
+    assert_eq!(
+        final_outcome,
+        (409, Some("EA-TRUST-EVENT-CONFLICT".to_owned())),
+        "the loser ends in a conflict against the admitted escrow"
+    );
+    assert!(!indexed(database.pool(), loser).await);
+    let escrows: i64 = sqlx::query_scalar("SELECT count(*) FROM reader_key_escrows")
+        .fetch_one(database.pool())
+        .await
+        .expect("count");
+    assert_eq!(escrows, 1, "exactly one escrow row");
+
+    database.cleanup().await;
+}
