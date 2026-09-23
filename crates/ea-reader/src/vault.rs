@@ -623,13 +623,6 @@ impl UnlockedVault {
     /// Die Rohbytes des privaten KEM — NUR crate-intern, fuer das Versiegeln
     /// des Escrows (Profil §5 Schritt 2). Sie verlassen `ea-reader` nie; die
     /// Bruecke sieht weiterhin nur Kennungen, Abdruecke und Chiffrate.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "der erste Nutzer ist das Escrow-Paket (Scheibe e, E3)"
-        )
-    )]
     pub(crate) const fn kem_secret(&self) -> &SecretBytes<32> {
         &self.kem_secret
     }

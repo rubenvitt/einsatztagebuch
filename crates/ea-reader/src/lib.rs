@@ -264,7 +264,10 @@ pub use grant::{VerifiedEncryptedEntry, VerifiedGrantForRecipient};
 pub use http::ReaderRequestV1;
 pub use key_profile::{ReaderKeyProfile, ReaderKeyProfileError};
 pub use mode::ReaderMode;
-pub use reader_key_escrow::ReaderKeyEscrowError;
+pub use reader_key_escrow::{
+    EscrowSealingKeyMatchV1, ReaderKeyEscrowError, ReaderKeyEscrowPackageFileV1, match_sealing_key,
+    seal_escrow_package, seal_reader_key_escrow_package,
+};
 pub use registration_request::{
     READER_REGISTRATION_FILE_SUFFIX_V1, ReaderRegistrationFileV1, reader_registration_request,
 };
