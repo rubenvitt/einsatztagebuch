@@ -1026,6 +1026,28 @@ impl ReaderKeyEscrowAdmission {
     }
 }
 
+/// Die EINE Zusatzregel der frischen Annahme für Freigabe und Escrow: der
+/// Administrator der Freigabe ist AUCH zur vorgeschlagenen Sequenz des
+/// gewählten Kopfes aktiv — Zertifikat, Bindung und Rolle in einem Aufruf.
+///
+/// Die Freigaberegel misst den Administrator an der `authorization-sequence`
+/// (Lease). Das reicht für die Historie, nicht für eine frische Annahme:
+/// Zertifikat und Bindung tragen ein eigenes `revoked_from_sequence`, und ein
+/// Widerruf im Lease oder in einem späteren Kopf ließe sich sonst mit einer
+/// früheren Sequenz umgehen.
+fn require_approval_admin_active_now(
+    head: &SelectedRegistryHead,
+    approval: &ReaderKeyEscrowApprovalCoreV1,
+) -> Result<(), TrustError> {
+    head.candidate_state()
+        .active_operator_binding(
+            approval.admin_operator_binding_object_hash,
+            head.proposed_sequence(),
+        )
+        .map(|_| ())
+        .ok_or(TrustError::SignerInactive)
+}
+
 /// `true` für die drei Escrow-Familien — der Verteiler des Aufnehmenden.
 #[must_use]
 pub const fn is_reader_key_escrow_family(subtype: TrustSubtypeV1) -> bool {
@@ -1050,12 +1072,22 @@ pub const fn is_reader_key_escrow_family(subtype: TrustSubtypeV1) -> bool {
 /// dann das Escrow, das sie nennt, dann jede Öffnung.
 ///
 /// - Freigabe: ihre Regel mit Kopfbindung, Sequenz im Lease und `now` im
-///   Fenster.
+///   Fenster; dazu ist der Administrator (Zertifikat und Bindung) auch zur
+///   vorgeschlagenen Sequenz des Kopfes aktiv.
 /// - Escrow: der ganze Bestand muss bestehen, und dieses Escrow muss im
 ///   gewählten Kopf gültig sein. Die Freigabe wird NICHT erneut an `now`
 ///   gebunden — zwischen zwei Einreichungen darf ihre Frist ablaufen; die
-///   zeitliche Bindung trägt die wurzelsignierte Zeit des Escrows.
-/// - Öffnung: ihre Regel mit Sequenz im Lease und `now` im Fenster.
+///   zeitliche Bindung trägt die wurzelsignierte Zeit des Escrows. Ihr
+///   Administrator muss aber auch zur vorgeschlagenen Sequenz aktiv sein.
+/// - Öffnung: ihre Regel mit Sequenz im Lease und `now` im Fenster; dazu ist
+///   jeder Approver auch zur vorgeschlagenen Sequenz des Kopfes aktiv.
+///
+/// Die Lease-Regel allein reicht für eine FRISCHE Annahme nicht: ein
+/// Zertifikat oder eine Bindung trägt ein eigenes `revoked_from_sequence`,
+/// und liegt es im Lease, käme eine Autorisierung mit einer früheren Sequenz
+/// desselben Lease durch. Die historische Prüfung des Bestands
+/// ([`verify_reader_key_escrows`]) misst dagegen weiter an der Sequenz der
+/// Autorisierung.
 ///
 /// Aufnahme ist KEIN Verbrauch: der Einmal-Speicher sitzt dort, wo die
 /// Autorisierung wirkt (Zeremonie), nicht beim Katalog.
@@ -1066,7 +1098,10 @@ pub const fn is_reader_key_escrow_family(subtype: TrustSubtypeV1) -> bool {
 /// Katalog liegen, und für ein Escrow, dessen Freigabe fehlt;
 /// [`TrustError::ActionMismatch`] für einen fremden Subtyp und ohne
 /// Registry-Kopf; [`TrustError::EscrowInactive`] für ein Escrow, das im
-/// gewählten Kopf nicht gültig ist; sowie jeden Befund der Familienregel.
+/// gewählten Kopf nicht gültig ist; [`TrustError::SignerInactive`] für eine
+/// Freigabe, ein Escrow oder eine Öffnung, deren Signierer (beim Escrow: der
+/// Administrator seiner Freigabe) zur vorgeschlagenen Sequenz nicht aktiv
+/// ist; sowie jeden Befund der Familienregel.
 pub fn verify_reader_key_escrow_family_admission(
     trust: &VerifiedTrust,
     head: Option<&SelectedRegistryHead>,
@@ -1106,14 +1141,29 @@ pub fn verify_reader_key_escrow_family_admission(
                 SequenceRule::Lease,
                 WindowRule::At(now),
             )?;
+            require_approval_admin_active_now(head, &fields)?;
             Ok(ReaderKeyEscrowAdmission::Approval)
         }
-        DecodedTrustPayloadV1::ReaderKeyEscrow(_) => {
+        DecodedTrustPayloadV1::ReaderKeyEscrow(payload) => {
             let escrows = verify_reader_key_escrows(trust, ReaderKeyEscrowHead::Selected(head))?;
             let escrow = escrows.get(object_hash).ok_or(TrustError::Source)?;
             if escrow.standing() != ReaderKeyEscrowStanding::Valid {
                 return Err(TrustError::EscrowInactive);
             }
+            // Die Freigabe hat der Bestand eben historisch geprüft; frisch
+            // angenommen wird das Escrow nur, solange ihr Administrator
+            // auch jetzt noch aktiv ist (Review b, P3-1).
+            let DecodedTrustPayloadV1::ReaderKeyEscrowApproval(approval) = trust
+                .previous_head()
+                .catalog_object(payload.approval_object_hash())
+                .ok_or(TrustError::Source)?
+                .value()
+                .decoded_payload()
+                .map_err(|_| TrustError::Source)?
+            else {
+                return Err(TrustError::ActionMismatch);
+            };
+            require_approval_admin_active_now(head, &approval)?;
             Ok(ReaderKeyEscrowAdmission::Escrow(escrow.uniqueness_key()))
         }
         DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(_) => {
