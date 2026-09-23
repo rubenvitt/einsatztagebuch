@@ -53,9 +53,9 @@ pub use local_audit::{
     ClockReleaseAuditV1, ClockReleaseContextV1, ClockReleaseJustificationV1, DestructionContextV1,
     ExportContextV1, GenericAuditContextV1, HistoricalRegrantContextV1, IndependentTimeKindV1,
     IndependentTimeReferenceV1, LocalAuditActionV1, LocalAuditEventCoreFieldsV1, LocalAuditEventV1,
-    LocalAuditOutcomeV1, StaleRegistryContextV1, decode_clock_release_audit,
-    decode_local_audit_event, encode_archive_profile_migration_context, encode_local_audit_core,
-    encode_local_audit_event,
+    LocalAuditOutcomeV1, ReaderKeyEscrowContextV1, StaleRegistryContextV1,
+    decode_clock_release_audit, decode_local_audit_event, encode_archive_profile_migration_context,
+    encode_local_audit_core, encode_local_audit_event,
 };
 pub use object::{ExactObjectBytes, FormatError, Parsed, ParsedArchiveObject};
 pub use parser::{

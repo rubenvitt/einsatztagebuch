@@ -128,3 +128,73 @@ fn a_session_expiry_is_booked_as_its_own_failed_action_under_the_frozen_grammar(
         event.exact_bytes()
     );
 }
+
+/// DRK-458, Profil §8: Publikation (13) und Öffnung (14) eines
+/// Reader-Key-Escrows sind klartextfreie Zeilen mit Kontextarm 9 — nur
+/// Hashes, und je Aktion genau die Nullbelegung, die das Profil verlangt.
+#[test]
+fn reader_key_escrow_rows_carry_only_hashes_under_the_frozen_grammar() {
+    let harness = AuditHarness::new();
+    let audit = harness.audit_service();
+    let session = harness.operator_session();
+    let hash = |fill: u8| ObjectHash::try_from([fill; 32].as_slice()).unwrap();
+    let transport = ea_types::KeyThumbprint::try_from([0x7a; 32].as_slice()).unwrap();
+    let cddl = include_str!("../../../schemas/reports/v1/local-audit.cddl")
+        .replace("#6.18(COSE-Sign1)", "COSE-Sign1");
+    for (event, code, outcome) in [
+        (
+            TypedLocalAuditEvent::reader_key_escrow_published(hash(0x71), hash(0x72), hash(0x73)),
+            13,
+            LocalAuditOutcomeV1::Completed,
+        ),
+        (
+            TypedLocalAuditEvent::reader_key_escrow_consumed(hash(0x74), hash(0x75), transport),
+            14,
+            LocalAuditOutcomeV1::Accepted,
+        ),
+        (
+            TypedLocalAuditEvent::reader_key_escrow_delivered(hash(0x74), hash(0x75), transport),
+            14,
+            LocalAuditOutcomeV1::Completed,
+        ),
+        (
+            TypedLocalAuditEvent::reader_key_escrow_failed(hash(0x74), hash(0x75), transport),
+            14,
+            LocalAuditOutcomeV1::Failed,
+        ),
+    ] {
+        let signed = audit
+            .record_signed(AuditActorProof::OperatorSession(&session), event)
+            .unwrap();
+        let decoded = ea_format::decode_local_audit_event(signed.exact_bytes()).unwrap();
+        assert_eq!(decoded.action().code(), code);
+        assert_eq!(decoded.action().context_tag(), 9);
+        assert_eq!(decoded.outcome(), outcome);
+        let (LocalAuditActionV1::ReaderKeyEscrowPublication(context)
+        | LocalAuditActionV1::ReaderKeyEscrowOpening(context)) = decoded.action()
+        else {
+            panic!("a reader key escrow row expected");
+        };
+        if code == 13 {
+            assert!(context.escrow_object_hash() == hash(0x71));
+            assert!(context.authorization_object_hash() == hash(0x72));
+            assert!(context.target_transport_key_thumbprint().is_none());
+            assert!(context.bundle_release_object_hash() == Some(hash(0x73)));
+        } else {
+            assert!(context.escrow_object_hash() == hash(0x74));
+            assert!(context.authorization_object_hash() == hash(0x75));
+            assert!(context.target_transport_key_thumbprint() == Some(transport));
+            assert!(context.bundle_release_object_hash().is_none());
+        }
+        cddl_cat::validate_cbor_bytes("local-audit-event-core-v1", &cddl, decoded.exact_core())
+            .unwrap();
+        assert_eq!(
+            harness
+                .reopen_audit()
+                .event(signed.id())
+                .unwrap()
+                .exact_bytes(),
+            signed.exact_bytes()
+        );
+    }
+}

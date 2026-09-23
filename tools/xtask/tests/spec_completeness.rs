@@ -2910,7 +2910,7 @@ struct LocalAuditVectorFile {
 /// Ohne diese Schranke waeren beide Schleifen unten LEER gruen, sobald das
 /// Verzeichnis fehlt oder ausgeduennt wird — genau der stille Durchlauf, den
 /// `EXPECTED_ENTRY_COUNT` in `conformance_golden_vectors.rs` verhindert.
-const LOCAL_AUDIT_VECTOR_FILE_COUNT: usize = 18;
+const LOCAL_AUDIT_VECTOR_FILE_COUNT: usize = 20;
 
 /// Alle eingefrorenen Dateien der Familie, lexikografisch.
 fn local_audit_vector_files() -> Vec<LocalAuditVectorFile> {
@@ -2945,14 +2945,14 @@ fn local_audit_vector_files() -> Vec<LocalAuditVectorFile> {
     files
 }
 
-/// Die dreizehn Kerne des Kodierers, einer je Aktion.
+/// Die fünfzehn Kerne des Kodierers, einer je Aktion.
 ///
 /// Sie kommen aus den EINGEFRORENEN Bytes und nicht aus einer zweiten,
 /// handgeschriebenen Fixture: `ea_testkit::local_audit_v1_manifest` erzeugt die
 /// Familie mit `encode_local_audit_core`, und
 /// `the_committed_local_audit_family_matches_its_generator` haelt fest, dass die
 /// eingecheckten Bytes genau diese Ausgabe sind. Der Kern wird hier durch
-/// `decode_local_audit_event` gezogen, damit die dreizehn Aktionscodes mitgemessen
+/// `decode_local_audit_event` gezogen, damit die fünfzehn Aktionscodes mitgemessen
 /// werden statt geraten.
 fn local_audit_cores_for_every_action() -> Vec<Vec<u8>> {
     let mut codes = std::collections::BTreeSet::new();
@@ -2972,8 +2972,8 @@ fn local_audit_cores_for_every_action() -> Vec<Vec<u8>> {
     }
     assert_eq!(
         codes,
-        (0..13).collect::<std::collections::BTreeSet<u8>>(),
-        "the accepted vectors must cover every one of the thirteen actions"
+        (0..15).collect::<std::collections::BTreeSet<u8>>(),
+        "the accepted vectors must cover every one of the fifteen actions"
     );
     cores
 }

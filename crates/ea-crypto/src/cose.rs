@@ -4530,8 +4530,10 @@ fn validate_local_audit_core(decoder: &mut Decoder<'_>, length: u64) -> Result<(
     let action = decoder
         .u64()
         .map_err(|_| CryptoError::InvalidProtocolCore)?;
-    // Aktion 12 (`sessionExpired`, DRK-282) ist additiv am Ende angehängt.
-    if action > 12
+    // Aktion 12 (`sessionExpired`, DRK-282) ist additiv am Ende angehängt,
+    // ebenso 13 und 14 (Publikation und Öffnung eines Reader-Key-Escrows,
+    // DRK-458).
+    if action > 14
         || decoder
             .u64()
             .map_err(|_| CryptoError::InvalidProtocolCore)?
@@ -4563,6 +4565,7 @@ fn validate_local_audit_context(
         9 => 6,
         10 => 7,
         11 => 8,
+        13 | 14 => 9,
         _ => return Err(CryptoError::InvalidProtocolCore),
     };
     if decoder.u64().ok() != Some(expected_tag) {
@@ -4593,6 +4596,20 @@ fn validate_local_audit_context(
         6 => validate_context_fields(decoder, 5, &[Field::Bstr32; 5]),
         7 => validate_context_fields(decoder, 2, &[Field::Bstr32; 2]),
         8 => validate_context_fields(decoder, 4, &[Field::Bstr32; 4]),
+        // Die Nullregel je Aktion (Reader-Key-Escrow-Profil §8) ist strenger
+        // als die CDDL, die beide Stellen `/ null` lässt: die Publikation (13)
+        // trägt keinen Transport-Abdruck und den Bundle-Release-Hash, die
+        // Öffnung (14) den Abdruck und keinen Bundle-Release-Hash.
+        9 if action == 13 => validate_context_fields(
+            decoder,
+            4,
+            &[Field::Bstr32, Field::Bstr32, Field::Null, Field::Bstr32],
+        ),
+        9 => validate_context_fields(
+            decoder,
+            4,
+            &[Field::Bstr32, Field::Bstr32, Field::Bstr32, Field::Null],
+        ),
         _ => Err(CryptoError::InvalidProtocolCore),
     }
 }
@@ -4643,6 +4660,7 @@ fn validate_clock_release_context(
 enum Field {
     Bstr32,
     OptionalBstr32,
+    Null,
     Uint,
     Int,
 }
@@ -4661,6 +4679,9 @@ fn validate_context_fields(
         match field {
             Field::Bstr32 => expect_bstr(decoder, 32)?,
             Field::OptionalBstr32 => expect_optional_bstr(decoder, 32)?,
+            Field::Null => decoder
+                .null()
+                .map_err(|_| CryptoError::InvalidProtocolCore)?,
             Field::Uint => {
                 decoder
                     .u64()

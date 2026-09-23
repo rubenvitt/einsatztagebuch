@@ -1010,3 +1010,82 @@ fn named_cose_profile_negatives_all_fail_closed() {
     }
     assert!(parse_cose_sign1(&valid_wire, b"non-empty external aad").is_err());
 }
+
+/// Ein Kern der Aktion `action` mit dem Kontextarm 9 (DRK-458); `transport`
+/// und `bundle_release` belegen die beiden nullbaren Stellen.
+fn reader_key_escrow_local_core(
+    action: u8,
+    context_length: u64,
+    transport: bool,
+    bundle_release: bool,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut encoder = Encoder::new(&mut bytes);
+    encoder
+        .array(12)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<16>(0x00)))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<16>(0x10)))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<16>(0x20)))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<32>(0x30)))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<32>(0x40)))
+        .and_then(|encoder| encoder.u8(action))
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.i64(1_100))
+        .and_then(|encoder| encoder.array(2))
+        .and_then(|encoder| encoder.u8(9))
+        .and_then(|encoder| encoder.array(context_length))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<32>(0x50)))
+        .and_then(|encoder| encoder.bytes(&sequential_bytes::<32>(0x60)))
+        .unwrap();
+    for (index, present) in [transport, bundle_release].into_iter().enumerate() {
+        if u64::try_from(index).unwrap() + 2 >= context_length {
+            break;
+        }
+        if present {
+            encoder.bytes(&sequential_bytes::<32>(0x70)).unwrap();
+        } else {
+            encoder.null().unwrap();
+        }
+    }
+    encoder
+        .bytes(&sequential_bytes::<32>(0xd0))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+/// DRK-458, Profil §8: 13 (Publikation) trägt keinen Transport-Abdruck und
+/// den Bundle-Release-Hash, 14 (Öffnung) den Abdruck und keinen Bundle-Hash.
+/// Die Signaturgrenze erzwingt diese Nullregel je Aktion — strenger als die
+/// CDDL, die beide Stellen `/ null` lässt (Entscheidung D1).
+#[test]
+fn the_reader_key_escrow_audit_context_holds_its_null_rule_per_action() {
+    let accepts =
+        |core: &[u8]| validate_unsigned_protocol_core(ContentType::LocalAuditCbor, core).is_ok();
+    assert!(accepts(&reader_key_escrow_local_core(13, 4, false, true)));
+    assert!(accepts(&reader_key_escrow_local_core(14, 4, true, false)));
+    for (action, transport, bundle_release) in [
+        (13, true, false),
+        (13, true, true),
+        (13, false, false),
+        (14, false, true),
+        (14, true, true),
+        (14, false, false),
+    ] {
+        assert!(
+            !accepts(&reader_key_escrow_local_core(
+                action,
+                4,
+                transport,
+                bundle_release
+            )),
+            "action {action} transport={transport} bundle={bundle_release}"
+        );
+    }
+    // Arität: die Form vor dem vierten Feld ist keine.
+    assert!(!accepts(&reader_key_escrow_local_core(14, 3, true, false)));
+    // Kontextarm 9 gehört keiner älteren Aktion, und die Liste endet bei 14.
+    assert!(!accepts(&reader_key_escrow_local_core(12, 4, false, true)));
+    assert!(!accepts(&reader_key_escrow_local_core(15, 4, true, false)));
+}
