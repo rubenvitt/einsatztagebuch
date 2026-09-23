@@ -250,18 +250,26 @@ pub(crate) fn distribute_trust_object(
             Err(ReaderKeyEscrowError::Output)
         };
     }
-    let partial = directory.join(format!(".{name}.partial"));
-    let _ = fs::remove_file(&partial);
+    // Zufälliger Zwischenname wie in `historical_grant`: ein fester Name ließe
+    // zwei gleichzeitige Verteiler desselben Objekts einander die halb
+    // geschriebene Datei unterschieben.
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).map_err(|_| ReaderKeyEscrowError::Output)?;
+    let partial = directory.join(format!(".{name}.{}.partial", hex::encode(random)));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&partial)
         .map_err(io)?;
-    file.write_all(exact_bytes).map_err(io)?;
-    file.sync_all().map_err(io)?;
-    drop(file);
-    // Ein harter Link legt den Namen atomar und OHNE Überschreiben an.
-    let linked = fs::hard_link(&partial, &target);
+    // Ein harter Link legt den Namen atomar und OHNE Überschreiben an. Der
+    // Zwischenname fällt in jedem Ausgang, auch nach einem Schreibfehler.
+    let linked = file
+        .write_all(exact_bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            fs::hard_link(&partial, &target)
+        });
     let _ = fs::remove_file(&partial);
     match linked {
         Ok(()) => {}
