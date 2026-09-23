@@ -12,6 +12,7 @@ mod import_report;
 mod local_audit;
 mod object;
 mod parser;
+mod reader_key_escrow;
 mod trust_view;
 
 pub use archive_profile::{
@@ -63,5 +64,10 @@ pub use parser::{
     ETB_MAX_RAW_BYTES_V1, ETB_PREFIX_V1, MAX_ARCHIVE_OBJECT_BYTES_V1, ObjectTypeV1,
     decode_exact_object, encode_destroyed_entry_stub, encode_entry_package, encode_evidence,
     encode_grant, encode_receipt, encode_trust,
+};
+pub use reader_key_escrow::{
+    READER_KEY_ESCROW_RESTORE_SUITE_ID, READER_KEY_ESCROW_SUITE_ID, ReaderKeyEscrowApprovalCoreV1,
+    ReaderKeyEscrowCoreV1, ReaderKeyEscrowHpkeContextV1, ReaderKeyEscrowPayloadV1,
+    ReaderKeyEscrowRecoveryAuthorizationCoreV1, ReaderKeyEscrowRestoreContextV1,
 };
 pub use trust_view::{AuthorizedTrustCoreV1, DecodedTrustPayloadV1};

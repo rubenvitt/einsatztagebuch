@@ -12,6 +12,13 @@ use crate::object::{
     FormatError, bytes_exact, exact_array_length, exact_item, expect_array_length,
     expect_empty_array, finish, optional_bytes_exact,
 };
+use crate::reader_key_escrow::{
+    ReaderKeyEscrowApprovalCoreV1, ReaderKeyEscrowCoreV1,
+    ReaderKeyEscrowRecoveryAuthorizationCoreV1, decode_reader_key_escrow_approval,
+    decode_reader_key_escrow_payload, decode_reader_key_escrow_recovery_authorization,
+    encode_reader_key_escrow_approval, encode_reader_key_escrow_core,
+    encode_reader_key_escrow_payload, encode_reader_key_escrow_recovery_authorization,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrustSubtypeV1 {
@@ -28,6 +35,9 @@ pub enum TrustSubtypeV1 {
     DeletionAttestation,
     WebBundleRelease,
     WebBundleRevocation,
+    ReaderKeyEscrow,
+    ReaderKeyEscrowApproval,
+    ReaderKeyEscrowRecoveryAuthorization,
 }
 
 impl TrustSubtypeV1 {
@@ -46,6 +56,11 @@ impl TrustSubtypeV1 {
             "deletionAttestation" => Ok(Self::DeletionAttestation),
             "webBundleRelease" => Ok(Self::WebBundleRelease),
             "webBundleRevocation" => Ok(Self::WebBundleRevocation),
+            "readerKeyEscrow" => Ok(Self::ReaderKeyEscrow),
+            "readerKeyEscrowApproval" => Ok(Self::ReaderKeyEscrowApproval),
+            "readerKeyEscrowRecoveryAuthorization" => {
+                Ok(Self::ReaderKeyEscrowRecoveryAuthorization)
+            }
             _ => Err(FormatError::TagMismatch),
         }
     }
@@ -66,6 +81,9 @@ impl TrustSubtypeV1 {
             Self::DeletionAttestation => "deletionAttestation",
             Self::WebBundleRelease => "webBundleRelease",
             Self::WebBundleRevocation => "webBundleRevocation",
+            Self::ReaderKeyEscrow => "readerKeyEscrow",
+            Self::ReaderKeyEscrowApproval => "readerKeyEscrowApproval",
+            Self::ReaderKeyEscrowRecoveryAuthorization => "readerKeyEscrowRecoveryAuthorization",
         }
     }
 }
@@ -531,6 +549,48 @@ impl TrustPayloadV1 {
             TrustSubtypeV1::WebBundleRevocation,
             PayloadKind::Other,
             encode_web_bundle_revocation(&fields)?,
+        )
+    }
+
+    /// Das Reader-Key-Escrow: DIREKTE, wurzelsignierte Gestalt mit der
+    /// zweielementigen Nutzlast `[core, approval-object-hash]` (Profil §3).
+    ///
+    /// Das zweite Element nennt die Publikationsfreigabe dieses Profils, NICHT
+    /// eine `organizationAdminAuthorization`; `root_trust_bindings` bleibt
+    /// unberührt. Dieser Konstruktor ist Codec, keine Emission: es gibt keine
+    /// `CoseSigner`-Methode für diese Familie.
+    pub fn reader_key_escrow(
+        core: ReaderKeyEscrowCoreV1,
+        approval_object_hash: ObjectHash,
+    ) -> Result<Self, FormatError> {
+        let exact_core = encode_reader_key_escrow_core(&core)?;
+        Self::from_encoded(
+            TrustSubtypeV1::ReaderKeyEscrow,
+            PayloadKind::Other,
+            encode_reader_key_escrow_payload(&exact_core, approval_object_hash)?,
+        )
+    }
+
+    /// Die Publikationsfreigabe: direkter Kern, genau eine Signatur eines
+    /// Organisationsadministrators.
+    pub fn reader_key_escrow_approval(
+        core: ReaderKeyEscrowApprovalCoreV1,
+    ) -> Result<Self, FormatError> {
+        Self::from_encoded(
+            TrustSubtypeV1::ReaderKeyEscrowApproval,
+            PayloadKind::Other,
+            encode_reader_key_escrow_approval(&core)?,
+        )
+    }
+
+    /// Die Öffnungsautorisierung: direkter Kern, mindestens zwei Signaturen.
+    pub fn reader_key_escrow_recovery_authorization(
+        core: ReaderKeyEscrowRecoveryAuthorizationCoreV1,
+    ) -> Result<Self, FormatError> {
+        Self::from_encoded(
+            TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization,
+            PayloadKind::Other,
+            encode_reader_key_escrow_recovery_authorization(&core)?,
         )
     }
 
@@ -1348,6 +1408,18 @@ fn validate_payload(subtype: TrustSubtypeV1, payload: &[u8]) -> Result<PayloadKi
             validate_web_bundle_revocation(payload)?;
             Ok(PayloadKind::Other)
         }
+        TrustSubtypeV1::ReaderKeyEscrow => {
+            decode_reader_key_escrow_payload(payload)?;
+            Ok(PayloadKind::Other)
+        }
+        TrustSubtypeV1::ReaderKeyEscrowApproval => {
+            decode_reader_key_escrow_approval(payload)?;
+            Ok(PayloadKind::Other)
+        }
+        TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization => {
+            decode_reader_key_escrow_recovery_authorization(payload)?;
+            Ok(PayloadKind::Other)
+        }
     }
 }
 
@@ -1361,16 +1433,24 @@ fn validate_signature_count(
         // und nicht im `_`-Zweig: die Grammatik schreibt ihnen
         // `[cose-sign1-v1]` vor, und der Auffangzweig `count >= 1` naehme
         // zwei Signaturen an, die `trust.cddl` verbietet.
+        //
+        // Dasselbe gilt für das Escrow (eine Wurzelsignatur) und seine
+        // Publikationsfreigabe (eine Administratorsignatur): der Auffangzweig
+        // nähme eine zweite Freigabesignatur an, die Profil §3 verbietet.
         TrustSubtypeV1::RootCertificate
         | TrustSubtypeV1::OrganizationAdminAuthorization
         | TrustSubtypeV1::WebBundleRelease
-        | TrustSubtypeV1::WebBundleRevocation => count == 1,
+        | TrustSubtypeV1::WebBundleRevocation
+        | TrustSubtypeV1::ReaderKeyEscrow
+        | TrustSubtypeV1::ReaderKeyEscrowApproval => count == 1,
         TrustSubtypeV1::DeviceCertificate | TrustSubtypeV1::OperatorBinding
             if payload_kind == PayloadKind::InitialAdminDirect =>
         {
             count == 1
         }
-        TrustSubtypeV1::GrantAuthorization | TrustSubtypeV1::DestructionAuthorization => count >= 2,
+        TrustSubtypeV1::GrantAuthorization
+        | TrustSubtypeV1::DestructionAuthorization
+        | TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization => count >= 2,
         _ => count >= 1,
     };
     if !valid {
@@ -2158,7 +2238,7 @@ fn optional_bstr_vec(decoder: &mut Decoder<'_>) -> Result<Option<Vec<u8>>, Forma
     }
 }
 
-fn typed_bytes<'a, T>(decoder: &mut Decoder<'a>, length: usize) -> Result<T, FormatError>
+pub(crate) fn typed_bytes<'a, T>(decoder: &mut Decoder<'a>, length: usize) -> Result<T, FormatError>
 where
     T: TryFrom<&'a [u8]>,
 {
@@ -2211,7 +2291,7 @@ fn operator_role(value: u64) -> Result<OperatorRoleV1, FormatError> {
     }
 }
 
-fn expect_version(decoder: &mut Decoder<'_>) -> Result<(), FormatError> {
+pub(crate) fn expect_version(decoder: &mut Decoder<'_>) -> Result<(), FormatError> {
     if decoder.u64().map_err(|_| FormatError::Shape)? != 1 {
         return Err(FormatError::UnknownVersion);
     }
