@@ -64,7 +64,8 @@ use ea_types::{ChainSequence, RegistryVersion, UnixMillis};
 /// Start/resume retains the existing ceremony without advancing offline steps.
 pub const ORGANIZATION_INIT_SUBCOMMAND: &str = "init";
 pub const ORGANIZATION_CERTIFY_ROOT_SUBCOMMAND: &str = "certify-root";
-/// Zeremonie A des Reader-Key-Escrows (DRK-458) — bis zum Cutover gesperrt.
+/// Zeremonie A des Reader-Key-Escrows (DRK-458) — hinter der aktiven
+/// v1.1-Bundle-Freigabe (DRK-461).
 pub const ORGANIZATION_READER_KEY_ESCROW_PUBLISH_SUBCOMMAND: &str = "reader-key-escrow-publish";
 /// Die minimale Root-Zeremonie der Bundle-Familie (U4): Freigabe und Widerruf
 /// einer Fassung des Web-Bundles, neben `certify-root`.
@@ -428,7 +429,8 @@ pub enum Command {
     OrganizationCertifyRoot {
         initial_registry_version: RegistryVersion,
     },
-    /// Zeremonie A des Reader-Key-Escrows; bis zum Cutover gesperrt.
+    /// Zeremonie A des Reader-Key-Escrows, hinter der aktiven
+    /// v1.1-Bundle-Freigabe.
     OrganizationReaderKeyEscrowPublish { config: PathBuf, inbox: PathBuf },
     /// Root signiert eine `webBundleRelease` (U4).
     OrganizationWebBundleRelease {

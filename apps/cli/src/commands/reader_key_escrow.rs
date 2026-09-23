@@ -13,7 +13,7 @@ use ea_admin::{
     reader_key_escrow_opening::{
         DeliveredReaderKeyEscrow, open_reader_key_escrow, pickup_reader_key_escrow,
     },
-    reader_key_escrow_publication::{CutoverPending, publish_reader_key_escrow},
+    reader_key_escrow_publication::{ActiveWebBundleRelease, publish_reader_key_escrow},
 };
 use ea_recovery::{ExitCode, ReaderKeyEscrowError, resolve_recipient_key};
 use ea_types::UnixMillis;
@@ -129,10 +129,10 @@ pub fn run_pickup_with_runtime_opener(
 
 /// Zeremonie A des Reader-Key-Escrows: `organization reader-key-escrow-publish`.
 ///
-/// Wählt IMMER den produktiven Cutover-Port [`CutoverPending`] — auch in einem
-/// Bau mit vereinheitlichten Testmerkmalen. Bis Scheibe (f) endet die
-/// Zeremonie damit als erster Schritt mit `EA-ESCROW-CUTOVER-NOT-READY`
-/// (Exit 21): ohne Inbox, Reauthentifizierung, Sperrzeile, Audit oder Datei.
+/// Der Cutover-Port ist fest der echte [`ActiveWebBundleRelease`]: ohne aktive,
+/// wurzelsignierte `webBundleRelease` eines v1.1-fähigen Bundles im Bestand
+/// endet die Zeremonie als erster Schritt mit `EA-ESCROW-CUTOVER-NOT-READY`
+/// (Exit 21), ohne Inbox, Reauthentifizierung, Sperrzeile, Audit oder Datei.
 /// Kein Argument, keine Konfiguration und keine Umgebung wählt einen anderen
 /// Port.
 ///
@@ -148,9 +148,9 @@ pub fn run_publish(
     run_publish_with_runtime_opener(invocation, config, inbox, now, &installed)
 }
 
-/// Zeremonie A hinter der Sperre. Nur der Laufzeitöffner ist wählbar (das
-/// getrennte Testbinär reicht einen Fixture-Öffner); der Cutover-Port ist
-/// hier fest der produktive [`CutoverPending`].
+/// Zeremonie A. Nur der Laufzeitöffner ist wählbar (das getrennte Testbinär
+/// reicht einen Fixture-Öffner); der Cutover-Port ist fest der echte
+/// [`ActiveWebBundleRelease`].
 pub fn run_publish_with_runtime_opener(
     invocation: &Invocation,
     config: &Path,
@@ -176,7 +176,7 @@ pub fn run_publish_with_runtime_opener(
             return error.exit_code();
         }
     };
-    match publish_reader_key_escrow(&runtime, &CutoverPending, inbox) {
+    match publish_reader_key_escrow(&runtime, &ActiveWebBundleRelease, inbox) {
         Ok(published) => {
             output::print_reader_key_escrow_report(
                 if published.replayed {

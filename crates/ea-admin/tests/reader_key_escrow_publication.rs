@@ -29,7 +29,7 @@ use std::{
 use ea_admin::{
     reader_key_escrow_opening::ReaderKeyEscrowLedger,
     reader_key_escrow_publication::{
-        ActiveWebBundleRelease, CutoverPending, FixtureBundleRelease, PublishedReaderKeyEscrow,
+        ActiveWebBundleRelease, FixtureBundleRelease, PublishedReaderKeyEscrow,
         ReaderKeyEscrowPublicationContext, publish_reader_key_escrow_in_context,
     },
 };
@@ -345,8 +345,9 @@ fn publication_rows(
 // Die Sperre
 // ---------------------------------------------------------------------------
 
-/// Pflicht bis (f): der produktive Port scheitert als ERSTER Schritt — kein
-/// Signierer, keine Sperrzeile, keine Publikationszeile, keine Auditzeile.
+/// Ohne Bundle-Freigabe im Bestand scheitert der echte Port als ERSTER
+/// Schritt — kein Signierer, keine Sperrzeile, keine Publikationszeile, keine
+/// Auditzeile, und ein unlesbares Paket kommt gar nicht bis zur Prüfung.
 #[test]
 fn the_productive_cutover_port_refuses_before_any_side_effect() {
     let line = escrow_line(EscrowLineOptions::default());
@@ -355,14 +356,19 @@ fn the_productive_cutover_port_refuses_before_any_side_effect() {
     let audit = store.audit(&database);
     let ceremony = Ceremony::new(&line, &database, &audit, &store.proof);
     let (_, bytes) = package(&line, &line.reader, READER_KEM_SEED, 0xc1, ISSUED);
-    let error = ceremony.publish(&CutoverPending, &bytes).err().unwrap();
+    let error = ceremony
+        .publish(&ActiveWebBundleRelease, &bytes)
+        .err()
+        .unwrap();
     assert_eq!(error, ReaderKeyEscrowError::CutoverNotReady);
     assert_eq!(error.code(), "EA-ESCROW-CUTOVER-NOT-READY");
     assert_eq!(error.exit_code(), ea_recovery::ExitCode::Unsupported);
     assert_eq!(error.exit_code().as_i32(), 21);
     // Selbst ein unlesbares Paket kommt nicht bis zur Prüfung.
     assert_eq!(
-        ceremony.publish(&CutoverPending, b"not a package").err(),
+        ceremony
+            .publish(&ActiveWebBundleRelease, b"not a package")
+            .err(),
         Some(ReaderKeyEscrowError::CutoverNotReady)
     );
     assert_eq!(ceremony.signatures.load(Ordering::SeqCst), 0);

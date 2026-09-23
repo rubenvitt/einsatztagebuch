@@ -1642,6 +1642,9 @@ mod process_native {
                             }
                         }
                     }
+                    if authority && slot == "root-signing" {
+                        escrow::inject_before_root_signature(&directory);
+                    }
                     let data = hex::decode(request["data"].as_str().unwrap()).unwrap();
                     recovery::pause_test_signature(&directory, &data);
                     destruction::pause_completion_audit_signature(&directory, &data);

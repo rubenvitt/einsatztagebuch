@@ -87,7 +87,7 @@ const PRINTED_GRAMMAR_V1: [&str; 32] = [
     "registry revocation-plan prepares change 1 for the object named by target_certificate_hash in the operator config and reports its reach; it publishes nothing, because publishing needs the root signature",
     "clock-release apply consumes an already issued release file and never prints its bytes; issuing one is a step of the administration workflow and not of this tool",
     "writer-transition prepare checks the request file against the selected head and shows the fields the root ceremony will sign; activate holds the published transition object against the same request and plans change 3; neither signs nor publishes anything",
-    "reader-key-escrow-publish is refused until the web bundle cutover (EA-ESCROW-CUTOVER-NOT-READY); open consumes the authorization before the recovery key is used and writes only the sealed envelope",
+    "reader-key-escrow-publish needs an active root-signed web bundle release of a v1.1-capable version in the archive (else EA-ESCROW-CUTOVER-NOT-READY) and writes approval and escrow under archive/trust; open consumes the authorization before the recovery key is used and writes only the sealed envelope",
 ];
 
 /// Ein abgelegter Bestand samt einem Verzeichnis AUSSERHALB fuer alle
