@@ -180,13 +180,17 @@ pub fn verify_reader_key_escrow_recovery_authorization(
         head,
         exact_authorization_bytes,
         SequenceRule::Exact(head.proposed_sequence()),
+        None,
         now,
     )
 }
 
 /// Dieselbe Regel für die Familien-Admission: die Sequenz liegt nur im
 /// Lease des gewählten Kopfes, wie bei der Aufnahme einer
-/// `grantAuthorization`.
+/// `grantAuthorization`. Weil die Aufnahme eine FRISCHE Annahme ist, muss
+/// zusätzlich jeder Approver zur vorgeschlagenen Sequenz aktiv sein — ein
+/// Zertifikat, dessen eigenes `revoked_from_sequence` im Lease liegt, kommt
+/// sonst mit einer früheren Sequenz durch.
 pub(crate) fn verify_recovery_for_admission(
     trust: &VerifiedTrust,
     head: &SelectedRegistryHead,
@@ -198,6 +202,7 @@ pub(crate) fn verify_recovery_for_admission(
         head,
         exact_authorization_bytes,
         SequenceRule::Lease,
+        Some(head.proposed_sequence()),
         now,
     )
 }
@@ -207,6 +212,7 @@ fn verify_against_head(
     head: &SelectedRegistryHead,
     exact_authorization_bytes: &[u8],
     sequence: SequenceRule,
+    signers_active_at: Option<ChainSequence>,
     now: UnixMillis,
 ) -> Result<VerifiedReaderKeyEscrowRecoveryAuthorization, TrustError> {
     let ParsedArchiveObject::Trust(parsed) =
@@ -231,6 +237,9 @@ fn verify_against_head(
         sequence,
         WindowRule::At(now),
     )?;
+    if let Some(at_sequence) = signers_active_at {
+        require_signers_active(state, parsed.value().signatures(), at_sequence)?;
+    }
     let escrows = verify_reader_key_escrows(trust, ReaderKeyEscrowHead::Selected(head))?;
     let escrow = recovery_target_rule(&fields, &escrows, true)?.clone();
     Ok(VerifiedReaderKeyEscrowRecoveryAuthorization {
@@ -296,6 +305,25 @@ pub(crate) fn recovery_signers_rule(
     .map_err(|_| TrustError::Signature)?;
     if persons < REQUIRED_DISTINCT_ESCROW_RECOVERY_APPROVERS_V1 {
         return Err(TrustError::ApproversInsufficient);
+    }
+    Ok(())
+}
+
+/// Jedes signierende Zertifikat ist zu `at_sequence` aktiv. Die Signaturen
+/// sind zu diesem Zeitpunkt schon geprüft; hier zählt nur der Stand.
+fn require_signers_active(
+    state: &PreviousHeadState,
+    signatures: &[Vec<u8>],
+    at_sequence: ChainSequence,
+) -> Result<(), TrustError> {
+    for signature in signatures {
+        let certificate_hash = parse_cose_sign1(signature, &[])
+            .map_err(|_| TrustError::Signature)?
+            .certificate_hash()
+            .ok_or(TrustError::Signature)?;
+        state
+            .active_certificate(certificate_hash, at_sequence)
+            .ok_or(TrustError::SignerInactive)?;
     }
     Ok(())
 }
