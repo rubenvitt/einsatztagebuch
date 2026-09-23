@@ -20,6 +20,12 @@ fn cddl_registers_every_v1_wire_type() {
         "deletion-attestation-core-v1",
         "web-bundle-release-core-v1",
         "web-bundle-revocation-core-v1",
+        "reader-key-escrow-payload-v1",
+        "reader-key-escrow-core-v1",
+        "reader-key-escrow-approval-core-v1",
+        "reader-key-escrow-recovery-authorization-core-v1",
+        "reader-key-escrow-hpke-context-v1",
+        "reader-key-escrow-restore-context-v1",
     ] {
         assert!(trust.contains(subtype), "missing {subtype}");
     }
@@ -29,7 +35,20 @@ fn cddl_registers_every_v1_wire_type() {
     // Dokument: in `trust-subtype-v1` und in seinem Arm von `etb-body-v1`.
     // Ein dritter Fundort waere genau die Aufweichung, die dieser Test
     // ausschliesst.
-    for literal in ["\"webBundleRelease\"", "\"webBundleRevocation\""] {
+    //
+    // Dieselbe Regel gilt für die drei Escrow-Familien des v1.1-Profils
+    // (`docs/superpowers/specs/2026-09-08-einsatzarchiv-reader-key-escrow-profile.md`
+    // §3): direkte, wurzel- bzw. freigabesignierte Objekte ohne Registry-Wirkung.
+    // Der Zähler greift nur das GEQUOTETE Literal, ein Treffer in einem
+    // längeren Literal ist durch das schließende Anführungszeichen
+    // ausgeschlossen.
+    for literal in [
+        "\"webBundleRelease\"",
+        "\"webBundleRevocation\"",
+        "\"readerKeyEscrow\"",
+        "\"readerKeyEscrowApproval\"",
+        "\"readerKeyEscrowRecoveryAuthorization\"",
+    ] {
         assert_eq!(
             trust.matches(literal).count(),
             2,
@@ -2075,6 +2094,440 @@ fn etb_cddl_correlates_subtype_payload_and_signature_cardinality() {
             2
         )
     ));
+}
+
+/// Die Gestalt der drei Escrow-Familien nach Profil §3 und §4.
+///
+/// Arität, Signaturkardinalität, Suite-Literal und leerer Extension-Slot sind
+/// Vertrag. Jede Zeile hier ist ein Negativ- oder Positivzeuge gegen die echte
+/// Grammatik, nicht gegen eine Kopie.
+#[derive(Clone, Copy)]
+enum EscrowFixture {
+    /// Die Escrow-Nutzlast `[core, approval-object-hash]`.
+    Payload { core_delta: i8, extra_element: bool },
+    /// Der Kern der Publikationsfreigabe.
+    Approval { core_delta: i8 },
+    /// Der Kern der Öffnungsautorisierung.
+    Recovery { core_delta: i8, purpose: u8 },
+}
+
+/// Ein Feldschreiber der Escrow-Fixtures: schreibt genau eine CBOR-Position.
+type FieldWriter<'a> = &'a dyn Fn(&mut minicbor::Encoder<Vec<u8>>);
+
+/// Schreibt `count` Felder einer Folge von Feldschreibern, beginnend beim
+/// Versionsfeld. `delta` kürzt (negativ) oder verlängert (positiv) die Folge
+/// VOR dem Extension-Slot, damit der Zeuge die Arität und nicht den Slot trifft.
+fn encode_escrow_fields(
+    encoder: &mut minicbor::Encoder<Vec<u8>>,
+    fields: &[FieldWriter<'_>],
+    delta: i8,
+) {
+    let base = u64::try_from(fields.len()).unwrap() + 1;
+    let length = base.checked_add_signed(i64::from(delta)).unwrap();
+    encoder.array(length).unwrap();
+    let written = if delta < 0 {
+        fields.len() - usize::try_from(-delta).unwrap()
+    } else {
+        fields.len()
+    };
+    for field in &fields[..written] {
+        field(encoder);
+    }
+    for _ in 0..delta.max(0) {
+        encoder.u8(0).unwrap();
+    }
+    encoder.array(0).unwrap();
+}
+
+fn encode_escrow_core(encoder: &mut minicbor::Encoder<Vec<u8>>, delta: i8) {
+    encode_escrow_fields(
+        encoder,
+        &[
+            &|encoder| {
+                encoder.u8(1).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[1; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[2; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[3; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.u8(4).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[5; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.u8(6).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[7; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[8; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[9; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[10; 48]).unwrap();
+            },
+            &|encoder| {
+                encoder.i64(100).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[11; 32]).unwrap();
+            },
+        ],
+        delta,
+    );
+}
+
+fn encode_escrow_approval_core(encoder: &mut minicbor::Encoder<Vec<u8>>, delta: i8) {
+    encode_escrow_fields(
+        encoder,
+        &[
+            &|encoder| {
+                encoder.u8(1).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[1; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[2; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.u8(3).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[4; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.u8(5).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[6; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[7; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[8; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[9; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[10; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[11; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.i64(100).unwrap();
+            },
+            &|encoder| {
+                encoder.i64(200).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[12; 32]).unwrap();
+            },
+        ],
+        delta,
+    );
+}
+
+fn encode_escrow_recovery_core(encoder: &mut minicbor::Encoder<Vec<u8>>, delta: i8, purpose: u8) {
+    encode_escrow_fields(
+        encoder,
+        &[
+            &|encoder| {
+                encoder.u8(1).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[1; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[2; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.u8(3).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[4; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.u8(5).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[6; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[7; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[8; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.u8(9).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[10; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[11; 32]).unwrap();
+            },
+            &move |encoder| {
+                encoder.u8(purpose).unwrap();
+            },
+            &|encoder| {
+                encoder.i64(100).unwrap();
+            },
+            &|encoder| {
+                encoder.i64(200).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[12; 32]).unwrap();
+            },
+        ],
+        delta,
+    );
+}
+
+fn encode_escrow_payload(encoder: &mut minicbor::Encoder<Vec<u8>>, fixture: EscrowFixture) {
+    match fixture {
+        EscrowFixture::Payload {
+            core_delta,
+            extra_element,
+        } => {
+            encoder.array(if extra_element { 3 } else { 2 }).unwrap();
+            encode_escrow_core(encoder, core_delta);
+            encoder.bytes(&[12; 32]).unwrap();
+            if extra_element {
+                encoder.bytes(&[13; 32]).unwrap();
+            }
+        }
+        EscrowFixture::Approval { core_delta } => encode_escrow_approval_core(encoder, core_delta),
+        EscrowFixture::Recovery {
+            core_delta,
+            purpose,
+        } => encode_escrow_recovery_core(encoder, core_delta, purpose),
+    }
+}
+
+fn escrow_etb_fixture(subtype: &str, fixture: EscrowFixture, signature_count: u64) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(5).unwrap();
+    encoder.bytes(b"EA1\0").unwrap();
+    encoder.u8(5).unwrap();
+    encoder.u8(1).unwrap();
+    encoder.array(0).unwrap();
+    encoder.array(3).unwrap();
+    encoder.str(subtype).unwrap();
+    encode_escrow_payload(&mut encoder, fixture);
+    encoder.array(signature_count).unwrap();
+    for _ in 0..signature_count {
+        encoder.null().unwrap();
+    }
+    encoder.into_writer()
+}
+
+/// Ein HPKE-Kontext nach Profil §4: `count` Felder plus Suite-Literal plus
+/// optionaler Extension-Slot.
+fn escrow_context_fixture(
+    fields: &[FieldWriter<'_>],
+    suite: &str,
+    extension_slot: bool,
+) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    let length = u64::try_from(fields.len()).unwrap() + 1 + u64::from(extension_slot);
+    encoder.array(length).unwrap();
+    for field in fields {
+        field(&mut encoder);
+    }
+    encoder.str(suite).unwrap();
+    if extension_slot {
+        encoder.array(0).unwrap();
+    }
+    encoder.into_writer()
+}
+
+fn escrow_hpke_context(suite: &str, extension_slot: bool) -> Vec<u8> {
+    escrow_context_fixture(
+        &[
+            &|encoder| {
+                encoder.u8(1).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[1; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[2; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[3; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.u8(4).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[5; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[6; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[7; 32]).unwrap();
+            },
+        ],
+        suite,
+        extension_slot,
+    )
+}
+
+fn escrow_restore_context(suite: &str, extension_slot: bool) -> Vec<u8> {
+    escrow_context_fixture(
+        &[
+            &|encoder| {
+                encoder.u8(1).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[1; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[2; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[3; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[4; 32]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[5; 16]).unwrap();
+            },
+            &|encoder| {
+                encoder.bytes(&[6; 32]).unwrap();
+            },
+        ],
+        suite,
+        extension_slot,
+    )
+}
+
+/// Die Grammatik der drei Escrow-Familien trägt Arität, Kardinalität und
+/// Kontextform aus Profil §3 und §4.
+#[test]
+fn reader_key_escrow_cddl_pins_arity_cardinality_and_context_form() {
+    let cddl = archive_cddl();
+    let escrow = EscrowFixture::Payload {
+        core_delta: 0,
+        extra_element: false,
+    };
+    let approval = EscrowFixture::Approval { core_delta: 0 };
+    let recovery = EscrowFixture::Recovery {
+        core_delta: 0,
+        purpose: 0,
+    };
+    let valid = |subtype: &str, fixture: EscrowFixture, signatures: u64| {
+        validate_cbor(
+            "etb-v1",
+            &cddl,
+            &escrow_etb_fixture(subtype, fixture, signatures),
+        )
+    };
+
+    // Kardinalität: 1 / 1 / 2*.
+    assert!(valid("readerKeyEscrow", escrow, 1));
+    assert!(!valid("readerKeyEscrow", escrow, 0));
+    assert!(!valid("readerKeyEscrow", escrow, 2));
+    assert!(valid("readerKeyEscrowApproval", approval, 1));
+    assert!(!valid("readerKeyEscrowApproval", approval, 2));
+    assert!(valid("readerKeyEscrowRecoveryAuthorization", recovery, 2));
+    assert!(valid("readerKeyEscrowRecoveryAuthorization", recovery, 3));
+    assert!(!valid("readerKeyEscrowRecoveryAuthorization", recovery, 1));
+
+    // Arität 14 / 16 / 17, je eine Position zu wenig und zu viel.
+    for core_delta in [-1, 1] {
+        assert!(!valid(
+            "readerKeyEscrow",
+            EscrowFixture::Payload {
+                core_delta,
+                extra_element: false
+            },
+            1
+        ));
+        assert!(!valid(
+            "readerKeyEscrowApproval",
+            EscrowFixture::Approval { core_delta },
+            1
+        ));
+        assert!(!valid(
+            "readerKeyEscrowRecoveryAuthorization",
+            EscrowFixture::Recovery {
+                core_delta,
+                purpose: 0
+            },
+            2
+        ));
+    }
+    // Die Nutzlast ist zweielementig, nicht dreielementig.
+    assert!(!valid(
+        "readerKeyEscrow",
+        EscrowFixture::Payload {
+            core_delta: 0,
+            extra_element: true
+        },
+        1
+    ));
+    // `purpose: 0` ist der einzige Operationscode.
+    assert!(!valid(
+        "readerKeyEscrowRecoveryAuthorization",
+        EscrowFixture::Recovery {
+            core_delta: 0,
+            purpose: 1
+        },
+        2
+    ));
+    // Kein Subtyp trägt den Körper eines Nachbarn.
+    assert!(!valid("readerKeyEscrowApproval", escrow, 1));
+    assert!(!valid("readerKeyEscrow", approval, 1));
+    assert!(!valid("readerKeyEscrowRecoveryAuthorization", approval, 2));
+
+    // Die beiden HPKE-Kontexte: Suite-Literal im CBOR und Pflicht-Slot.
+    let escrow_suite = "EINSATZARCHIV-READER-KEY-ESCROW-1";
+    let restore_suite = "EINSATZARCHIV-READER-KEY-ESCROW-RESTORE-1";
+    for (root, encode, suite, other_suite) in [
+        (
+            "reader-key-escrow-hpke-context-v1",
+            escrow_hpke_context as fn(&str, bool) -> Vec<u8>,
+            escrow_suite,
+            restore_suite,
+        ),
+        (
+            "reader-key-escrow-restore-context-v1",
+            escrow_restore_context,
+            restore_suite,
+            escrow_suite,
+        ),
+    ] {
+        assert!(
+            validate_payload_cbor(root, &cddl, &encode(suite, true)),
+            "{root} accepts its own form"
+        );
+        assert!(
+            !validate_cbor(root, &cddl, &encode(suite, false)),
+            "{root} requires the empty extension slot"
+        );
+        assert!(
+            !validate_cbor(root, &cddl, &encode(other_suite, true)),
+            "{root} binds its own suite literal"
+        );
+    }
 }
 
 #[test]
