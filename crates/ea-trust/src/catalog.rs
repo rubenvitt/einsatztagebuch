@@ -53,22 +53,11 @@ impl TrustCatalog {
                 ParsedArchiveObject::Trust(parsed) => parsed,
                 _ => return Err(TrustError::Source),
             };
-            // WÄCHTER bis Scheibe (b) von DRK-318: die drei Escrow-Familien
-            // dekodieren seit dem Codec, aber noch prüft niemand Signatur,
-            // Freigabe, Enrollment-Bindung oder Organisation. Ohne diese
-            // Zeile führte der Katalog sie ungeprüft mit, und `verify_trust`,
-            // `ea-verify`, der Reader und die Recovery übersprängen sie still —
-            // genau das Überspringen, das Profil §9 verbietet. Die Ablehnung
-            // ist bitgleich das Verhalten vor dem Codec (`EA-TRUST-SOURCE`).
-            // Scheibe (b) ERSETZT diesen Wächter durch die echte Aufnahme.
-            if matches!(
-                parsed.value().subtype(),
-                TrustSubtypeV1::ReaderKeyEscrow
-                    | TrustSubtypeV1::ReaderKeyEscrowApproval
-                    | TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization
-            ) {
-                return Err(TrustError::Source);
-            }
+            // Die drei Escrow-Familien werden wie jede Familie nach Subtyp
+            // gruppiert. Der Katalog ist KEINE Prüfung: `verify_trust` prüft
+            // sie nicht, und wer Escrows nutzt, MUSS
+            // `verify_reader_key_escrows` rufen, die jedes Objekt der drei
+            // Familien fail-closed prüft (v1.1-Profil §9).
             by_subtype
                 .entry(parsed.value().subtype().as_str())
                 .or_default()
@@ -121,7 +110,7 @@ mod tests {
         trust_digest,
     };
     use ea_format::{
-        ParsedArchiveObject, ReaderKeyEscrowApprovalCoreV1, ReaderKeyEscrowCoreV1,
+        ReaderKeyEscrowApprovalCoreV1, ReaderKeyEscrowCoreV1,
         ReaderKeyEscrowRecoveryAuthorizationCoreV1, RootCertificateFieldsV1, TrustObjectV1,
         TrustPayloadV1, TrustSubtypeV1, encode_trust,
     };
@@ -280,33 +269,26 @@ mod tests {
         }
     }
 
-    /// Ein Escrow-Objekt dekodiert seit dem Codec, und der Katalog ist der
-    /// einzige Einlass für `verify_trust`. Bis Scheibe (b) die echte Aufnahme
-    /// baut, muss er jedes der drei Objekte ablehnen wie vor dem Codec
-    /// (`EA-TRUST-SOURCE`), statt es ungeprüft in `by_subtype` zu führen.
+    /// Die drei Escrow-Familien werden gruppiert wie jede Familie — allein
+    /// und neben einem gültigen Objekt. Die Prüfung sitzt nicht hier, sondern
+    /// in `verify_reader_key_escrows`.
     #[test]
-    fn every_reader_key_escrow_object_is_refused_until_the_trust_core_admits_it() {
+    fn catalog_groups_the_three_escrow_subtypes() {
         for (subtype, payload, signatures) in escrow_fixtures() {
             let bytes = escrow_object(&payload, signatures);
-            let ParsedArchiveObject::Trust(parsed) = ea_format::decode_exact_object(&bytes)
-                .unwrap_or_else(|error| {
-                    panic!("the {} fixture decodes: {}", subtype.as_str(), error.code())
-                })
-            else {
-                panic!("the {} fixture is a trust object", subtype.as_str())
-            };
-            assert_eq!(parsed.value().subtype(), subtype);
-
             let hash = object_hash(&bytes);
             let source = FakeSource::new(vec![hash], [(hash, bytes)]);
-            let error = match TrustCatalog::load(&source) {
-                Ok(_) => panic!("{} must not enter the catalog", subtype.as_str()),
-                Err(error) => error,
+            let catalog = match TrustCatalog::load(&source) {
+                Ok(catalog) => catalog,
+                Err(error) => panic!("{} must be grouped: {}", subtype.as_str(), error.code()),
             };
-            assert_eq!(error.code(), "EA-TRUST-SOURCE", "{}", subtype.as_str());
+            assert!(
+                catalog.hashes_for_subtype(subtype) == [hash],
+                "{}",
+                subtype.as_str()
+            );
+            assert!(catalog.get(&hash).is_some());
 
-            // Neben einem gültigen Objekt ändert sich nichts: der ganze
-            // Katalog fällt, wie bei jedem undekodierbaren Objekt.
             let root = exact_initial_root_object(0x11);
             let root_hash = object_hash(&root);
             let mut hashes = vec![root_hash, hash];
@@ -318,11 +300,12 @@ mod tests {
                     (hash, escrow_object(&payload, signatures)),
                 ],
             );
-            assert!(
-                TrustCatalog::load(&source).is_err(),
-                "{} beside a valid root",
-                subtype.as_str()
-            );
+            let catalog = match TrustCatalog::load(&source) {
+                Ok(catalog) => catalog,
+                Err(error) => panic!("{} beside a root: {}", subtype.as_str(), error.code()),
+            };
+            assert!(catalog.hashes_for_subtype(subtype) == [hash]);
+            assert!(catalog.hashes_for_subtype(TrustSubtypeV1::RootCertificate) == [root_hash]);
         }
     }
 

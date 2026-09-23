@@ -233,11 +233,11 @@ pub fn verify_catalogue_admission(
         // haben sie nicht.
         //
         // Die drei Escrow-Familien (v1.1-Profil §3.1) sind aus demselben Grund
-        // vom Registrierungsabschluss ausgenommen. Zur Laufzeit ist dieser Arm
-        // für sie heute unerreichbar: `TrustCatalog::load` weist jedes
-        // Escrow-Objekt vorher mit `TrustError::Source` ab, bis Scheibe (b) die
-        // echte Aufnahme baut. Wie die Aufnahme dann aussieht, entscheidet (b);
-        // dieser Arm hält nur den Compilerzwang und die Ablehnung.
+        // vom Registrierungsabschluss ausgenommen: sie tragen keine
+        // Registry-Wirkung, sind kein zulässiges `target-trust-subtype` und
+        // haben ihre eigene Regel im Modul `reader_key_escrow`. Seit der
+        // Katalog sie gruppiert, ist dieser Arm zur Laufzeit erreichbar und
+        // lehnt sie hier ausdrücklich ab.
         DecodedTrustPayloadV1::DestructionAuthorization(_)
         | DecodedTrustPayloadV1::DestructionTransition(_)
         | DecodedTrustPayloadV1::DeletionAttestation(_)

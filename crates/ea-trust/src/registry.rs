@@ -1352,6 +1352,27 @@ pub(crate) fn direct_publication_authority(
     Ok((state, sequence, authorization_hash))
 }
 
+/// Der Zustand GENAU nach dem Kopf `pin`, nachgespielt ab v1 über die EINE
+/// Linie des Katalogs.
+///
+/// Anders als [`verify_historical_registry_authority`] kennt diese Funktion
+/// keine Nachfolgergrenze: sie beantwortet „wie sah die Registry an diesem
+/// Kopf aus?“, nicht „trägt dieser Kopf noch Autorität für eine Sequenz?“.
+/// Das braucht die Enrollment-Bindung des Reader-Key-Escrows — ein Folgekopf
+/// mit DERSELBEN `effective_from_sequence` ist legal und darf ein echtes
+/// Escrow nicht entwerten. Nachspielen verleiht keine Autorität; jedes
+/// Ereignis läuft durch dieselbe Prüfung wie beim Kopfübergang.
+pub(crate) fn replay_to_exact_pin(
+    trust: &VerifiedTrust,
+    pin: RegistryHeadPin,
+) -> Result<PreviousHeadState, RegistryError> {
+    let topology = RegistryTopology::build(trust)?;
+    let mut state = trust.previous_head().clone();
+    let mut replay = AdminAuthorizationReplay::default();
+    replay_to_pin(trust, &topology, &mut state, &mut replay, pin)?;
+    Ok(state)
+}
+
 fn replay_to_pin(
     trust: &VerifiedTrust,
     topology: &RegistryTopology,
