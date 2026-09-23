@@ -160,6 +160,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0027_native_bootstrap_participant.sql",
         sql: include_str!("../migrations/0027_native_bootstrap_participant.sql"),
     },
+    Migration {
+        version: 28,
+        name: "0028_reader_key_escrow.sql",
+        sql: include_str!("../migrations/0028_reader_key_escrow.sql"),
+    },
 ];
 
 /// Durable trust pins, time state and replay dimensions for operator hosts.
