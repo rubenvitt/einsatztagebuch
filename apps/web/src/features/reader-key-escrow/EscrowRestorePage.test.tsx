@@ -78,6 +78,31 @@ it('aborts on unmount and on pagehide', async () => {
   expect(bridge.abort).toHaveBeenCalledTimes(2)
 })
 
+// review-e F1: nach dem Import liegt der wiederhergestellte KEM im
+// Enrollment des neuen Tresors. Die Seite bricht trotzdem mit der
+// Escrow-Kennung ab — Rust folgt der Verknuepfung ins Enrollment und nullt ihn
+// dort (`crates/ea-reader-wasm/tests/escrow_restore_abort.rs`). Die Seite
+// entscheidet nichts, sie ruft nur.
+it('aborts with the escrow handle on pagehide and unmount after the enrollment began', async () => {
+  const bridge = stubBridge()
+  const renderEnrollment = vi.fn((restored: number) => <p>{`Enrollment zu ${restored}`}</p>)
+  const view = render(
+    <EscrowRestorePage bridge={bridge} download={vi.fn()} renderEnrollment={renderEnrollment} />,
+  )
+  await begin()
+  await screen.findByText(BEGUN.transportFingerprint)
+  await user.upload(screen.getByLabelText('Umschlag importieren'), [file('x.cbor')])
+  expect(await screen.findByText(`Enrollment zu ${BEGUN.handle}`)).toBeInTheDocument()
+  expect(bridge.abort).not.toHaveBeenCalled()
+
+  window.dispatchEvent(new Event('pagehide'))
+  await waitFor(() => expect(bridge.abort).toHaveBeenCalledTimes(1))
+  expect(bridge.abort).toHaveBeenLastCalledWith(BEGUN.handle)
+  view.unmount()
+  expect(bridge.abort).toHaveBeenCalledTimes(2)
+  expect(bridge.abort).toHaveBeenLastCalledWith(BEGUN.handle)
+})
+
 it('shows a refusal code unchanged', async () => {
   const bridge = stubBridge({
     transportOpen: vi.fn(async () => {

@@ -17,8 +17,10 @@ export type EscrowRestorePageProps = {
 /**
  * Zeremonie B (Escrow-Profil §6, §7): Transportanfrage, Import des Umschlags,
  * dann ein neuer Tresor mit zwei Authenticators. Der Transportschlüssel lebt
- * nur im Worker; beim Verlassen der Seite und auf `pagehide` wird er
- * verworfen.
+ * nur im Worker; beim Verlassen der Seite und auf `pagehide` bricht die Seite
+ * mit der Escrow-Kennung ab. Rust nullt dann Transport oder
+ * wiederhergestellten KEM, auch wenn der schon im Enrollment des neuen
+ * Tresors liegt — die Seite entscheidet nichts, sie ruft nur.
  */
 export function EscrowRestorePage({
   bridge,

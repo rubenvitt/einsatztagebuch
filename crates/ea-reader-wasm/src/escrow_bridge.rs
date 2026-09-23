@@ -19,28 +19,38 @@
 //!
 //! # Der Transport-Schlüssel verlässt diese Tabelle nie
 //!
-//! [`ESCROW_CEREMONIES`] hält je Kennung entweder den lebenden Transport oder
-//! den wiederhergestellten KEM, im Worker und einfädig wie
-//! [`crate::vault_bridge`]. Keine Ausfuhr öffnet OPFS; erst
+//! `ESCROW_CEREMONIES` hält je Kennung den lebenden Transport, den
+//! wiederhergestellten KEM oder — nach `enrollmentBeginRestored` — die
+//! Kennung des Enrollments, in das der KEM gewandert ist; im Worker und
+//! einfädig wie [`crate::vault_bridge`]. Keine Ausfuhr öffnet OPFS; erst
 //! `enrollmentFinishRestored` in [`crate::webauthn`] schreibt den NEUEN,
 //! versiegelten Tresor. `readerKeyEscrowTransportOpen` ENTNIMMT den Transport,
 //! bevor irgendetwas geprüft wird — in jedem Ausgang ist er danach fort. Ein
 //! Neuladen beendet den Worker und mit ihm die Tabelle.
+//!
+//! # Sperrung in Zeremonie B
+//!
+//! Zeremonie B hat keine `ReaderSession`. „Bei Sperrung genullt“ (Profil §7)
+//! heißt hier (Controller-Ruling Fixrunde 3): Verbrauch durch `open`,
+//! Abbruch, `pagehide` und Neuladen — und jede dieser Stellen nullt auch den
+//! bereits wiederhergestellten KEM, egal unter welcher Kennung er liegt. Der
+//! Abbruch unter der Escrow-Kennung ([`transport_abort`]) folgt deshalb der
+//! Verknüpfung ins Enrollment. Die Tabellenhälften stehen auf jedem Ziel und
+//! sind auf dem Wirt bezeugt (`tests/escrow_restore_abort.rs`).
 
-use crate::bridge::Json;
-
-#[cfg(target_arch = "wasm32")]
 use core::cell::{Cell, RefCell};
-#[cfg(target_arch = "wasm32")]
 use std::collections::BTreeMap;
 
-#[cfg(target_arch = "wasm32")]
 use ea_reader::{
-    ReaderKeyEscrowTransportV1, RestoredReaderKemV1, SubjectId, UnixMillis, decode_trust_anchor,
-    reader_registration_request, seal_reader_key_escrow_package,
+    ArchiveSource, ReaderKeyEscrowTransportV1, RestoredReaderKemV1, SubjectId, TrustAnchorV1,
+    UnixMillis,
 };
 #[cfg(target_arch = "wasm32")]
+use ea_reader::{decode_trust_anchor, reader_registration_request, seal_reader_key_escrow_package};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+
+use crate::bridge::Json;
 
 #[cfg(target_arch = "wasm32")]
 use crate::file_access::take_directory_source;
@@ -52,22 +62,23 @@ use crate::vault_bridge::with_unlocked_vault;
 pub const ESCROW_BRIDGE_ARGUMENT_CODE: &str = "EA-READER-ESCROW-BRIDGE-ARGUMENT";
 
 /// Ein Eintrag der Zeremonientabelle.
-#[cfg(target_arch = "wasm32")]
-pub(crate) enum EscrowCeremony {
+enum EscrowCeremony {
     /// Der lebende Transport-Schlüssel, wartend auf den Umschlag.
     Awaiting(ReaderKeyEscrowTransportV1),
     /// Der wiederhergestellte KEM, wartend auf `enrollmentBeginRestored`.
     Restored(RestoredReaderKemV1),
+    /// Der KEM ist in das Enrollment unter DIESER Kennung gewandert
+    /// ([`crate::webauthn`]). Die Verknüpfung bleibt stehen, damit der
+    /// Abbruch unter der Escrow-Kennung ihn dort erreicht (review-e F1).
+    Enrolling(u32),
 }
 
-#[cfg(target_arch = "wasm32")]
 thread_local! {
     static ESCROW_CEREMONIES: RefCell<BTreeMap<u32, EscrowCeremony>> =
         const { RefCell::new(BTreeMap::new()) };
     static NEXT_HANDLE: Cell<u32> = const { Cell::new(1) };
 }
 
-#[cfg(target_arch = "wasm32")]
 fn next_handle() -> u32 {
     NEXT_HANDLE.with(|counter| {
         let handle = counter.get();
@@ -83,18 +94,28 @@ fn bridge_argument() -> JsValue {
 
 /// Entnimmt den wiederhergestellten KEM — für `enrollmentBeginRestored`.
 /// Ein Eintrag in einem anderen Zustand bleibt liegen.
-#[cfg(target_arch = "wasm32")]
 pub(crate) fn take_restored(handle: u32) -> Option<RestoredReaderKemV1> {
     ESCROW_CEREMONIES.with(|table| {
         let mut table = table.borrow_mut();
         match table.remove(&handle)? {
             EscrowCeremony::Restored(restored) => Some(restored),
-            other @ EscrowCeremony::Awaiting(_) => {
+            other @ (EscrowCeremony::Awaiting(_) | EscrowCeremony::Enrolling(_)) => {
                 table.insert(handle, other);
                 None
             }
         }
     })
+}
+
+/// Hält fest, dass der KEM unter `handle` in das Enrollment `enrollment`
+/// gewandert ist. Gerufen von [`crate::webauthn::begin_restored_status`]
+/// unmittelbar nach der Ablage — ohne `await` dazwischen.
+pub(crate) fn link_enrollment(handle: u32, enrollment: u32) {
+    ESCROW_CEREMONIES.with(|table| {
+        table
+            .borrow_mut()
+            .insert(handle, EscrowCeremony::Enrolling(enrollment));
+    });
 }
 
 /// Ob unter `handle` ein wiederhergestellter KEM liegt.
@@ -242,36 +263,24 @@ pub fn reader_key_escrow_seal_package(
     ))
 }
 
-/// Zeremonie B, Beginn: gültiges Escrow zur Subject-ID prüfen, flüchtigen
-/// Transport-Schlüssel ziehen, Transportdatei herausgeben.
+/// Zeremonie B, Beginn — die Tabellenhälfte von
+/// `readerKeyEscrowTransportBegin`, auf jedem Ziel übersetzt und auf dem Wirt
+/// bezeugt (`tests/escrow_restore_abort.rs`): gültiges Escrow zur Subject-ID
+/// prüfen, flüchtigen Transport-Schlüssel ziehen, unter einer neuen Kennung
+/// ablegen und das DTO aus [`transport_begin_json`] herausgeben.
 ///
 /// # Errors
-/// `EA-READER-ESCROW-BRIDGE-ARGUMENT`, die Codes von `ea-trust` für einen
-/// Anker, der nicht dekodiert, und die von
-/// `ReaderKeyEscrowTransportV1::begin` — darunter
-/// `EA-READER-ESCROW-NOT-FOUND`.
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(js_name = "readerKeyEscrowTransportBegin")]
-pub fn reader_key_escrow_transport_begin(
-    pinned_anchor: Vec<u8>,
-    subject_id: Vec<u8>,
-    source: u32,
-    now_ms: f64,
-) -> Result<String, JsValue> {
-    let subject = SubjectId::try_from(&subject_id[..]).map_err(|_| bridge_argument())?;
-    let anchor =
-        decode_trust_anchor(&pinned_anchor).map_err(|error| JsValue::from_str(error.code()))?;
-    let source = take_directory_source(source).map_err(|_| bridge_argument())?;
-    let transport = ReaderKeyEscrowTransportV1::begin(
-        &anchor,
-        &source,
-        subject,
-        UnixMillis::new(now_ms as i64),
-    )
-    .map_err(|error| JsValue::from_str(error.code()))?;
-    let file = transport
-        .transport_request()
-        .map_err(|error| JsValue::from_str(error.code()))?;
+/// Die Codes von `ReaderKeyEscrowTransportV1::begin` und
+/// `…::transport_request` — darunter `EA-READER-ESCROW-NOT-FOUND`.
+pub fn transport_begin_status(
+    anchor: &TrustAnchorV1,
+    source: &dyn ArchiveSource,
+    subject: SubjectId,
+    now: UnixMillis,
+) -> Result<String, &'static str> {
+    let transport =
+        ReaderKeyEscrowTransportV1::begin(anchor, source, subject, now).map_err(|e| e.code())?;
+    let file = transport.transport_request().map_err(|e| e.code())?;
     let rendered_fingerprint = transport.fingerprint();
     let escrow_object_hash = transport.escrow_object_hash();
     let reader_certificate = transport.reader_certificate_object_hash();
@@ -291,30 +300,29 @@ pub fn reader_key_escrow_transport_begin(
     ))
 }
 
-/// Zeremonie B, Import: öffnet den Umschlag GENAU EINMAL. Der Transport wird
-/// entnommen, bevor geprüft wird; nach Erfolg liegt unter derselben Kennung
-/// der wiederhergestellte KEM, nach einem Fehler nichts.
+/// Zeremonie B, Import — die Tabellenhälfte von
+/// `readerKeyEscrowTransportOpen`: öffnet den Umschlag GENAU EINMAL. Der
+/// Transport wird entnommen, bevor geprüft wird; nach Erfolg liegt unter
+/// derselben Kennung der wiederhergestellte KEM, nach einem Fehler nichts.
 ///
 /// # Errors
 /// `EA-READER-ESCROW-BRIDGE-ARGUMENT` für eine unbekannte oder verbrauchte
 /// Kennung und die Codes von `ReaderKeyEscrowTransportV1::open`.
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(js_name = "readerKeyEscrowTransportOpen")]
-pub fn reader_key_escrow_transport_open(handle: u32, envelope: Vec<u8>) -> Result<String, JsValue> {
+pub fn transport_open_status(handle: u32, envelope: &[u8]) -> Result<String, &'static str> {
     let transport = ESCROW_CEREMONIES.with(|table| {
         let mut table = table.borrow_mut();
         match table.remove(&handle)? {
             EscrowCeremony::Awaiting(transport) => Some(transport),
-            other @ EscrowCeremony::Restored(_) => {
+            other @ (EscrowCeremony::Restored(_) | EscrowCeremony::Enrolling(_)) => {
                 table.insert(handle, other);
                 None
             }
         }
     });
     let restored = transport
-        .ok_or_else(bridge_argument)?
-        .open(&envelope)
-        .map_err(|error| JsValue::from_str(error.code()))?;
+        .ok_or(ESCROW_BRIDGE_ARGUMENT_CODE)?
+        .open(envelope)
+        .map_err(|error| error.code())?;
     let rendered = transport_open_json(
         restored.kem_key_thumbprint().as_bytes(),
         restored.authorization_object_hash().as_bytes(),
@@ -327,12 +335,55 @@ pub fn reader_key_escrow_transport_open(handle: u32, envelope: Vec<u8>) -> Resul
     Ok(rendered)
 }
 
-/// Bricht ab: nullt Transport oder wiederhergestellten KEM. Idempotent — die
-/// Oberfläche ruft es beim Verlassen und auf `pagehide`.
+/// Zeremonie B, Abbruch — die Tabellenhälfte von
+/// `readerKeyEscrowTransportAbort`: nullt Transport oder wiederhergestellten
+/// KEM, und zwar unter JEDER Kennung, unter der er liegt — auch im
+/// Enrollment, in das `enrollmentBeginRestored` ihn gelegt hat
+/// (Controller-Ruling Fixrunde 3: Sperrung in Zeremonie B = Verbrauch durch
+/// `open`, Abbruch, `pagehide`, Neuladen). Idempotent.
+pub fn transport_abort(handle: u32) {
+    let removed = ESCROW_CEREMONIES.with(|table| table.borrow_mut().remove(&handle));
+    if let Some(EscrowCeremony::Enrolling(enrollment)) = removed {
+        crate::webauthn::discard_enrollment(enrollment);
+    }
+}
+
+/// Zeremonie B, Beginn: gültiges Escrow zur Subject-ID prüfen, flüchtigen
+/// Transport-Schlüssel ziehen, Transportdatei herausgeben.
+///
+/// # Errors
+/// `EA-READER-ESCROW-BRIDGE-ARGUMENT`, die Codes von `ea-trust` für einen
+/// Anker, der nicht dekodiert, und die von [`transport_begin_status`].
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "readerKeyEscrowTransportBegin")]
+pub fn reader_key_escrow_transport_begin(
+    pinned_anchor: Vec<u8>,
+    subject_id: Vec<u8>,
+    source: u32,
+    now_ms: f64,
+) -> Result<String, JsValue> {
+    let subject = SubjectId::try_from(&subject_id[..]).map_err(|_| bridge_argument())?;
+    let anchor =
+        decode_trust_anchor(&pinned_anchor).map_err(|error| JsValue::from_str(error.code()))?;
+    let source = take_directory_source(source).map_err(|_| bridge_argument())?;
+    transport_begin_status(&anchor, &source, subject, UnixMillis::new(now_ms as i64))
+        .map_err(JsValue::from_str)
+}
+
+/// Zeremonie B, Import: siehe [`transport_open_status`].
+///
+/// # Errors
+/// Die von [`transport_open_status`].
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = "readerKeyEscrowTransportOpen")]
+pub fn reader_key_escrow_transport_open(handle: u32, envelope: Vec<u8>) -> Result<String, JsValue> {
+    transport_open_status(handle, &envelope).map_err(JsValue::from_str)
+}
+
+/// Bricht ab: siehe [`transport_abort`]. Die Oberfläche ruft es beim
+/// Verlassen der Seite und auf `pagehide`.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = "readerKeyEscrowTransportAbort")]
 pub fn reader_key_escrow_transport_abort(handle: u32) {
-    ESCROW_CEREMONIES.with(|table| {
-        table.borrow_mut().remove(&handle);
-    });
+    transport_abort(handle);
 }
