@@ -102,6 +102,7 @@ pub mod historical_grant;
 pub mod production_state;
 pub mod reader_key_escrow_inbox;
 pub mod reader_key_escrow_opening;
+pub mod reader_key_escrow_publication;
 
 pub mod ceremony_steps;
 pub mod clock_release;
