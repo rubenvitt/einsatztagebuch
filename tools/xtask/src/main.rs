@@ -2453,17 +2453,25 @@ const STAGE_FOUR_HOST_SCOPE_CLAUSE: &str = concat!(
     "Plattform ist damit NICHT belegt und bleibt Stufe 7."
 );
 
-/// Stufe 5 friert KEINE Vektorfamilie ein, wie Stufe 4.
+/// Die drei Vektorfamilien, die Stufe 5 mit dem Reader-Key-Escrow v1.1
+/// einfriert (DRK-318,
+/// `docs/superpowers/specs/2026-09-08-einsatzarchiv-reader-key-escrow-profile.md`
+/// §9, Entscheidung 11): eigene Familien NEBEN `vectors/trust/v1/`, nach dem
+/// Vorbild [`STAGE_THREE_VECTOR_FAMILIES`].
 ///
-/// Die drei Stufe-5-Domain-Strings sind mit `c96045c` als Golden-Vektoren der
-/// Suite 1 ERGAENZT worden (PREFLIGHT, GOLIVE-POSTURE,
-/// NATIVE-ARCHIVE-COMPONENT); kein bestehender Vektor aendert sich, und eine
-/// Ergaenzung in eine fremde Familie ist kein Einfrieren einer eigenen.
+/// Die Ergänzungen der Suite 1 sind KEIN Einfrieren einer eigenen Familie und
+/// stehen deshalb nicht hier: die drei Stufe-5-Domain-Strings aus `c96045c`
+/// (PREFLIGHT, GOLIVE-POSTURE, NATIVE-ARCHIVE-COMPONENT) und die Domäne des
+/// `escrow-core-hash` unter DRK-318. Kein bestehender Vektor ändert sich.
 ///
-/// Der Bericht weist den Schluessel `vector_families` trotzdem aus, mit einem
-/// LEEREN Array — dieselbe Begruendung wie in
-/// [`STAGE_FOUR_VECTOR_FAMILIES`].
-const STAGE_FIVE_VECTOR_FAMILIES: [&str; 0] = [];
+/// Anders als in Stufe 3 verlangt der Gate hier (noch) KEIN Berichtsliteral
+/// der Familien in `docs/traceability/stage-5-gate.md`; der Bericht zieht mit
+/// Scheibe (f) von DRK-318 nach.
+const STAGE_FIVE_VECTOR_FAMILIES: [&str; 3] = [
+    "reader-key-escrow",
+    "reader-key-escrow-approval",
+    "reader-key-escrow-recovery",
+];
 
 /// Die primaeren Abnahmekriterien der Stufe 5 nach Task 14 des Stufe-5-Plans.
 ///
@@ -4173,8 +4181,8 @@ fn run_stage_five_gate(root: &Path) -> Result<(), String> {
     let gate_root = stage_gate_root(root);
     let mut problems = Vec::new();
 
-    // 1. Vektorfamilien — KEINE, wie in Stufe 4. Die Schleife haelt die Form
-    // der vier frueheren Gates.
+    // 1. Vektorfamilien — die drei Escrow-Familien (DRK-318). Die Schleife
+    // hält die Form der vier früheren Gates.
     let vectors = gate_root.join("vectors");
     let mut families: Vec<&str> = Vec::new();
     for family in STAGE_FIVE_VECTOR_FAMILIES {

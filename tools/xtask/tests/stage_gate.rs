@@ -3265,6 +3265,15 @@ fn stage_four_gate_report_records_the_measured_full_gate_run() {
 /// Die zwei Skripte, die Stufe 5 verlangt.
 const STAGE_FIVE_SCRIPTS: [&str; 2] = ["stage-gate:5", "test:recovery"];
 
+/// Die drei Vektorfamilien, die Stufe 5 mit dem Reader-Key-Escrow v1.1
+/// (DRK-318, Profil §9) einfriert. Das Berichtsliteral in
+/// `docs/traceability/stage-5-gate.md` zieht erst Scheibe (f) nach.
+const STAGE_FIVE_FAMILIES: [&str; 3] = [
+    "reader-key-escrow",
+    "reader-key-escrow-approval",
+    "reader-key-escrow-recovery",
+];
+
 /// Der Stufe-5-Gate-Bericht, relativ zur Gate-Wurzel.
 const STAGE_FIVE_GATE_REPORT_PATH: &str = "docs/traceability/stage-5-gate.md";
 
@@ -3333,6 +3342,9 @@ fn write_stage_five_ledger(root: &Path, still_planned: &[&str]) {
 /// `planned`.
 fn stage_five_fixture(label: &str) -> PathBuf {
     let root = fixture_root(label);
+    for family in STAGE_FIVE_FAMILIES {
+        write_family_manifest(&root, family);
+    }
     copy_from_the_workspace(&root, DESIGN_DOCUMENT_RELATIVE);
     copy_from_the_workspace(&root, STAGE_FIVE_GATE_REPORT_PATH);
     write_stage_five_ledger(&root, &[STAGE_FIVE_DOCUMENTED_BOUNDARY]);
@@ -3419,10 +3431,10 @@ fn stage_five_gate_passes_the_checked_in_tree_with_wr_075_as_the_only_open_row()
         "no stage 5 ledger row other than the documented boundary may still be planned; \
          stdout: {stdout}"
     );
-    // Der Schluessel steht mit einem LEEREN Array da und fehlt nicht.
+    // Seit DRK-318 friert Stufe 5 die drei Escrow-Familien ein.
     assert_eq!(
         report["vector_families"],
-        serde_json::json!([] as [&str; 0])
+        serde_json::json!(STAGE_FIVE_FAMILIES)
     );
 }
 
@@ -3465,11 +3477,34 @@ fn stage_five_gate_accepts_a_ledger_whose_only_open_row_is_the_documented_bounda
         serde_json::json!([] as [&str; 0]),
         "a documented boundary must never be counted as an unevidenced row"
     );
-    // Der Schluessel steht mit einem LEEREN Array da und fehlt nicht.
+    // Seit DRK-318 friert Stufe 5 die drei Escrow-Familien ein.
     assert_eq!(
         report["vector_families"],
-        serde_json::json!([] as [&str; 0])
+        serde_json::json!(STAGE_FIVE_FAMILIES)
     );
+}
+
+/// Hält fest, dass der Gate eine fehlende Escrow-Familie beim Namen nennt.
+///
+/// Nach dem Vorbild der Stufe-3-Phase „die additive Vektorfamilie fehlt":
+/// jede der drei Familien einzeln, weil ein Gate, der nur die erste prüft,
+/// die beiden anderen still verlöre.
+#[test]
+fn stage_five_gate_names_a_missing_reader_key_escrow_family() {
+    for family in STAGE_FIVE_FAMILIES {
+        let root = stage_five_fixture(&format!("stage-five-family-{family}"));
+        fs::remove_dir_all(root.join("vectors").join(family)).unwrap();
+        let output = run_stage_gate(&root, "5");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(2), "{family}");
+        assert!(
+            stderr.contains(&format!(
+                "manifest under {}",
+                root.join("vectors").display()
+            )) && stderr.contains(&format!(": {family}")),
+            "stage-gate 5 must name the missing vector family {family}; stderr: {stderr}"
+        );
+    }
 }
 
 /// Haelt fest, dass die Ausnahme fuer die dokumentierte Grenze an der
