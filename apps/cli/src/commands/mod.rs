@@ -47,6 +47,7 @@ pub mod recovery_test;
 pub mod registry;
 pub mod report;
 pub mod verify;
+pub mod web_bundle;
 pub mod writer_transition;
 
 use std::path::Path;
@@ -117,6 +118,26 @@ pub fn run(invocation: &Invocation, now: UnixMillis) -> ExitCode {
         Command::OrganizationReaderKeyEscrowPublish { config, inbox } => {
             reader_key_escrow::run_publish(invocation, config, inbox, now)
         }
+        // Die Root-Zeremonie der Bundle-Familie (U4); Fachlogik in
+        // `ea_admin::web_bundle_release`.
+        Command::OrganizationWebBundleRelease {
+            config,
+            bundle,
+            bundle_version,
+            effective_from,
+        } => web_bundle::run_release(
+            invocation,
+            config,
+            bundle,
+            bundle_version,
+            *effective_from,
+            now,
+        ),
+        Command::OrganizationWebBundleRevoke {
+            config,
+            release,
+            effective_from,
+        } => web_bundle::run_revoke(invocation, config, release, *effective_from, now),
         // Zeremonie B: Fachlogik in `ea_admin::reader_key_escrow_opening`, der
         // Bestand eine Ebene tiefer in `OperatorRuntime::open` geprüft.
         Command::ReaderKeyEscrowOpen {

@@ -67,6 +67,53 @@ pub enum WebBundleRequest {
     },
 }
 
+/// Die größte Bundle-Datei, die gehasht wird.
+const MAX_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
+
+impl WebBundleRequest {
+    /// Eine Freigabe des Bundles in `bundle`: sein Hash ist
+    /// `ea_crypto::web_bundle_hash` über die exakten Bytes — dieselbe Funktion,
+    /// mit der der Reader eine Kandidatenfassung prüft.
+    ///
+    /// # Errors
+    ///
+    /// `TransferFile`, wenn die Datei fehlt, keine reguläre Datei oder zu groß
+    /// ist.
+    pub fn release_of_bundle_file(
+        bundle: &Path,
+        bundle_version: String,
+        effective_from: Option<RegistryVersion>,
+    ) -> Result<Self, ReaderKeyEscrowError> {
+        let bytes = fs::metadata(bundle)
+            .ok()
+            .filter(|metadata| metadata.is_file() && metadata.len() <= MAX_BUNDLE_BYTES)
+            .and_then(|_| fs::read(bundle).ok())
+            .ok_or(ReaderKeyEscrowError::TransferFile)?;
+        Ok(Self::Release {
+            bundle_hash: ea_crypto::web_bundle_hash(&bytes),
+            bundle_version,
+            effective_from,
+        })
+    }
+
+    /// Der Widerruf der Freigabe, deren exakte Bytes in `release` liegen.
+    ///
+    /// # Errors
+    ///
+    /// `TransferFile`, wenn die Datei fehlt oder kein Archivobjekt ist.
+    pub fn revocation_of_release_file(
+        release: &Path,
+        effective_from: Option<RegistryVersion>,
+    ) -> Result<Self, ReaderKeyEscrowError> {
+        let bytes = fs::read(release).map_err(|_| ReaderKeyEscrowError::TransferFile)?;
+        ea_format::decode_exact_object(&bytes).map_err(|_| ReaderKeyEscrowError::TransferFile)?;
+        Ok(Self::Revocation {
+            release_object_hash: object_hash(&bytes),
+            effective_from,
+        })
+    }
+}
+
 /// Das geschriebene Objekt.
 pub struct PublishedWebBundleObject {
     pub object_hash: ObjectHash,

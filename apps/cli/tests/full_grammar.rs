@@ -55,7 +55,7 @@ const PIN_V1: &str = "pin-7731-distinct";
 /// Geschlossen und nicht „mindestens diese Zeilen": nur ein vollstaendiger
 /// Vergleich faellt ueber eine zusaetzliche oder umsortierte Zeile. Die
 /// ersten sieben Zeilen sind `design.md` §16.1 in dessen Reihenfolge.
-const PRINTED_GRAMMAR_V1: [&str; 30] = [
+const PRINTED_GRAMMAR_V1: [&str; 32] = [
     "einsatzarchiv --trust-anchor <file> verify <archive-path>",
     "einsatzarchiv --trust-anchor <file> list <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
@@ -66,6 +66,8 @@ const PRINTED_GRAMMAR_V1: [&str; 30] = [
     "einsatzarchiv --trust-anchor <new-file> organization init",
     "einsatzarchiv --trust-anchor <new-file> organization certify-root --initial-registry-version <u64>",
     "einsatzarchiv --trust-anchor <file> organization reader-key-escrow-publish --operator-config <file> --escrow-inbox <dir>",
+    "einsatzarchiv --trust-anchor <file> organization web-bundle-release --operator-config <file> --bundle <file> --bundle-version <version> [--effective-from-registry-version <u64>]",
+    "einsatzarchiv --trust-anchor <file> organization web-bundle-revoke --operator-config <file> --release <release.etb> [--effective-from-registry-version <u64>]",
     "einsatzarchiv --trust-anchor <file> posture target --operator-config <file> --output <new-target.json>",
     "einsatzarchiv --trust-anchor <file> posture issue --operator-config <file> --posture-target <target.json> --evidence-reference <public-document> --valid-for-ms <1..86400000> --output <new-document.cbor>",
     "einsatzarchiv --trust-anchor <file> posture import --operator-config <file> --posture-document <document.cbor>",
