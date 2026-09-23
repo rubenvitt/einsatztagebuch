@@ -22,15 +22,20 @@
 //!   nicht mehr, nur ihre Identität).
 //!
 //! Verfall (Entscheidung D5): gültig bei `now < stored + 86 400 000`, verfallen
-//! ab `>=`. Jedes Escrow-Kommando löscht verfallene Ergebnisse nach seiner
-//! Reauthentifizierung. Ein Ergebnis, nach dem nie wieder ein
-//! Escrow-Kommando läuft, bleibt verschlüsselt liegen — benannte Grenze.
+//! ab `>=`. Jedes Escrow-Kommando löscht verfallene Ergebnisse gleich beim
+//! Start, VOR Prüfung und Reauthentifizierung
+//! ([`purge_expired_reader_key_escrow_results`]): unter dem geprüften Gerät
+//! ohne Bedienerbindung, je Ergebnis atomar mit Abschlusszeile und Audit
+//! 14/`failed`. Benannte Grenzen: ein Ergebnis, nach dem nie wieder ein
+//! Escrow-Kommando läuft, bleibt verschlüsselt liegen; die ausgelieferte
+//! Umschlagdatei im Ausgang (`--escrow-outbox`) ist eine Kopie außerhalb der
+//! Datenbank und fällt nicht unter diesen Verfall.
 
 use std::path::Path;
 
 use ea_audit::{
-    AuditActorProof, LocalAuditService, SignedLocalAuditService, SqliteLocalAuditRepository,
-    TypedLocalAuditEvent,
+    AuditActorProof, LocalAuditService, PreparedLocalAuditEvent, SignedLocalAuditService,
+    SqliteLocalAuditRepository, TypedLocalAuditEvent,
 };
 use ea_crypto::{CanonicalPublicCoseKey, HpkeRecipientPublicKey, object_hash};
 use ea_format::{
@@ -189,7 +194,7 @@ impl<'a> ReaderKeyEscrowLedger<'a> {
     fn prepare(
         &self,
         event: TypedLocalAuditEvent,
-    ) -> Result<ea_audit::PreparedLocalAuditEvent, ReaderKeyEscrowError> {
+    ) -> Result<PreparedLocalAuditEvent, ReaderKeyEscrowError> {
         self.audit
             .prepare_signed(AuditActorProof::OperatorSession(self.proof), event)
             .map_err(|_| ReaderKeyEscrowError::Audit)
@@ -206,40 +211,7 @@ impl<'a> ReaderKeyEscrowLedger<'a> {
     ///
     /// `Store` oder `Audit`; der Zustand bleibt dann unverändert.
     pub fn purge_expired(&self) -> Result<usize, ReaderKeyEscrowError> {
-        let now = (self.clock)()?;
-        let mut purged = 0;
-        while purged < MAX_PURGE {
-            let row = self
-                .database
-                .query_row(
-                    "SELECT r.authorization_object_hash,o.escrow_object_hash,o.target_transport_key_thumbprint \
-                     FROM reader_key_escrow_result r JOIN reader_key_escrow_opening o \
-                     ON o.authorization_object_hash=r.authorization_object_hash \
-                     WHERE r.expires_at_ms<=?1 ORDER BY r.authorization_object_hash LIMIT 1",
-                    &[StoreValue::Integer(now.get())],
-                )
-                .map_err(|_| ReaderKeyEscrowError::Store)?;
-            let Some(row) = row else {
-                return Ok(purged);
-            };
-            let hashes = (|| -> Result<_, StoreError> {
-                Ok((
-                    ObjectHash::try_from(row.blob(0)?).map_err(|_| StoreError::Shape)?,
-                    ObjectHash::try_from(row.blob(1)?).map_err(|_| StoreError::Shape)?,
-                    KeyThumbprint::try_from(row.blob(2)?).map_err(|_| StoreError::Shape)?,
-                ))
-            })()
-            .map_err(|_| ReaderKeyEscrowError::Store)?;
-            let (authorization, escrow, thumbprint) = hashes;
-            let prepared = self.prepare(TypedLocalAuditEvent::reader_key_escrow_failed(
-                escrow,
-                authorization,
-                thumbprint,
-            ))?;
-            self.close_in_transaction(authorization, CLOSED_EXPIRED, now, &prepared, None)?;
-            purged += 1;
-        }
-        Ok(purged)
+        purge_expired_results(self.database, (self.clock)()?, &|event| self.prepare(event))
     }
 
     /// Das gespeicherte Ergebnis zu einer Autorisierung — oder der Grund,
@@ -281,7 +253,8 @@ impl<'a> ReaderKeyEscrowLedger<'a> {
             stored.authorization_object_hash,
             stored.target_transport_key_thumbprint,
         ))?;
-        self.close_in_transaction(
+        close_in_transaction(
+            self.database,
             stored.authorization_object_hash,
             CLOSED_DELIVERED,
             now,
@@ -289,16 +262,66 @@ impl<'a> ReaderKeyEscrowLedger<'a> {
             Some(&stored.exact_envelope),
         )
     }
+}
 
-    fn close_in_transaction(
-        &self,
-        authorization: ObjectHash,
-        reason: i64,
-        now: UnixMillis,
-        prepared: &ea_audit::PreparedLocalAuditEvent,
-        exact_envelope: Option<&[u8]>,
-    ) -> Result<(), ReaderKeyEscrowError> {
-        self.database
+/// Löscht jedes Ergebnis mit `now >= expires_at` — je Ergebnis atomar mit
+/// seiner Abschlusszeile (Grund 1) und der Auditzeile 14/`failed`, die
+/// `prepare` unter dem Akteur des Aufrufers signiert.
+fn purge_expired_results(
+    database: &EncryptedDatabase,
+    now: UnixMillis,
+    prepare: &dyn Fn(TypedLocalAuditEvent) -> Result<PreparedLocalAuditEvent, ReaderKeyEscrowError>,
+) -> Result<usize, ReaderKeyEscrowError> {
+    let mut purged = 0;
+    while purged < MAX_PURGE {
+        let row = database
+            .query_row(
+                "SELECT r.authorization_object_hash,o.escrow_object_hash,o.target_transport_key_thumbprint \
+                 FROM reader_key_escrow_result r JOIN reader_key_escrow_opening o \
+                 ON o.authorization_object_hash=r.authorization_object_hash \
+                 WHERE r.expires_at_ms<=?1 ORDER BY r.authorization_object_hash LIMIT 1",
+                &[StoreValue::Integer(now.get())],
+            )
+            .map_err(|_| ReaderKeyEscrowError::Store)?;
+        let Some(row) = row else {
+            return Ok(purged);
+        };
+        let hashes = (|| -> Result<_, StoreError> {
+            Ok((
+                ObjectHash::try_from(row.blob(0)?).map_err(|_| StoreError::Shape)?,
+                ObjectHash::try_from(row.blob(1)?).map_err(|_| StoreError::Shape)?,
+                KeyThumbprint::try_from(row.blob(2)?).map_err(|_| StoreError::Shape)?,
+            ))
+        })()
+        .map_err(|_| ReaderKeyEscrowError::Store)?;
+        let (authorization, escrow, thumbprint) = hashes;
+        let prepared = prepare(TypedLocalAuditEvent::reader_key_escrow_failed(
+            escrow,
+            authorization,
+            thumbprint,
+        ))?;
+        close_in_transaction(
+            database,
+            authorization,
+            CLOSED_EXPIRED,
+            now,
+            &prepared,
+            None,
+        )?;
+        purged += 1;
+    }
+    Ok(purged)
+}
+
+fn close_in_transaction(
+    database: &EncryptedDatabase,
+    authorization: ObjectHash,
+    reason: i64,
+    now: UnixMillis,
+    prepared: &PreparedLocalAuditEvent,
+    exact_envelope: Option<&[u8]>,
+) -> Result<(), ReaderKeyEscrowError> {
+    database
             .transaction(|tx| {
                 let closed = tx.query_row(
                     "SELECT reason FROM reader_key_escrow_result_closure WHERE authorization_object_hash=?1",
@@ -337,7 +360,6 @@ impl<'a> ReaderKeyEscrowLedger<'a> {
                 Ok(())
             })
             .map_err(|Tx(error)| error)
-    }
 }
 
 const fn closure_error(reason: i64) -> ReaderKeyEscrowError {
@@ -516,6 +538,36 @@ fn require_recovery_operator(runtime: &OperatorRuntime) -> Result<(), ReaderKeyE
     Ok(())
 }
 
+/// Der Verfall beim Start jedes Escrow-Kommandos (Entscheidung D5, Profil §8):
+/// löscht jedes verfallene Ergebnis, BEVOR geprüft oder reauthentifiziert
+/// wird — auch wenn beides danach scheitert.
+///
+/// Es gibt dafür keinen frischen Bedienernachweis. Gebucht wird deshalb unter
+/// dem geprüften Gerät dieser Laufzeit (am gewählten Kopf nachgeprüft) und
+/// ohne Bedienerbindung, mit der Gerätesignatur — wie die Gerätezeilen des
+/// Bindungslebenszyklus (`operator_host`). Aktion und Ausgang sind die des
+/// Verfalls: 14/`failed`.
+///
+/// # Errors
+///
+/// `Operator`, wenn das Gerät am gewählten Kopf nicht mehr trägt; `Store`
+/// oder `Audit`, dann bleibt der Zustand des betroffenen Ergebnisses
+/// unverändert.
+pub fn purge_expired_reader_key_escrow_results(
+    runtime: &OperatorRuntime,
+) -> Result<usize, ReaderKeyEscrowError> {
+    let device = runtime
+        .local_device()
+        .unbound_audit_actor(runtime.head())
+        .map_err(|_| ReaderKeyEscrowError::Operator)?;
+    let audit = runtime.audit_service();
+    purge_expired_results(runtime.database(), wall_clock()?, &|event| {
+        audit
+            .prepare_signed(AuditActorProof::AuthenticatedDevice(&device), event)
+            .map_err(|_| ReaderKeyEscrowError::Audit)
+    })
+}
+
 /// Der Reauthentifizierungskontext: der Objekthash der Restore-Bindung, die
 /// Autorisierungs-Objekthash und Transport-Abdruck trägt (Profil §6
 /// Schritt 3). Die Domänentrennung kommt aus dem Suite-Literal im CBOR.
@@ -571,11 +623,11 @@ fn deliver(
 /// Zeremonie B: öffnet das Escrow der Autorisierung mit dem Recovery-Schlüssel
 /// und liefert den versiegelten Umschlag in den Ausgang.
 ///
-/// Reihenfolge: Rolle und Zweck; Prüfung der Autorisierung über `ea-trust`
-/// gegen den gewählten Kopf und seine exakte Sequenz; genau eine passende
-/// Transportdatei, geprüft über `require_target_transport_key`; frische
-/// Reauthentifizierung mit dem Restore-Kontext; Verfall; Öffnung
-/// (Verbrauch vor Provider); Auslieferung.
+/// Reihenfolge: Rolle und Zweck; Verfall; Prüfung der Autorisierung über
+/// `ea-trust` gegen den gewählten Kopf und seine exakte Sequenz; genau eine
+/// passende Transportdatei, geprüft über `require_target_transport_key`;
+/// frische Reauthentifizierung mit dem Restore-Kontext; Öffnung (Verbrauch
+/// vor Provider); Auslieferung.
 ///
 /// # Errors
 ///
@@ -588,6 +640,7 @@ pub fn open_reader_key_escrow(
     outbox: &Path,
 ) -> Result<DeliveredReaderKeyEscrow, ReaderKeyEscrowError> {
     require_recovery_operator(runtime)?;
+    purge_expired_reader_key_escrow_results(runtime)?;
     let authorization = verify_reader_key_escrow_recovery_authorization(
         runtime.trust(),
         runtime.head(),
@@ -607,7 +660,6 @@ pub fn open_reader_key_escrow(
     )?;
     let audit = runtime.audit_service();
     let ledger = ReaderKeyEscrowLedger::new(runtime.database(), &audit, session.proof());
-    ledger.purge_expired()?;
     let current = || session_current(runtime, session.proof());
     ReaderKeyEscrowOpeningService::new(recovery_key, &ledger, &current)
         .open(&authorization, &transport)?;
@@ -616,7 +668,8 @@ pub fn open_reader_key_escrow(
 
 /// Setzt eine abgebrochene Auslieferung fort: dieselbe exakte Autorisierung,
 /// frische Reauthentifizierung und eine Transportdatei mit GLEICHEM Abdruck.
-/// Das gespeicherte Ergebnis wird nie neu versiegelt.
+/// Das gespeicherte Ergebnis wird nie neu versiegelt. Verfallene Ergebnisse
+/// löscht sie wie die Öffnung gleich beim Start.
 ///
 /// # Errors
 ///
@@ -630,6 +683,7 @@ pub fn pickup_reader_key_escrow(
     outbox: &Path,
 ) -> Result<DeliveredReaderKeyEscrow, ReaderKeyEscrowError> {
     require_recovery_operator(runtime)?;
+    purge_expired_reader_key_escrow_results(runtime)?;
     let authorization = object_hash(exact_authorization);
     let (stored, _) = read_stored_result(runtime.database(), authorization)?;
     stored.require_transport_key(read_transport_key(
@@ -640,7 +694,6 @@ pub fn pickup_reader_key_escrow(
     let session = reauthenticate(runtime, restore_context_hash(stored.restore_context()))?;
     let audit = runtime.audit_service();
     let ledger = ReaderKeyEscrowLedger::new(runtime.database(), &audit, session.proof());
-    ledger.purge_expired()?;
     session_current(runtime, session.proof())?;
     deliver(&ledger, authorization, outbox)
 }

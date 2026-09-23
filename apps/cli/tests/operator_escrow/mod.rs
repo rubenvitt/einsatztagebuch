@@ -786,3 +786,98 @@ fn reader_key_escrow_open_refuses_a_session_expiring_after_consumption() {
     assert_eq!(fs::read_dir(&installation.outbox).unwrap().count(), 0);
     installation.assert_no_canaries(&[&expired, &again]);
 }
+
+/// Verfall beim Kommandostart (review-c P3-1, Controller-Ruling): ein
+/// abgelaufenes Ergebnis wird gelöscht, BEVOR die Reauthentifizierung läuft
+/// — auch wenn sie danach scheitert. Die Löschung steht mit 14/`failed` unter
+/// dem geprüften Gerät (ohne Bedienerbindung) im Audit, atomar mit der
+/// Abschlusszeile (Grund 1).
+#[test]
+fn an_expired_result_is_purged_before_a_failing_reauthentication() {
+    let installation = EscrowInstallation::new("escrow-purge", "reader-key-escrow-recovery");
+    installation.transport(TRANSPORT_SEED);
+    let authorization = installation.authorization(0xf5, TRANSPORT_SEED);
+    let recovery = installation.software_recovery_key();
+
+    // Ein Verbrauch ohne Ergebnis; dann ein Ergebnis dazu, das seit
+    // 86 400 000 ms verfallen ist.
+    let consumed = installation.open_marked(
+        &recovery,
+        &authorization,
+        Some("escrow-expires-after-consumption"),
+    );
+    assert_eq!(consumed.status.code(), Some(12));
+    let authorization_hash = ea_crypto::object_hash(&fs::read(&authorization).unwrap());
+    installation
+        .database()
+        .execute(
+            "INSERT INTO reader_key_escrow_result(authorization_object_hash,target_transport_key_thumbprint,exact_envelope,stored_at_ms,expires_at_ms) VALUES(?1,?2,?3,0,86400000)",
+            &[
+                StoreValue::Blob(authorization_hash.as_bytes().to_vec()),
+                StoreValue::Blob(thumbprint_of(TRANSPORT_SEED).as_bytes().to_vec()),
+                StoreValue::Blob(vec![0x5a; 64]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(installation.count("reader_key_escrow_result"), 1);
+
+    // Die Reauthentifizierung scheitert (abgelaufene Laufzeit) — das
+    // verfallene Ergebnis ist trotzdem weg.
+    let refused = installation.open_marked(&recovery, &authorization, Some("escrow-stale-runtime"));
+    assert_eq!(
+        refused.status.code(),
+        Some(12),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("EA-ESCROW-OPERATOR-UNAUTHORIZED"));
+    assert!(
+        installation
+            .audit_rows()
+            .iter()
+            .any(|row| matches!(row.action(), LocalAuditActionV1::SessionExpired(_))),
+        "the reauthentication failed"
+    );
+    assert_eq!(installation.count("reader_key_escrow_result"), 0);
+    let closure = installation
+        .database()
+        .query_row("SELECT reason FROM reader_key_escrow_result_closure", &[])
+        .unwrap()
+        .unwrap()
+        .integer(0)
+        .unwrap();
+    assert_eq!(closure, 1, "closed as expired");
+    let escrow_rows: Vec<_> = installation
+        .audit_rows()
+        .into_iter()
+        .filter(|row| matches!(row.action(), LocalAuditActionV1::ReaderKeyEscrowOpening(_)))
+        .collect();
+    assert_eq!(
+        escrow_rows
+            .iter()
+            .map(|row| row.outcome())
+            .collect::<Vec<_>>(),
+        [
+            LocalAuditOutcomeV1::Accepted,
+            LocalAuditOutcomeV1::Failed,
+            LocalAuditOutcomeV1::Failed
+        ]
+    );
+    // Die Verfallszeile entstand ohne Bedienernachweis, also vor der
+    // Reauthentifizierung, unter dem geprüften Gerät.
+    let purge = escrow_rows.last().unwrap();
+    assert!(purge.operator_binding_object_hash().is_none());
+    assert_eq!(
+        purge.signer_certificate_object_hash().as_bytes(),
+        installation
+            .material
+            .line
+            .second_bootstrap_admin_hash()
+            .as_bytes()
+    );
+    assert!(
+        escrow_rows[1].operator_binding_object_hash()
+            == Some(installation.material.operator_binding)
+    );
+    installation.assert_no_canaries(&[&consumed, &refused]);
+}
