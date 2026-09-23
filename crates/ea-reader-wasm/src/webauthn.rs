@@ -925,6 +925,10 @@ pub async fn enrollment_finish(
 /// erst NACH dem Geraetetor entnommen: ein Geraet mit Tresor weist ab, und der
 /// wiederhergestellte KEM bleibt dann liegen (Abbruch nullt ihn).
 ///
+/// Organisation, Subject und Anker nimmt diese Ausfuhr NICHT (review-e F2):
+/// sie reisen mit dem KEM aus dem geprueften Transport. Nur der
+/// Buendel-Fingerprint kommt vom Aufrufer — derselbe, den das Gate zeigt.
+///
 /// # Errors
 /// Wie [`enrollment_begin`], dazu `EA-READER-ENROLLMENT-BRIDGE-ARGUMENT` fuer
 /// eine Kennung ohne wiederhergestellten KEM.
@@ -932,18 +936,10 @@ pub async fn enrollment_finish(
 #[wasm_bindgen(js_name = "enrollmentBeginRestored")]
 pub async fn enrollment_begin_restored(
     restored: u32,
-    organization_id: Vec<u8>,
-    subject_id: Vec<u8>,
-    pinned_anchor: Vec<u8>,
     bundle_fingerprint: Vec<u8>,
 ) -> Result<String, JsValue> {
-    let organization_id =
-        OrganizationId::try_from(&organization_id[..]).map_err(|_| bridge_argument())?;
-    let subject_id = SubjectId::try_from(&subject_id[..]).map_err(|_| bridge_argument())?;
     let bundle_fingerprint =
         Hash32::try_from(&bundle_fingerprint[..]).map_err(|_| bridge_argument())?;
-    let anchor =
-        decode_trust_anchor(&pinned_anchor).map_err(|error| JsValue::from_str(error.code()))?;
     if !crate::escrow_bridge::holds_restored(restored) {
         return Err(bridge_argument());
     }
@@ -959,15 +955,8 @@ pub async fn enrollment_begin_restored(
         ));
     }
     let kem = crate::escrow_bridge::take_restored(restored).ok_or_else(bridge_argument)?;
-    let enrollment = ReaderEnrollment::begin_restored(
-        &store,
-        organization_id,
-        subject_id,
-        anchor,
-        bundle_fingerprint,
-        kem,
-    )
-    .map_err(|error| JsValue::from_str(error.code()))?;
+    let enrollment = ReaderEnrollment::begin_restored(&store, bundle_fingerprint, kem)
+        .map_err(|error| JsValue::from_str(error.code()))?;
 
     let registered_credential_ids = registered_credential_ids_json(&enrollment);
     let handle = next_handle();

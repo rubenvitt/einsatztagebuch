@@ -457,13 +457,16 @@ impl ReaderEnrollment {
     /// der alte ist mit dem verlorenen Tresor verloren. Der Abdruck, den das
     /// Gate zeigt, ist deshalb der KEM des alten Reader-Zertifikats.
     ///
+    /// Organisation, Subject und Anker sind KEINE Parameter (review-e F2): sie
+    /// kommen aus [`RestoredReaderKemV1`], also aus dem Transport, dessen
+    /// Anker das Escrow geprueft hat, und `open` hat sie gegen das Escrow
+    /// gestellt. Ein Aufrufer kann beim zweiten Schritt keinen anderen Anker
+    /// pinnen.
+    ///
     /// # Errors
     /// Wie [`ReaderEnrollment::begin`].
     pub fn begin_restored(
         store: &dyn ReaderBlobStore,
-        organization_id: OrganizationId,
-        subject_id: SubjectId,
-        pinned_anchor: TrustAnchorV1,
         bundle_fingerprint: Hash32,
         restored: RestoredReaderKemV1,
     ) -> Result<Self, EnrollmentError> {
@@ -473,12 +476,13 @@ impl ReaderEnrollment {
         let mut audit_bytes = random_bytes::<32>()?;
         let audit_private_key = SecretBytes::new(audit_bytes);
         audit_bytes.zeroize();
+        let binding = restored.into_vault_binding();
         Self::from_keys(
-            organization_id,
-            subject_id,
-            pinned_anchor,
+            binding.organization_id,
+            binding.subject_id,
+            binding.pinned_anchor,
             bundle_fingerprint,
-            restored.into_secret(),
+            binding.kem_private_key,
             audit_private_key,
         )
     }
