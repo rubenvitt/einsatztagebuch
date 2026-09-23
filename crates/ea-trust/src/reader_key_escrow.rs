@@ -46,6 +46,7 @@ use crate::{
     AdminAuthorizationReplayKey, RegistryError, RegistryHeadPin, SelectedRegistryHead, TrustError,
     TrustStateStore, VerifiedTrust,
     admin_authorization::{AdminSignerClaim, consume_replay_keys, verify_admin_signer_claim},
+    catalog::TrustCatalog,
     reader_key_escrow_recovery::{
         recovery_signers_rule, recovery_target_rule, verify_recovery_for_admission,
     },
@@ -514,9 +515,19 @@ pub fn verify_reader_key_escrows(
     trust: &VerifiedTrust,
     head: ReaderKeyEscrowHead<'_>,
 ) -> Result<VerifiedReaderKeyEscrowSet, TrustError> {
+    let catalog = &trust.inner.catalog;
     let line_tip;
     let head_state = match head {
         ReaderKeyEscrowHead::Selected(selected) => selected.candidate_state(),
+        // Ohne ein einziges Objekt der drei Familien gibt es nichts zu
+        // prüfen: die Linie wird dann nicht nachgespielt. Sonst scheiterte
+        // jeder Bestand ohne Escrow im Datei-Modus an einer Linie, die er
+        // offline nicht bis zur Spitze erreicht.
+        ReaderKeyEscrowHead::CatalogLineTip if !holds_escrow_family_object(catalog) => {
+            return Ok(VerifiedReaderKeyEscrowSet {
+                escrows: BTreeMap::new(),
+            });
+        }
         ReaderKeyEscrowHead::CatalogLineTip => {
             line_tip = replay_to_line_tip(trust)
                 .map_err(|error| pin_error(error, TrustError::ActionMismatch))?;
@@ -524,7 +535,6 @@ pub fn verify_reader_key_escrows(
         }
     };
     let mut pins = PinStates::new(trust);
-    let catalog = &trust.inner.catalog;
     // Jede Freigabe wird geprüft, auch eine, die kein Escrow nennt: kein
     // Familienobjekt wird übersprungen (Profil §9). Ohne signierten
     // Nutzungszeitpunkt gilt nur die Höchstdauer des Codecs; das Fenster
@@ -998,6 +1008,17 @@ impl<'t> PinStates<'t> {
             })
             .clone()
     }
+}
+
+/// Liegt irgendein Objekt der drei Escrow-Familien im Katalog?
+fn holds_escrow_family_object(catalog: &TrustCatalog) -> bool {
+    [
+        TrustSubtypeV1::ReaderKeyEscrowApproval,
+        TrustSubtypeV1::ReaderKeyEscrow,
+        TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization,
+    ]
+    .into_iter()
+    .any(|subtype| !catalog.hashes_for_subtype(subtype).is_empty())
 }
 
 /// Ein Pin, der sich nicht nachspielen lässt: ein Befund des Trust-Kerns

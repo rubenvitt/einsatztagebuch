@@ -1456,3 +1456,114 @@ fn an_intent_respects_uniqueness_and_revocation() {
         "EA-TRUST-ESCROW-ENROLLMENT-MISMATCH"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Datei-Modus ohne Familienobjekte (Scheibe f, F1)
+// ---------------------------------------------------------------------------
+
+use escrow_support::recovery_core;
+use escrow_support::signed_recovery;
+
+/// Hängt an die Linie einen Kopf, dessen Registry-Version eine Lücke lässt:
+/// `replay_to_line_tip` erreicht die Spitze der Katalog-Linie nicht mehr.
+/// `verify_trust` selbst bleibt dabei grün — geprüft wird nur der Pin.
+fn with_line_gap(line: &mut support::RegistryLineBuilder) {
+    let skipped = line.heads().last().unwrap().version.get() + 2;
+    line.add_branch(
+        ActionSpec::Policy {
+            policy_version: None,
+            previous_policy_hash: None,
+            effective_from: None,
+        },
+        HeadOptions {
+            registry_version: Some(skipped),
+            ..HeadOptions::default()
+        },
+    );
+}
+
+/// Der Bestand wie im Datei-Modus: frischer flüchtiger Zustand, kein Pin.
+fn trust_without_pin(line: &support::RegistryLineBuilder) -> VerifiedTrust {
+    let anchor = ea_trust::decode_trust_anchor(line.exact_anchor_bytes()).unwrap();
+    let key = state::verification_state_key(anchor.organization_id());
+    let mut store = state::EphemeralTrustStateStore::new(key, escrow_support::SELECTION_NOW);
+    let snapshot = ea_trust::load_trust_state(&mut store, key).unwrap();
+    ea_trust::verify_trust(&anchor, &line.source(), snapshot).unwrap()
+}
+
+/// Ein Katalog ohne ein einziges Objekt der drei Escrow-Familien hat keine
+/// Escrow-Menge zu prüfen: der Datei-Modus spielt die Linie dann gar nicht
+/// erst nach. Sonst kippte das Gate `trust` jedes Archivs ohne Escrow, dessen
+/// Katalog-Linie offline nicht bis zur Spitze nachspielbar ist.
+#[test]
+fn a_catalog_without_escrow_family_objects_is_not_replayed_to_its_line_tip() {
+    let mut bare = escrow_line(EscrowLineOptions::default());
+    with_line_gap(&mut bare.line);
+    let set = verify_reader_key_escrows(
+        &trust_without_pin(&bare.line),
+        ReaderKeyEscrowHead::CatalogLineTip,
+    )
+    .unwrap();
+    assert!(set.is_empty());
+}
+
+/// Gegenprobe zu oben, je Familie: liegt auch nur EIN Objekt einer der drei
+/// Familien im selben Katalog, wird nachgespielt, und die Lücke lässt die
+/// ganze Menge scheitern (Ruling Q11) — auch eine verwaiste Freigabe oder
+/// eine verwaiste Öffnungsautorisierung zählt.
+#[test]
+fn any_escrow_family_object_forces_the_line_tip_replay() {
+    // Kontrolle ohne Lücke: der Befund mit Lücke stammt allein aus dem
+    // Nachspielen der Linie (der Registry-Befund wird wie jeder Pin-Fehler
+    // als ACTION-MISMATCH gemeldet). Die verwaiste Öffnungsautorisierung nennt
+    // ein Escrow, das es nicht gibt — ohne Lücke meldet sie das (SOURCE).
+    let gap_code = |escrow: &mut EscrowLine, without_gap: &str| {
+        let intact = verify_reader_key_escrows(
+            &trust_without_pin(&escrow.line),
+            ReaderKeyEscrowHead::CatalogLineTip,
+        );
+        assert_eq!(set_code(intact), without_gap, "control without gap");
+        with_line_gap(&mut escrow.line);
+        set_code(verify_reader_key_escrows(
+            &trust_without_pin(&escrow.line),
+            ReaderKeyEscrowHead::CatalogLineTip,
+        ))
+    };
+
+    let mut with_escrow = escrow_line(EscrowLineOptions::default());
+    let core = reader_core(&with_escrow);
+    publish(&mut with_escrow, &core, 0xe1);
+    assert_eq!(gap_code(&mut with_escrow, "OK"), "EA-TRUST-ACTION-MISMATCH");
+
+    let mut orphan_approval = escrow_line(EscrowLineOptions::default());
+    let fields = approval_core(
+        &orphan_approval.line,
+        tip_basis(&orphan_approval),
+        APPROVAL_WINDOW,
+        0xe2,
+    );
+    let approval = signed_approval(&orphan_approval.line, &fields);
+    orphan_approval.line.add_object(approval);
+    assert_eq!(
+        gap_code(&mut orphan_approval, "OK"),
+        "EA-TRUST-ACTION-MISMATCH"
+    );
+
+    let mut orphan_recovery = escrow_line(EscrowLineOptions::default());
+    let core = reader_core(&orphan_recovery);
+    let recovery = signed_recovery(
+        &recovery_core(
+            ObjectHash::try_from([0xe3; 32].as_slice()).unwrap(),
+            &core,
+            tip_basis(&orphan_recovery),
+            APPROVAL_WINDOW,
+            0xe3,
+        ),
+        &orphan_recovery.approvers,
+    );
+    orphan_recovery.line.add_object(recovery);
+    assert_eq!(
+        gap_code(&mut orphan_recovery, "EA-TRUST-SOURCE"),
+        "EA-TRUST-ACTION-MISMATCH"
+    );
+}
