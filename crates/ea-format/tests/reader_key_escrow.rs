@@ -9,9 +9,10 @@
 //! würde.
 
 use ea_crypto::{
-    CanonicalPublicCoseKey, ContentType, ProtectedHeader,
-    READER_KEY_ESCROW_APPROVAL_MAX_LIFETIME_MS,
-    READER_KEY_ESCROW_RECOVERY_AUTHORIZATION_MAX_LIFETIME_MS, trust_digest,
+    CanonicalPublicCoseKey, ContentType, CryptoError, HpkeRecipientPrivateKey, HpkeSealed,
+    ProtectedHeader, READER_KEY_ESCROW_APPROVAL_MAX_LIFETIME_MS,
+    READER_KEY_ESCROW_RECOVERY_AUTHORIZATION_MAX_LIFETIME_MS, SecretBytes, hpke_aad, hpke_info,
+    hpke_open, hpke_seal, trust_digest,
 };
 use ea_format::{
     DecodedTrustPayloadV1, FormatError, OrganizationAdminAuthorizationFieldsV1,
@@ -20,7 +21,10 @@ use ea_format::{
     ReaderKeyEscrowRecoveryAuthorizationCoreV1, ReaderKeyEscrowRestoreContextV1, TrustObjectV1,
     TrustPayloadV1, TrustSubtypeV1, decode_exact_object, encode_trust,
 };
-use ea_testkit::{TEST_ENTROPY_ROOT_ED25519_SEED, ed25519_public_key, ed25519_sign_raw};
+use ea_testkit::{
+    TEST_ENTROPY_RECIPIENT_X25519_SEED, TEST_ENTROPY_ROOT_ED25519_SEED, ed25519_public_key,
+    ed25519_sign_raw,
+};
 use ea_types::{
     AuthorizationId, CertificateHash, ChainSequence, Hash32, KeyThumbprint, ObjectHash,
     OrganizationId, RegistryVersion, SubjectId, UnixMillis,
@@ -486,6 +490,205 @@ fn both_hpke_contexts_encode_the_profile_form() {
             Item::Empty,
         ])
     );
+}
+
+/// Die eingefrorenen angenommenen Vektoren der drei Familien dekodieren, und
+/// der Kodierer erzeugt aus den dekodierten Feldern BYTEGLEICH dieselbe
+/// Nutzlast.
+///
+/// Die Feldwerte stehen HIER noch einmal als Konstanten, obwohl der Erzeuger
+/// in `ea-testkit` sie ebenfalls führt: zöge der Test sie von dort, wanderte
+/// der Vektor bei einer Umbenennung still mit, statt rot zu werden (Vorbild
+/// `web_bundle_release.rs`).
+#[test]
+fn the_frozen_vectors_decode_and_re_encode_byte_identically() {
+    const ORGANIZATION_ID: [u8; 16] = [0x70; 16];
+    const READER_CERTIFICATE_OBJECT_HASH: [u8; 32] = [0x71; 32];
+    const READER_SUBJECT_ID: [u8; 16] = [0x72; 16];
+    const ENROLLMENT_REGISTRY_VERSION: u64 = 4;
+    const ENROLLMENT_SEQUENCE: u64 = 9;
+    const APPROVAL_LIFETIME_MS: i64 = 120_000;
+    const RECOVERY_LIFETIME_MS: i64 = 600_000;
+
+    let escrow = frozen::payload(
+        "vectors/reader-key-escrow/v1/object/accepted-escrow.bin",
+        TrustSubtypeV1::ReaderKeyEscrow,
+    );
+    let DecodedTrustPayloadV1::ReaderKeyEscrow(decoded) = escrow.decoded_payload().unwrap() else {
+        panic!("the frozen escrow decodes into its own variant")
+    };
+    let core = decoded.core();
+    assert_eq!(core.organization_id.as_bytes(), &ORGANIZATION_ID);
+    assert_eq!(
+        core.reader_certificate_object_hash.as_bytes(),
+        &READER_CERTIFICATE_OBJECT_HASH
+    );
+    assert_eq!(core.reader_subject_id.as_bytes(), &READER_SUBJECT_ID);
+    assert_eq!(
+        core.enrollment_registry_version.get(),
+        ENROLLMENT_REGISTRY_VERSION
+    );
+    assert_eq!(core.enrollment_sequence.get(), ENROLLMENT_SEQUENCE);
+    let rebuilt =
+        TrustPayloadV1::reader_key_escrow(core.clone(), decoded.approval_object_hash()).unwrap();
+    assert_eq!(rebuilt.exact_payload(), escrow.exact_payload());
+
+    let approval = frozen::payload(
+        "vectors/reader-key-escrow-approval/v1/object/accepted-approval.bin",
+        TrustSubtypeV1::ReaderKeyEscrowApproval,
+    );
+    let DecodedTrustPayloadV1::ReaderKeyEscrowApproval(fields) =
+        approval.decoded_payload().unwrap()
+    else {
+        panic!("the frozen approval decodes into its own variant")
+    };
+    assert_eq!(
+        fields.expires_at.get() - fields.issued_at.get(),
+        APPROVAL_LIFETIME_MS
+    );
+    assert_eq!(fields.reader_subject_id.as_bytes(), &READER_SUBJECT_ID);
+    let rebuilt = TrustPayloadV1::reader_key_escrow_approval(fields).unwrap();
+    assert_eq!(rebuilt.exact_payload(), approval.exact_payload());
+
+    let recovery = frozen::payload(
+        "vectors/reader-key-escrow-recovery/v1/object/accepted-recovery-authorization.bin",
+        TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization,
+    );
+    let DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(fields) =
+        recovery.decoded_payload().unwrap()
+    else {
+        panic!("the frozen recovery authorization decodes into its own variant")
+    };
+    assert_eq!(
+        fields.expires_at.get() - fields.issued_at.get(),
+        RECOVERY_LIFETIME_MS
+    );
+    assert_eq!(
+        fields.enrollment_registry_version.get(),
+        ENROLLMENT_REGISTRY_VERSION
+    );
+    let rebuilt = TrustPayloadV1::reader_key_escrow_recovery_authorization(fields).unwrap();
+    assert_eq!(rebuilt.exact_payload(), recovery.exact_payload());
+}
+
+/// Jedes der sieben Felder des Escrow-Kontexts und jedes der sechs Felder
+/// des Öffnungskontexts ist über `hpke_info`/`hpke_aad` gebunden: eine
+/// Versiegelung unter dem echten Kontext öffnet unter keinem Kontext, der in
+/// genau einem Feld abweicht.
+#[test]
+fn every_context_field_is_bound_by_the_hpke_info_and_aad() {
+    let recipient =
+        HpkeRecipientPrivateKey::from_bytes(SecretBytes::new(TEST_ENTROPY_RECIPIENT_X25519_SEED))
+            .unwrap();
+    let public = recipient.public_key();
+    let seal = |context: &[u8]| {
+        hpke_seal(
+            &public,
+            &SecretBytes::new([0xe0; 32]),
+            &hpke_info(context),
+            &hpke_aad(context),
+        )
+        .unwrap()
+    };
+    let opens = |sealed: &HpkeSealed, context: &[u8]| {
+        hpke_open(&recipient, sealed, &hpke_info(context), &hpke_aad(context))
+    };
+
+    let base = ReaderKeyEscrowHpkeContextV1::from_escrow_core(&typed::escrow_core());
+    let sealed = seal(&base.encode());
+    assert!(opens(&sealed, &base.encode()).unwrap().matches(&[0xe0; 32]));
+    let mut variants = Vec::new();
+    let mut variant = base.clone();
+    variant.organization_id = OrganizationId::try_from([0x01; 16].as_slice()).unwrap();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.reader_certificate_object_hash =
+        CertificateHash::try_from([0x01; 32].as_slice()).unwrap();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.reader_subject_id = SubjectId::try_from([0x01; 16].as_slice()).unwrap();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.enrollment_registry_version = RegistryVersion::new(5);
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.enrollment_registry_head_hash = Hash32::try_from([0x01; 32].as_slice()).unwrap();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.recovery_certificate_object_hash =
+        CertificateHash::try_from([0x01; 32].as_slice()).unwrap();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.recovery_kem_key_thumbprint = KeyThumbprint::try_from([0x01; 32].as_slice()).unwrap();
+    variants.push(variant);
+    assert_eq!(variants.len(), 7);
+    for (index, variant) in variants.iter().enumerate() {
+        assert_eq!(
+            opens(&sealed, &variant.encode()).err().unwrap(),
+            CryptoError::HpkeOpen,
+            "escrow context field {index}"
+        );
+    }
+
+    let base = ReaderKeyEscrowRestoreContextV1::from_recovery_authorization(
+        &typed::recovery_core(),
+        typed::hash(0x5d),
+    );
+    let sealed = seal(&base.encode());
+    assert!(opens(&sealed, &base.encode()).is_ok());
+    let mut variants = Vec::new();
+    let mut variant = base.clone();
+    variant.organization_id = OrganizationId::try_from([0x01; 16].as_slice()).unwrap();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.authorization_object_hash = typed::hash(0x01);
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.escrow_object_hash = typed::hash(0x01);
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.reader_certificate_object_hash =
+        CertificateHash::try_from([0x01; 32].as_slice()).unwrap();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.reader_subject_id = SubjectId::try_from([0x01; 16].as_slice()).unwrap();
+    variants.push(variant);
+    let mut variant = base.clone();
+    variant.target_transport_key_thumbprint =
+        KeyThumbprint::try_from([0x01; 32].as_slice()).unwrap();
+    variants.push(variant);
+    assert_eq!(variants.len(), 6);
+    for (index, variant) in variants.iter().enumerate() {
+        assert_eq!(
+            opens(&sealed, &variant.encode()).err().unwrap(),
+            CryptoError::HpkeOpen,
+            "restore context field {index}"
+        );
+    }
+}
+
+/// Die eingefrorenen Bytes aus dem Arbeitsbaum.
+mod frozen {
+    use std::{fs, path::PathBuf};
+
+    use super::{ParsedArchiveObject, TrustObjectV1, TrustSubtypeV1, decode_exact_object};
+
+    pub fn payload(relative: &str, subtype: TrustSubtypeV1) -> TrustObjectV1 {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative);
+        let bytes = fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read the frozen vector {}: {error}",
+                path.display()
+            )
+        });
+        let ParsedArchiveObject::Trust(parsed) = decode_exact_object(&bytes).unwrap() else {
+            panic!("{relative} is a trust object")
+        };
+        assert_eq!(parsed.value().subtype(), subtype);
+        parsed.value().clone()
+    }
 }
 
 /// Typisierte Gegenstücke zu [`hand`]; dieselben Feldwerte.
