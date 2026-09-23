@@ -2115,6 +2115,7 @@ dependencies = [
  "ea-local-store",
  "ea-operator",
  "ea-schema",
+ "ea-testkit",
  "ea-time",
  "ea-trust",
  "ea-types",

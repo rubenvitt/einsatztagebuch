@@ -1,5 +1,8 @@
 //! Resolved offline operations; token keys never become private key bytes.
-use crate::{HistoricalGrantSigner, Pkcs11RecipientKey, Pkcs11SigningKey, RecoveryKem};
+use crate::{
+    ConsumedEscrowOpening, HistoricalGrantSigner, Pkcs11RecipientKey, Pkcs11SigningKey,
+    ReaderKeyEscrowKem, RecoveryKem, reader_key_escrow_envelope,
+};
 use ea_crypto::{
     CanonicalPublicCoseKey, CoseSigner, CryptoError, HpkeRecipient, HpkeRecipientPrivateKey,
     HpkeRecipientPublicKey, HpkeSealed, SecretBytes, hpke_aad, hpke_info, hpke_open,
@@ -51,6 +54,22 @@ impl RecoveryKem for ResolvedRecipientKey {
             &hpke_info(context),
             &hpke_aad(context),
         )
+    }
+}
+
+/// Dasselbe Routing für die zweite getypte Operation: Software und PKCS#11
+/// öffnen über [`HpkeRecipient::open_envelope`] mit derselben Kontextbildung
+/// ([`reader_key_escrow_envelope`]). Der Token gibt nie Schlüsselbytes heraus.
+impl ReaderKeyEscrowKem for ResolvedRecipientKey {
+    fn key_thumbprint(&self) -> Result<KeyThumbprint, CryptoError> {
+        Ok(CanonicalPublicCoseKey::x25519(*self.public_key().as_bytes())?.thumbprint())
+    }
+    fn open_reader_key_escrow(
+        &self,
+        opening: &ConsumedEscrowOpening<'_>,
+    ) -> Result<SecretBytes<32>, CryptoError> {
+        let (sealed, info, aad) = reader_key_escrow_envelope(opening.escrow())?;
+        hpke_open(self, &sealed, &info, &aad)
     }
 }
 
