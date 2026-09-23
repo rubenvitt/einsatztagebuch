@@ -105,9 +105,6 @@ export type EaOpfsRequest =
       readonly id: number
       readonly kind: 'enrollment-begin-restored'
       readonly restored: number
-      readonly organizationId: Uint8Array
-      readonly subjectId: Uint8Array
-      readonly pinnedAnchor: Uint8Array
       readonly bundleFingerprint: Uint8Array
     }
   | { readonly id: number; readonly kind: 'enrollment-finish-restored'; readonly handle: number }
@@ -423,13 +420,7 @@ scope.addEventListener('message', (event) => {
           scope.postMessage({
             id: request.id,
             ok: true,
-            status: await enrollmentBeginRestored(
-              request.restored,
-              request.organizationId,
-              request.subjectId,
-              request.pinnedAnchor,
-              request.bundleFingerprint,
-            ),
+            status: await enrollmentBeginRestored(request.restored, request.bundleFingerprint),
           })
           return
         case 'enrollment-finish-restored':

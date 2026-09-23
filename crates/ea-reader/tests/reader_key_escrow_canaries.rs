@@ -108,15 +108,8 @@ fn the_restored_vault_stores_no_plaintext_key() {
     let (escrow, escrow_hash) = line_with_escrow(subject(0xc1));
     let restored = restored_kem(&escrow, escrow_hash, subject(0xc1));
     let mut store = InMemoryReaderBlobStore::new();
-    let mut enrollment = ReaderEnrollment::begin_restored(
-        &store,
-        support::organization(),
-        subject(0xc1),
-        decode_trust_anchor(escrow.line.exact_anchor_bytes()).unwrap(),
-        fixtures::bundle_fingerprint(),
-        restored,
-    )
-    .unwrap();
+    let mut enrollment =
+        ReaderEnrollment::begin_restored(&store, fixtures::bundle_fingerprint(), restored).unwrap();
     enrollment
         .register_authenticator(fixtures::attested(1))
         .unwrap();

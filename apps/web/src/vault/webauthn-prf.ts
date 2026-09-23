@@ -732,6 +732,8 @@ export const enrollmentBridge: EnrollmentBridge = {
 /**
  * Die Bruecke des Enrollments um einen WIEDERHERGESTELLTEN KEM (Escrow-Profil
  * §6 Schritt 6): `restored` ist die Kennung aus dem Import des Umschlags.
+ * Organisation, Subject und Anker reist NICHT von hier: Rust nimmt sie aus dem
+ * geprueften Transport (review-e F2). Nur der Buendel-Fingerprint kommt mit.
  * Registrierung, Fingerprints und Bestaetigung sind DIESELBEN Aufrufe wie beim
  * frischen Enrollment; der Abschluss schreibt den neuen Tresor lokal und ruft
  * keinen Endpunkt (die Endpunkte sind signiert, der neue Signaturschluessel
@@ -746,9 +748,6 @@ export function restoredEnrollmentBridge(restored: number): EnrollmentBridge {
         await callForStatus<EnrollmentBeginTransportV1>({
           kind: 'enrollment-begin-restored',
           restored,
-          organizationId: context.organizationId,
-          subjectId: context.subjectId,
-          pinnedAnchor: context.pinnedAnchor,
           bundleFingerprint: context.bundleFingerprint,
         }),
       )

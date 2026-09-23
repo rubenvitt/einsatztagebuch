@@ -13,7 +13,7 @@ mod support;
 
 use ea_reader::{
     InMemoryReaderBlobStore, READER_VAULT_BLOB_KEY_V1, ReaderBlobKey, ReaderBlobStore,
-    ReaderEnrollment, RestoredReaderKemV1, SealedVaultV1, decode_trust_anchor,
+    ReaderEnrollment, RestoredReaderKemV1, SealedVaultV1,
 };
 use ea_types::SubjectId;
 use escrow_line::{AUDIT_SEED, line_with_escrow, restored_kem};
@@ -30,18 +30,10 @@ fn restored() -> (EscrowLine, RestoredReaderKemV1) {
 }
 
 fn begin(
-    escrow: &EscrowLine,
     store: &dyn ReaderBlobStore,
     restored: RestoredReaderKemV1,
 ) -> Result<ReaderEnrollment, ea_reader::EnrollmentError> {
-    ReaderEnrollment::begin_restored(
-        store,
-        support::organization(),
-        reader_subject(),
-        decode_trust_anchor(escrow.line.exact_anchor_bytes()).unwrap(),
-        fixtures::bundle_fingerprint(),
-        restored,
-    )
+    ReaderEnrollment::begin_restored(store, fixtures::bundle_fingerprint(), restored)
 }
 
 fn confirm_and_finish(
@@ -62,7 +54,7 @@ fn confirm_and_finish(
 fn the_restored_vault_carries_the_escrowed_kem_a_new_signing_key_and_two_authenticators() {
     let (escrow, restored) = restored();
     let mut store = InMemoryReaderBlobStore::new();
-    let mut enrollment = begin(&escrow, &store, restored).unwrap();
+    let mut enrollment = begin(&store, restored).unwrap();
     // Das Fingerprint-Gate zeigt den KEM des alten Zertifikats.
     assert!(
         enrollment.fingerprints().key_fingerprint() == x25519_key(READER_KEM_SEED).thumbprint()
@@ -102,9 +94,9 @@ fn the_restored_vault_carries_the_escrowed_kem_a_new_signing_key_and_two_authent
 fn two_restorations_draw_two_signing_keys() {
     let mut seeds = Vec::new();
     for _ in 0..2 {
-        let (escrow, restored) = restored();
+        let (_, restored) = restored();
         let mut store = InMemoryReaderBlobStore::new();
-        let mut enrollment = begin(&escrow, &store, restored).unwrap();
+        let mut enrollment = begin(&store, restored).unwrap();
         enrollment
             .register_authenticator(fixtures::attested(1))
             .unwrap();
@@ -120,9 +112,9 @@ fn two_restorations_draw_two_signing_keys() {
 
 #[test]
 fn one_authenticator_is_not_enough() {
-    let (escrow, restored) = restored();
+    let (_, restored) = restored();
     let mut store = InMemoryReaderBlobStore::new();
-    let mut enrollment = begin(&escrow, &store, restored).unwrap();
+    let mut enrollment = begin(&store, restored).unwrap();
     enrollment
         .register_authenticator(fixtures::attested(1))
         .unwrap();
@@ -137,7 +129,7 @@ fn one_authenticator_is_not_enough() {
 
 #[test]
 fn a_device_that_still_carries_a_vault_refuses_the_restoration() {
-    let (escrow, restored) = restored();
+    let (_, restored) = restored();
     let mut store = InMemoryReaderBlobStore::new();
     store
         .put(
@@ -146,18 +138,16 @@ fn a_device_that_still_carries_a_vault_refuses_the_restoration() {
         )
         .unwrap();
     assert_eq!(
-        begin(&escrow, &store, restored)
-            .err()
-            .map(|error| error.code()),
+        begin(&store, restored).err().map(|error| error.code()),
         Some("EA-READER-ENROLLMENT-VAULT-PRESENT")
     );
 }
 
 #[test]
 fn a_vault_written_between_begin_and_finish_is_not_overwritten() {
-    let (escrow, restored) = restored();
+    let (_, restored) = restored();
     let mut store = InMemoryReaderBlobStore::new();
-    let mut enrollment = begin(&escrow, &store, restored).unwrap();
+    let mut enrollment = begin(&store, restored).unwrap();
     enrollment
         .register_authenticator(fixtures::attested(1))
         .unwrap();
@@ -189,4 +179,19 @@ fn the_restored_finish_takes_no_endpoints() {
         !signature.contains("EnrollmentRequestContextV1"),
         "{signature}"
     );
+}
+
+/// Organisation, Subject und Anker des neuen Tresors kommen aus dem geprüften
+/// Transport (`RestoredReaderKemV1`), nie als freie Parameter — ein Aufrufer
+/// kann keinen anderen Anker pinnen als den, gegen den das Escrow geprüft
+/// wurde (review-e F2). Die Aussage steht in der Signatur; dieser Zeuge hält
+/// sie am Quelltext fest.
+#[test]
+fn the_restored_begin_takes_no_organization_subject_or_anchor() {
+    let source = include_str!("../src/enrollment.rs");
+    let start = source.find("pub fn begin_restored(").unwrap();
+    let signature = &source[start..start + source[start..].find('{').unwrap()];
+    for free in ["OrganizationId", "SubjectId", "TrustAnchorV1"] {
+        assert!(!signature.contains(free), "{free}: {signature}");
+    }
 }

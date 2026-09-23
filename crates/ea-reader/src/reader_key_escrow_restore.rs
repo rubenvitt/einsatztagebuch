@@ -38,6 +38,14 @@
 //! 3. HPKE öffnen, `info` und AAD aus der exakten Restore-Bindung;
 //! 4. den abgeleiteten öffentlichen Schlüssel gegen den KEM des Escrows.
 //!
+//! Zu Schritt 2 gehört die Bindung des NEUEN Tresors (review-e F2):
+//! Organisation (aus dem gepinnten Anker) und Subject des Transports müssen
+//! die des geprüften Escrows sein. Beide und der Anker reisen dann mit dem
+//! KEM in [`RestoredReaderKemV1`] zu `ReaderEnrollment::begin_restored`, das
+//! sie nicht mehr als Parameter nimmt — der Anker des neuen Tresors ist
+//! derselbe, gegen den das Escrow geprüft wurde, und keine Oberfläche kann
+//! ihn beim zweiten Aufruf austauschen.
+//!
 //! **Benannte Abweichung:** `authorization-object-hash` hat im Browser keine
 //! Referenz — die Autorisierung liegt nativ vor und steht vor dem Cutover in
 //! keinem Katalog. Der Wert ist über die AEAD gebunden und wird angezeigt,
@@ -54,10 +62,10 @@ use ea_format::{
     reader_key_escrow_transfer_file_name,
 };
 use ea_trust::{
-    ReaderKeyEscrowHead, TrustAnchorV1, VerifiedReaderKeyEscrow, load_trust_state,
-    verify_reader_key_escrows, verify_trust,
+    ReaderKeyEscrowHead, TrustAnchorV1, VerifiedReaderKeyEscrow, decode_trust_anchor,
+    load_trust_state, verify_reader_key_escrows, verify_trust,
 };
-use ea_types::{CertificateHash, KeyThumbprint, ObjectHash, SubjectId, UnixMillis};
+use ea_types::{CertificateHash, KeyThumbprint, ObjectHash, OrganizationId, SubjectId, UnixMillis};
 use ea_verify::{EphemeralTrustStateStore, verification_state_key};
 use zeroize::Zeroize;
 
@@ -71,6 +79,9 @@ pub struct ReaderKeyEscrowTransportV1 {
     thumbprint: KeyThumbprint,
     escrow: VerifiedReaderKeyEscrow,
     subject: SubjectId,
+    /// Der Anker, gegen den das Escrow geprüft wurde — und den der neue
+    /// Tresor pinnt.
+    anchor: TrustAnchorV1,
 }
 
 /// Die Transportdatei (Browser → Admin-Inbox). Öffentlich.
@@ -93,10 +104,24 @@ impl ReaderKeyEscrowTransportFileV1 {
 
 /// Der wiederhergestellte Reader-KEM. Konstruierbar nur in
 /// [`ReaderKeyEscrowTransportV1::open`], nach allen Prüfungen.
+///
+/// Er trägt, was der neue Tresor übernimmt und was `open` gegen das geprüfte
+/// Escrow gestellt hat: Organisation, Subject und den Anker der Prüfung.
 pub struct RestoredReaderKemV1 {
     secret: SecretBytes<32>,
     thumbprint: KeyThumbprint,
     authorization_object_hash: ObjectHash,
+    organization_id: OrganizationId,
+    subject_id: SubjectId,
+    pinned_anchor: TrustAnchorV1,
+}
+
+/// Was `ReaderEnrollment::begin_restored` aus [`RestoredReaderKemV1`] nimmt.
+pub(crate) struct RestoredVaultBindingV1 {
+    pub(crate) kem_private_key: SecretBytes<32>,
+    pub(crate) organization_id: OrganizationId,
+    pub(crate) subject_id: SubjectId,
+    pub(crate) pinned_anchor: TrustAnchorV1,
 }
 
 impl RestoredReaderKemV1 {
@@ -112,9 +137,33 @@ impl RestoredReaderKemV1 {
         self.authorization_object_hash
     }
 
-    /// Übergibt das Geheimnis an den neuen Tresor (`ReaderEnrollment`).
-    pub(crate) fn into_secret(self) -> SecretBytes<32> {
-        self.secret
+    /// Die Organisation des neuen Tresors — die des geprüften Escrows.
+    #[must_use]
+    pub const fn organization_id(&self) -> OrganizationId {
+        self.organization_id
+    }
+
+    /// Das Subject des neuen Tresors — das des geprüften Escrows.
+    #[must_use]
+    pub const fn subject_id(&self) -> SubjectId {
+        self.subject_id
+    }
+
+    /// Die exakten Bytes des Ankers, gegen den das Escrow geprüft wurde.
+    #[must_use]
+    pub fn pinned_anchor_bytes(&self) -> &[u8] {
+        self.pinned_anchor.exact_bytes()
+    }
+
+    /// Übergibt Geheimnis und Bindung an den neuen Tresor
+    /// (`ReaderEnrollment::begin_restored`).
+    pub(crate) fn into_vault_binding(self) -> RestoredVaultBindingV1 {
+        RestoredVaultBindingV1 {
+            kem_private_key: self.secret,
+            organization_id: self.organization_id,
+            subject_id: self.subject_id,
+            pinned_anchor: self.pinned_anchor,
+        }
     }
 }
 
@@ -143,6 +192,9 @@ impl ReaderKeyEscrowTransportV1 {
             .valid_for_subject(subject)
             .ok_or(ReaderKeyEscrowError::NotFound)?
             .clone();
+        // `TrustAnchorV1` trägt kein `Clone`; der Transport hält eine eigene,
+        // aus denselben exakten Bytes dekodierte Fassung.
+        let anchor = decode_trust_anchor(anchor.exact_bytes())?;
 
         let mut bytes = [0_u8; 32];
         getrandom::fill(&mut bytes).map_err(|_| CryptoError::LocalRng)?;
@@ -159,6 +211,7 @@ impl ReaderKeyEscrowTransportV1 {
             thumbprint,
             escrow,
             subject,
+            anchor,
         })
     }
 
@@ -225,6 +278,12 @@ impl ReaderKeyEscrowTransportV1 {
         {
             return Err(ReaderKeyEscrowError::RestoreBinding);
         }
+        require_escrow_binding(
+            self.anchor.organization_id(),
+            self.subject,
+            core.organization_id,
+            core.reader_subject_id,
+        )?;
         let exact_context = context.encode();
         let recipient = HpkeRecipientPrivateKey::from_bytes(
             self.secret.with_exposed(|bytes| SecretBytes::new(*bytes)),
@@ -248,6 +307,87 @@ impl ReaderKeyEscrowTransportV1 {
             secret,
             thumbprint: derived.thumbprint(),
             authorization_object_hash: context.authorization_object_hash,
+            organization_id: self.anchor.organization_id(),
+            subject_id: self.subject,
+            pinned_anchor: self.anchor,
         })
+    }
+}
+
+/// Die Bindung des NEUEN Tresors an das geprüfte Escrow: die Organisation des
+/// Ankers und das Subject des Transports müssen die des Escrows sein.
+///
+/// # Errors
+///
+/// `EA-READER-ESCROW-RESTORE-BINDING` für jedes abweichende Feld.
+fn require_escrow_binding(
+    anchor_organization_id: OrganizationId,
+    subject_id: SubjectId,
+    escrow_organization_id: OrganizationId,
+    escrow_subject_id: SubjectId,
+) -> Result<(), ReaderKeyEscrowError> {
+    if anchor_organization_id != escrow_organization_id || subject_id != escrow_subject_id {
+        return Err(ReaderKeyEscrowError::RestoreBinding);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ea_types::{OrganizationId, SubjectId};
+
+    use super::require_escrow_binding;
+
+    fn organization(fill: u8) -> OrganizationId {
+        OrganizationId::try_from([fill; 16].as_slice()).unwrap()
+    }
+
+    fn subject(fill: u8) -> SubjectId {
+        SubjectId::try_from([fill; 16].as_slice()).unwrap()
+    }
+
+    fn code(result: Result<(), super::ReaderKeyEscrowError>) -> &'static str {
+        match result {
+            Ok(()) => "OK",
+            Err(error) => error.code(),
+        }
+    }
+
+    /// Über die öffentliche Fläche sind Anker-Organisation und Subject des
+    /// Transports nie vom Escrow verschieden (`verify_trust` und
+    /// `valid_for_subject` schließen es aus). Die Regel steht trotzdem als
+    /// eigene Prüfung da — sie ist, was `open` an den neuen Tresor weitergibt
+    /// —, und hier je Feld bezeugt.
+    #[test]
+    fn each_field_the_new_vault_takes_over_must_match_the_verified_escrow() {
+        assert_eq!(
+            code(require_escrow_binding(
+                organization(0x01),
+                subject(0x02),
+                organization(0x01),
+                subject(0x02)
+            )),
+            "OK"
+        );
+        assert_eq!(
+            code(require_escrow_binding(
+                organization(0x3f),
+                subject(0x02),
+                organization(0x01),
+                subject(0x02)
+            )),
+            "EA-READER-ESCROW-RESTORE-BINDING",
+            "organization-id"
+        );
+        assert_eq!(
+            code(require_escrow_binding(
+                organization(0x01),
+                subject(0x3f),
+                organization(0x01),
+                subject(0x02)
+            )),
+            "EA-READER-ESCROW-RESTORE-BINDING",
+            "reader-subject-id"
+        );
     }
 }

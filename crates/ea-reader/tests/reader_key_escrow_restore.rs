@@ -160,6 +160,14 @@ fn the_round_trip_restores_the_escrowed_kem() {
     let restored = transport.open(&bytes).unwrap();
     assert!(restored.kem_key_thumbprint() == x25519_key(READER_KEM_SEED).thumbprint());
     assert!(restored.authorization_object_hash() == support::object_hash_marker(0x7a));
+    // Organisation, Subject und Anker des neuen Tresors reisen mit dem KEM —
+    // aus dem geprüften Transport, nicht aus einem zweiten Aufruf.
+    assert!(restored.organization_id() == support::organization());
+    assert!(restored.subject_id() == reader_subject());
+    assert_eq!(
+        restored.pinned_anchor_bytes(),
+        escrow.line.exact_anchor_bytes()
+    );
 }
 
 #[test]
