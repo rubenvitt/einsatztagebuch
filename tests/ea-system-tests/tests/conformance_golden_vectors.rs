@@ -4551,8 +4551,10 @@ const DRK_318_READER_KEY_ESCROW_ENTRIES: [(&str, &str); 14] = [
     ),
 ];
 
-/// Die eingefrorenen Einträge der Freigabefamilie.
-const DRK_318_READER_KEY_ESCROW_APPROVAL_ENTRIES: [(&str, &str); 10] = [
+/// Die eingefrorenen Einträge der Freigabefamilie. `lifetime-zero` kam in
+/// der Fixrunde 1 von DRK-318 dazu (Review a, F4), noch vor dem Merge der
+/// Familie — deshalb hier und nicht in [`LATER_READER_KEY_ESCROW_ADDITIONS`].
+const DRK_318_READER_KEY_ESCROW_APPROVAL_ENTRIES: [(&str, &str); 11] = [
     (
         "object/accepted-approval",
         "ed7b77de300a0f2937031c51381cbe0baa3bae2b0ed716525eb945a566273f87",
@@ -4582,6 +4584,10 @@ const DRK_318_READER_KEY_ESCROW_APPROVAL_ENTRIES: [(&str, &str); 10] = [
         "c2eda375c478febcfd355435b980ccbd49867f0ecff731a1bfd49dd2d2d4c007",
     ),
     (
+        "object/rejected-approval-lifetime-zero",
+        "f296b46449678aa34e946654d1a6548db689b5b18be4321bdf5e1f2c2dfaba10",
+    ),
+    (
         "object/rejected-approval-signature-over-neighbour-subtype",
         "16edef43e7f2338ff8f9071b34ada0097c088579b92e10c2d9ff90cedff3cb10",
     ),
@@ -4595,8 +4601,9 @@ const DRK_318_READER_KEY_ESCROW_APPROVAL_ENTRIES: [(&str, &str); 10] = [
     ),
 ];
 
-/// Die eingefrorenen Einträge der Öffnungsfamilie.
-const DRK_318_READER_KEY_ESCROW_RECOVERY_ENTRIES: [(&str, &str); 10] = [
+/// Die eingefrorenen Einträge der Öffnungsfamilie. `escrow-object-hash-short`
+/// und `lifetime-zero` kamen in der Fixrunde 1 von DRK-318 dazu (Review a, F4).
+const DRK_318_READER_KEY_ESCROW_RECOVERY_ENTRIES: [(&str, &str); 12] = [
     (
         "context/restore-hpke-aad",
         "46ba5752034cceb22a92dfcccdd77bb954567ee6a51fdabc365cc6321d50ad4b",
@@ -4622,8 +4629,16 @@ const DRK_318_READER_KEY_ESCROW_RECOVERY_ENTRIES: [(&str, &str); 10] = [
         "6e7cd9386427857d4aac265c61e143b0b56211c1ab7d9934fd9a69567c737fb2",
     ),
     (
+        "object/rejected-recovery-authorization-escrow-object-hash-short",
+        "eb094eaf052ebee3419aea342b79341b08b3f7507534af738904a48f7c9074c9",
+    ),
+    (
         "object/rejected-recovery-authorization-lifetime-over-limit",
         "b99910d2b592143c3e24d8f0a8b3aba7fae1294b3bd0ff27dbf568261e966f1b",
+    ),
+    (
+        "object/rejected-recovery-authorization-lifetime-zero",
+        "ab21959d0ab44f35c3a45750f3087d6afe414b33915abf309f8d1d5718326bb1",
     ),
     (
         "object/rejected-recovery-authorization-purpose-one",
