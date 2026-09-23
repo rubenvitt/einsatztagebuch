@@ -151,6 +151,41 @@ fn a_publication_row_is_immutable_and_bound_to_its_audit() {
     assert_eq!(count(&database, "reader_key_escrow_publication"), 1);
 }
 
+/// Lokale Eindeutigkeit (review-c P3-2): höchstens eine Publikation je
+/// Organisation und Reader-Zertifikat, auch an der Anwendung vorbei. Ein
+/// Ersatz hat ein neues Zertifikat (U2) und bleibt möglich.
+#[test]
+fn a_reader_certificate_is_published_at_most_once_per_organization() {
+    let (_directory, database) = database("publication-unique");
+    let insert = |event: StoreValue, package: u8, organization: u8, certificate: u8| {
+        database.execute(
+            "INSERT INTO reader_key_escrow_publication(package_hash,organization_id,reader_certificate_hash,reader_subject_id,approval_object_hash,escrow_object_hash,exact_approval,exact_escrow,audit_event_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            &[
+                blob(package, 32),
+                blob(organization, 16),
+                blob(certificate, 32),
+                blob(0x12, 16),
+                blob(package.wrapping_add(1), 32),
+                blob(package.wrapping_add(2), 32),
+                blob(0x13, 100),
+                blob(0x14, 100),
+                event,
+            ],
+        )
+    };
+    insert(audit(&database, 0x61), 0x40, 0x10, 0x11).unwrap();
+    assert!(
+        matches!(
+            insert(audit(&database, 0x62), 0x50, 0x10, 0x11),
+            Err(ea_local_store::StoreError::Constraint)
+        ),
+        "same organization, same certificate"
+    );
+    insert(audit(&database, 0x63), 0x60, 0x20, 0x11).unwrap();
+    insert(audit(&database, 0x64), 0x70, 0x10, 0x15).unwrap();
+    assert_eq!(count(&database, "reader_key_escrow_publication"), 3);
+}
+
 /// Eine Verbrauchszeile wird NIE zurückgesetzt.
 #[test]
 fn a_consumption_row_is_never_reset() {

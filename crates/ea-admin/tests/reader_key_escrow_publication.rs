@@ -18,6 +18,7 @@ mod support;
 use support as trust_support;
 
 use std::{
+    cell::Cell,
     path::PathBuf,
     sync::{
         Arc,
@@ -162,6 +163,9 @@ struct Ceremony<'a> {
     signatures: AtomicUsize,
     now: i64,
     ids: Option<([u8; 16], [u8; 32])>,
+    /// Läuft einmal in der Sitzungsprüfung vor dem Commit — also zwischen
+    /// Vorprüfung und Transaktion: der Platz eines nebenläufigen Prozesses.
+    interleave: Cell<Option<Box<dyn FnOnce() + 'a>>>,
 }
 
 impl<'a> Ceremony<'a> {
@@ -183,6 +187,7 @@ impl<'a> Ceremony<'a> {
             signatures: AtomicUsize::new(0),
             now: NOW,
             ids: None,
+            interleave: Cell::new(None),
         }
     }
 
@@ -207,7 +212,12 @@ impl<'a> Ceremony<'a> {
                 digest,
             ))
         };
-        let session = || Ok(());
+        let session = || {
+            if let Some(racing) = self.interleave.take() {
+                racing();
+            }
+            Ok(())
+        };
         // Ohne feste Werte: eindeutig je Paket, abgeleitet aus seinem Hash.
         let ids = || {
             Ok(self.ids.unwrap_or_else(|| {
@@ -531,6 +541,79 @@ fn a_second_commit_with_the_same_approval_identity_is_a_replay() {
             .err(),
         Some(ReaderKeyEscrowError::Trust(TrustError::AuthReplay))
     );
+    assert_eq!(count(&database, "reader_key_escrow_publication"), 1);
+    assert_eq!(publication_rows(&database).len(), 1);
+    assert_eq!(count(&database, "operator_admin_replay"), 2);
+}
+
+/// Nebenläufige Publikation (review-c P3-2): zwei Pakete zum selben
+/// Reader-Zertifikat bestehen beide die Vorprüfung; der zweite Prozess
+/// committet zwischen Vorprüfung und Transaktion des ersten. Genau eine
+/// Publikation entsteht, die andere scheitert mit `PUBLICATION-CONFLICT` und
+/// hinterlässt keine Sperr-, Publikations- oder Auditzeile.
+#[test]
+fn concurrent_publications_for_one_certificate_commit_exactly_once() {
+    let line = escrow_line(EscrowLineOptions::default());
+    let store = Store::new("concurrent-certificate");
+    let database = store.open();
+    let other = store.open();
+    let audit = store.audit(&database);
+    let other_audit = store.audit(&other);
+    let (_, first) = package(&line, &line.reader, READER_KEM_SEED, 0xc1, ISSUED);
+    let (_, second) = package(&line, &line.reader, READER_KEM_SEED, 0xc1, ISSUED + 1);
+    assert_ne!(first, second);
+    let racing = Ceremony::new(&line, &other, &other_audit, &store.proof);
+    let raced = Cell::new(None);
+    let ceremony = Ceremony::new(&line, &database, &audit, &store.proof);
+    ceremony.interleave.set(Some(Box::new(|| {
+        raced.set(Some(
+            racing
+                .publish(&FixtureBundleRelease(bundle_release()), &second)
+                .map(|published| published.replayed),
+        ));
+    })));
+    let error = ceremony
+        .publish(&FixtureBundleRelease(bundle_release()), &first)
+        .err()
+        .expect("the slower publication must conflict");
+    assert_eq!(error, ReaderKeyEscrowError::PublicationConflict);
+    assert_eq!(error.code(), "EA-ESCROW-PUBLICATION-CONFLICT");
+    assert_eq!(raced.take(), Some(Ok(false)));
+    assert_eq!(count(&database, "reader_key_escrow_publication"), 1);
+    assert_eq!(publication_rows(&database).len(), 1);
+    assert_eq!(count(&database, "operator_admin_replay"), 2);
+}
+
+/// Nebenläufige Publikation zur selben Person unter zwei aktiven
+/// Zertifikaten: genau eine; die Personenprüfung läuft in der Transaktion
+/// des Commits noch einmal.
+#[test]
+fn concurrent_publications_for_one_person_commit_exactly_once() {
+    let mut line = escrow_line(EscrowLineOptions::default());
+    let second_reader = push_reader(&mut line.line, 0x82, SECOND_READER_KEM_SEED);
+    let store = Store::new("concurrent-person");
+    let database = store.open();
+    let other = store.open();
+    let audit = store.audit(&database);
+    let other_audit = store.audit(&other);
+    let (_, first) = package(&line, &line.reader, READER_KEM_SEED, 0xc1, ISSUED);
+    let (_, second) = package(&line, &second_reader, SECOND_READER_KEM_SEED, 0xc1, ISSUED);
+    let racing = Ceremony::new(&line, &other, &other_audit, &store.proof);
+    let raced = Cell::new(None);
+    let ceremony = Ceremony::new(&line, &database, &audit, &store.proof);
+    ceremony.interleave.set(Some(Box::new(|| {
+        raced.set(Some(
+            racing
+                .publish(&FixtureBundleRelease(bundle_release()), &second)
+                .map(|published| published.replayed),
+        ));
+    })));
+    let error = ceremony
+        .publish(&FixtureBundleRelease(bundle_release()), &first)
+        .err()
+        .expect("the slower publication must conflict");
+    assert_eq!(error, ReaderKeyEscrowError::PublicationConflict);
+    assert_eq!(raced.take(), Some(Ok(false)));
     assert_eq!(count(&database, "reader_key_escrow_publication"), 1);
     assert_eq!(publication_rows(&database).len(), 1);
     assert_eq!(count(&database, "operator_admin_replay"), 2);
