@@ -15,9 +15,14 @@
 //! # Die Subtypmenge
 //!
 //! Angenommen wird, was [`ea_format::TrustSubtypeV1`] zum Zeitpunkt des Laufs
-//! traegt — heute elf Arme. Diese Datei zaehlt sie NICHT ab: sie ruft den
-//! Dekodierer, und ein zwoelfter Arm wandert dadurch ohne eine Zeile
-//! Aenderung hier hinein.
+//! trägt — heute sechzehn Subtypen, dekodiert in neunzehn Nutzlastarme von
+//! [`DecodedTrustPayloadV1`]. Die drei Funktionen, die ein Feld aus der
+//! Nutzlast lesen ([`registry_version_of`], [`effective_from`],
+//! [`organization_of`]), matchen VOLLSTÄNDIG und ohne Platzhalterarm: ein
+//! neuer Arm kompiliert hier nicht, bevor jemand entschieden hat, ob er eine
+//! Registry-Version trägt und an welche Organisation er sich bindet. Ein
+//! stiller `None`-Durchlauf hätte ein Escrow ohne Organisationsprüfung
+//! indiziert (v1.1-Profil §3.1).
 //!
 //! # Die Registry-Linie
 //!
@@ -401,7 +406,27 @@ pub async fn registry_page(
 fn registry_version_of(payload: &DecodedTrustPayloadV1) -> Option<RegistryVersion> {
     match payload {
         DecodedTrustPayloadV1::RegistryEvent(core) => Some(core.fields().registry_version),
-        _ => None,
+        DecodedTrustPayloadV1::InitialRoot(_)
+        | DecodedTrustPayloadV1::InitialAdminDevice(_)
+        | DecodedTrustPayloadV1::InitialAdminOperatorBinding(_)
+        | DecodedTrustPayloadV1::AuthorizedRoot(_)
+        | DecodedTrustPayloadV1::AuthorizedDevice(_)
+        | DecodedTrustPayloadV1::AuthorizedOperatorBinding(_)
+        | DecodedTrustPayloadV1::OrganizationAdminAuthorization(_)
+        | DecodedTrustPayloadV1::Policy(_)
+        | DecodedTrustPayloadV1::WriterTransition(_)
+        | DecodedTrustPayloadV1::GrantAuthorization(_)
+        | DecodedTrustPayloadV1::DestructionAuthorization(_)
+        | DecodedTrustPayloadV1::DestructionTransition(_)
+        | DecodedTrustPayloadV1::DeletionAttestation(_)
+        | DecodedTrustPayloadV1::WebBundleRelease(_)
+        | DecodedTrustPayloadV1::WebBundleRevocation(_)
+        // Die drei Escrow-Familien tragen eine Registry-Version nur als
+        // Bindung an den Kopf, unter dem sie autorisiert wurden, und stehen
+        // deshalb NICHT auf der Registry-Linie.
+        | DecodedTrustPayloadV1::ReaderKeyEscrow(_)
+        | DecodedTrustPayloadV1::ReaderKeyEscrowApproval(_)
+        | DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(_) => None,
     }
 }
 
@@ -409,17 +434,42 @@ fn registry_version_of(payload: &DecodedTrustPayloadV1) -> Option<RegistryVersio
 fn effective_from(payload: &DecodedTrustPayloadV1) -> Option<UnixMillis> {
     match payload {
         DecodedTrustPayloadV1::RegistryEvent(core) => Some(core.fields().issued_at),
-        _ => None,
+        DecodedTrustPayloadV1::InitialRoot(_)
+        | DecodedTrustPayloadV1::InitialAdminDevice(_)
+        | DecodedTrustPayloadV1::InitialAdminOperatorBinding(_)
+        | DecodedTrustPayloadV1::AuthorizedRoot(_)
+        | DecodedTrustPayloadV1::AuthorizedDevice(_)
+        | DecodedTrustPayloadV1::AuthorizedOperatorBinding(_)
+        | DecodedTrustPayloadV1::OrganizationAdminAuthorization(_)
+        | DecodedTrustPayloadV1::Policy(_)
+        | DecodedTrustPayloadV1::WriterTransition(_)
+        | DecodedTrustPayloadV1::GrantAuthorization(_)
+        | DecodedTrustPayloadV1::DestructionAuthorization(_)
+        | DecodedTrustPayloadV1::DestructionTransition(_)
+        | DecodedTrustPayloadV1::DeletionAttestation(_)
+        | DecodedTrustPayloadV1::WebBundleRelease(_)
+        | DecodedTrustPayloadV1::WebBundleRevocation(_)
+        | DecodedTrustPayloadV1::ReaderKeyEscrow(_)
+        | DecodedTrustPayloadV1::ReaderKeyEscrowApproval(_)
+        | DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(_) => None,
     }
 }
 
-/// Die Organisation, an die ein `.etb` sich bindet, sofern sein Subtyp eine
-/// nennt.
+/// Die Organisation, an die ein `.etb` sich bindet, sofern der Dienst sie
+/// VOR der geteilten Prüfung stellt.
 ///
-/// Die Aufzaehlung ist ABSICHTLICH nicht vollstaendig: sie prueft, wo eine
-/// Bindung im Feld steht, und laesst die Subtypen ohne eigenes
-/// `organizationId`-Feld der geteilten Trust-Pruefung. Dort ist die Bindung
-/// ueber die Kette ohnehin enger.
+/// Das Match ist vollständig; ein neuer Nutzlastarm kompiliert erst mit einer
+/// Entscheidung. `Some` steht für jeden Subtyp, dessen Organisation der Dienst
+/// selbst gegen die des Aufrufers stellt — darunter die drei Escrow-Familien
+/// (v1.1-Profil §3.1: ohne diese Bindung würde ein fremdes Escrow indiziert).
+///
+/// Die `None`-Arme sind eine BEWUSSTE Bestandsentscheidung und keine Lücke:
+/// `policy`, `writerTransition`, `grantAuthorization`,
+/// `destructionAuthorization`, `webBundleRelease` und `webBundleRevocation`
+/// tragen ein `organizationId`, bleiben aber bei der geteilten Prüfung. Mit
+/// `Some` bekämen sie 403 statt heute 422, und v1.1-Profil §9 verlangt
+/// unveränderte semantische Ergebnisse. Ihre Umstellung ist ein eigenes
+/// Folgeticket.
 fn organization_of(payload: &DecodedTrustPayloadV1) -> Option<OrganizationId> {
     match payload {
         DecodedTrustPayloadV1::InitialRoot(fields) => Some(fields.organization_id),
@@ -434,6 +484,158 @@ fn organization_of(payload: &DecodedTrustPayloadV1) -> Option<OrganizationId> {
             Some(fields.organization_id)
         }
         DecodedTrustPayloadV1::RegistryEvent(core) => Some(core.fields().organization_id),
-        _ => None,
+        DecodedTrustPayloadV1::ReaderKeyEscrow(payload) => Some(payload.core().organization_id),
+        DecodedTrustPayloadV1::ReaderKeyEscrowApproval(core) => Some(core.organization_id),
+        DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(core) => {
+            Some(core.organization_id)
+        }
+        // Bleibt bei der geteilten Prüfung, Umstellung = Folgeticket.
+        DecodedTrustPayloadV1::Policy(_)
+        | DecodedTrustPayloadV1::WriterTransition(_)
+        | DecodedTrustPayloadV1::GrantAuthorization(_)
+        | DecodedTrustPayloadV1::DestructionAuthorization(_)
+        | DecodedTrustPayloadV1::WebBundleRelease(_)
+        | DecodedTrustPayloadV1::WebBundleRevocation(_) => None,
+        // Ohne eigenes `organizationId`-Feld: die Bindung läuft über die
+        // Kette der geteilten Prüfung.
+        DecodedTrustPayloadV1::DestructionTransition(_)
+        | DecodedTrustPayloadV1::DeletionAttestation(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ea_crypto::{CoseSigner, SecretBytes};
+    use ea_format::{
+        DecodedTrustPayloadV1, ParsedArchiveObject, ReaderKeyEscrowApprovalCoreV1,
+        ReaderKeyEscrowCoreV1, ReaderKeyEscrowRecoveryAuthorizationCoreV1,
+    };
+    use ea_testkit::reader_key_escrow_fixture::{
+        FixtureTrustSigner, escrow_with_approval, signed_reader_key_escrow_recovery_authorization,
+    };
+    use ea_types::{
+        AuthorizationId, CertificateHash, ChainSequence, Hash32, KeyThumbprint, ObjectHash,
+        OrganizationId, RegistryVersion, SubjectId, UnixMillis,
+    };
+
+    use super::{effective_from, organization_of, registry_version_of};
+
+    const FOREIGN: [u8; 16] = [0x5a; 16];
+
+    fn signer(fill: u8) -> FixtureTrustSigner {
+        FixtureTrustSigner {
+            seed: [fill; 32],
+            certificate_hash: certificate(fill),
+        }
+    }
+
+    fn thumbprint(seed: [u8; 32]) -> KeyThumbprint {
+        CoseSigner::from_secret(SecretBytes::new(seed))
+            .public_key()
+            .unwrap()
+            .thumbprint()
+    }
+
+    fn certificate(fill: u8) -> CertificateHash {
+        CertificateHash::try_from([fill; 32].as_slice()).unwrap()
+    }
+
+    fn hash32(fill: u8) -> Hash32 {
+        Hash32::try_from([fill; 32].as_slice()).unwrap()
+    }
+
+    fn organization() -> OrganizationId {
+        OrganizationId::try_from(FOREIGN.as_slice()).unwrap()
+    }
+
+    fn core() -> ReaderKeyEscrowCoreV1 {
+        ReaderKeyEscrowCoreV1 {
+            organization_id: organization(),
+            reader_certificate_object_hash: certificate(0x22),
+            reader_subject_id: SubjectId::try_from([0x23; 16].as_slice()).unwrap(),
+            enrollment_registry_version: RegistryVersion::new(3),
+            enrollment_registry_head_hash: hash32(0x24),
+            enrollment_sequence: ChainSequence::new(201),
+            recovery_certificate_object_hash: certificate(0x25),
+            recovery_kem_key_thumbprint: thumbprint([0x26; 32]),
+            encapsulated_key: [0x27; 32],
+            encrypted_reader_kem_key: [0x28; 48],
+            issued_at: UnixMillis::new(1_000),
+            root_key_thumbprint: thumbprint([0x11; 32]),
+        }
+    }
+
+    fn approval() -> ReaderKeyEscrowApprovalCoreV1 {
+        ReaderKeyEscrowApprovalCoreV1 {
+            authorization_id: AuthorizationId::try_from([0x31; 16].as_slice()).unwrap(),
+            organization_id: organization(),
+            registry_version: RegistryVersion::new(4),
+            registry_head_hash: hash32(0x32),
+            authorization_sequence: 301,
+            admin_key_thumbprint: thumbprint([0x12; 32]),
+            admin_certificate_object_hash: certificate(0x12),
+            admin_operator_binding_object_hash: ObjectHash::from(hash32(0x34)),
+            escrow_core_hash: Hash32::ZERO,
+            reader_certificate_object_hash: certificate(0),
+            reader_subject_id: SubjectId::try_from([0; 16].as_slice()).unwrap(),
+            issued_at: UnixMillis::new(900),
+            expires_at: UnixMillis::new(1_100),
+            nonce: [0x35; 32],
+        }
+    }
+
+    fn recovery(escrow_object_hash: ObjectHash) -> ReaderKeyEscrowRecoveryAuthorizationCoreV1 {
+        let core = core();
+        ReaderKeyEscrowRecoveryAuthorizationCoreV1 {
+            authorization_id: AuthorizationId::try_from([0x41; 16].as_slice()).unwrap(),
+            organization_id: organization(),
+            registry_version: RegistryVersion::new(4),
+            registry_head_hash: hash32(0x32),
+            authorization_sequence: 302,
+            escrow_object_hash,
+            reader_certificate_object_hash: core.reader_certificate_object_hash,
+            reader_subject_id: core.reader_subject_id,
+            enrollment_registry_version: core.enrollment_registry_version,
+            enrollment_registry_head_hash: core.enrollment_registry_head_hash,
+            target_transport_key_thumbprint: thumbprint([0x42; 32]),
+            issued_at: UnixMillis::new(900),
+            expires_at: UnixMillis::new(1_100),
+            nonce: [0x43; 32],
+        }
+    }
+
+    fn decoded(bytes: &[u8]) -> DecodedTrustPayloadV1 {
+        let Ok(ParsedArchiveObject::Trust(parsed)) = ea_format::decode_exact_object(bytes) else {
+            panic!("a fixture object is a trust object");
+        };
+        parsed.value().decoded_payload().unwrap()
+    }
+
+    /// Alle drei Escrow-Familien tragen ein `organizationId`; der Dienst MUSS
+    /// es gegen die Organisation des Aufrufers stellen (Profil §3.1), sonst
+    /// indizierte er ein fremdes Escrow ohne Organisationsprüfung.
+    #[test]
+    fn the_three_escrow_families_name_their_organization() {
+        let (approval_bytes, escrow_bytes) =
+            escrow_with_approval(&core(), &approval(), &signer(0x12), &signer(0x11));
+        let recovery_bytes = signed_reader_key_escrow_recovery_authorization(
+            &recovery(ea_crypto::object_hash(&escrow_bytes)),
+            &[signer(0x13), signer(0x14)],
+        );
+
+        for (name, bytes) in [
+            ("readerKeyEscrowApproval", approval_bytes),
+            ("readerKeyEscrow", escrow_bytes),
+            ("readerKeyEscrowRecoveryAuthorization", recovery_bytes),
+        ] {
+            let payload = decoded(&bytes);
+            assert!(
+                organization_of(&payload) == Some(organization()),
+                "{name} must name its organization"
+            );
+            // Nur das Registry-Ereignis steht auf der Registry-Linie.
+            assert!(registry_version_of(&payload).is_none(), "{name}");
+            assert!(effective_from(&payload).is_none(), "{name}");
+        }
     }
 }
