@@ -312,6 +312,46 @@ reader-key-escrow-restore-context-v1 = [
   "EINSATZARCHIV-READER-KEY-ESCROW-RESTORE-1", []
 ]
 
+; Übergabedateien des Reader-Key-Escrows (Profil §5/§6, Ruling U3) — keine
+; Archivobjekte, keine Trust-Familie. Sie reisen als Datei über die eigene
+; Escrow-Inbox der nativen Administration; der Dateiname ist allein
+; <hex(object_hash(datei))> plus Suffix, nach dem Muster der
+; Registrierungsanträge. Höchstens 4096 Byte, deterministisches CBOR, kein
+; Rest. Ihre Echtheit kommt nie aus dem Transportweg: das Paket aus
+; Gegenprobe, Freigabe und Root-Signatur, die Transportdatei aus dem Abdruck
+; in der zweifach signierten Öffnungsautorisierung, der Umschlag aus HPKE
+; plus der exakt geprüften Autorisierung.
+;
+; Zeremonie A, Browser -> nativ, Suffix .reader-key-escrow-package.cbor. Der
+; Core steht mit genau den Bytes darin, deren Hash escrow-core-hash wird.
+reader-key-escrow-package-v1 = [
+  1, "EINSATZARCHIV-READER-KEY-ESCROW-PACKAGE-1",
+  core: reader-key-escrow-core-v1,
+  []
+]
+
+; Zeremonie B, Browser -> nativ, Suffix .reader-key-escrow-transport.cbor.
+; Der rohe X25519-Schlüssel, nicht nur sein Abdruck: nativ wird an ihn
+; versiegelt.
+reader-key-escrow-transport-request-v1 = [
+  1, "EINSATZARCHIV-READER-KEY-ESCROW-TRANSPORT-1",
+  organization-id: bstr .size 16,
+  escrow-object-hash: bstr .size 32,
+  target-transport-public-key: bstr .size 32,
+  []
+]
+
+; Zeremonie B, nativ -> Browser, Suffix .reader-key-escrow-envelope.cbor. Die
+; öffentliche Bindung ist die Quelle von info und AAD; das Chiffrat sind 32
+; Byte Schlüssel plus 16 Byte AEAD-Tag.
+reader-key-escrow-envelope-v1 = [
+  1, "EINSATZARCHIV-READER-KEY-ESCROW-ENVELOPE-1",
+  restore-context: reader-key-escrow-restore-context-v1,
+  encapsulated-key: bstr .size 32,
+  sealed-reader-kem-key: bstr .size 48,
+  []
+]
+
 authorized-trust-payload-v1<T> = [
   authorized-trust-core: T,
   organization-admin-authorization-object-hash: bstr .size 32
