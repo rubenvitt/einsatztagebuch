@@ -110,6 +110,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 mod reader_key_escrow;
+pub mod reader_key_escrow_fixture;
 
 pub use reader_key_escrow::{
     READER_KEY_ESCROW_APPROVAL_FAMILY, READER_KEY_ESCROW_APPROVAL_V1_ROOT,
