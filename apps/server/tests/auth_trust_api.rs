@@ -1223,3 +1223,126 @@ async fn set_pin(
     .await
     .expect("writing the fixture pin must succeed");
 }
+
+// ---------------------------------------------------------------------------
+// Reader-Key-Escrow (v1.1-Profil §3.1, §11; DRK-459)
+// ---------------------------------------------------------------------------
+
+use common::trust_closure;
+
+/// Freigabefenster um die feste Serveruhr (höchstens 300 000 ms).
+const ESCROW_APPROVAL_WINDOW: (i64, i64) = (
+    common::READ_SERVER_NOW_MILLIS - 100,
+    common::READ_SERVER_NOW_MILLIS + 200,
+);
+/// Die wurzelsignierte Zeit des Escrows, innerhalb des Freigabefensters.
+const ESCROW_ISSUED_AT: i64 = common::READ_SERVER_NOW_MILLIS;
+const ESCROW_RECOVERY_WINDOW: (i64, i64) = (
+    common::READ_SERVER_NOW_MILLIS - 100,
+    common::READ_SERVER_NOW_MILLIS + 800,
+);
+const FOREIGN_ORGANIZATION: [u8; 16] = [0x6f; 16];
+
+/// Ein Server mit dem Abschluss, der den zweiten Reader und die Approver trägt.
+async fn escrow_server(database: &common::TestDatabase) -> common::ReadyServer {
+    common::stand_up_read_server_with_closure(
+        database,
+        common::READ_SERVER_NOW_MILLIS,
+        trust_closure::build_with(true, true),
+        None,
+    )
+    .await
+}
+
+/// Genau ein `.etb` über `POST /v1/trust/events`, signiert vom Administrator.
+async fn post_escrow_object(
+    ready: &common::ReadyServer,
+    bytes: &[u8],
+    marker: u8,
+) -> common::HttpResponse {
+    let upload = TrustEventUploadV1::new(bytes.to_vec()).expect("the upload frame must build");
+    let mut request_id = [0xe5_u8; 16];
+    request_id[15] = marker;
+    common::call(&common::ApiCall {
+        ready,
+        signer_seed: ADMIN_SEED,
+        endpoint: EndpointV1::TrustEvents,
+        target: EndpointV1::TrustEvents.path_template(),
+        body: Some(upload.exact_bytes()),
+        request_id,
+    })
+    .await
+}
+
+/// Ob der Object Store Bytes unter diesem Hash hält.
+async fn stored(hash: ea_types::ObjectHash) -> bool {
+    common::object_store_client()
+        .await
+        .head_object()
+        .bucket(common::INTEGRATION_BUCKET)
+        .key(ea_sync_server::object_key(
+            ea_format::ObjectTypeV1::Trust,
+            hash,
+        ))
+        .send()
+        .await
+        .is_ok()
+}
+
+/// Pflichtzeuge (Profil §3.1 letzter Absatz, §11): ein Objekt jeder
+/// Escrow-Familie mit FREMDER `organizationId` wird mit 403 abgewiesen, bevor
+/// die geteilte Prüfung überhaupt läuft — keine Zeile, keine Bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_foreign_organization_escrow_family_is_refused_before_validation() {
+    let database = common::fresh_database().await;
+    let ready = escrow_server(&database).await;
+    let foreign = OrganizationId::try_from(&FOREIGN_ORGANIZATION[..]).expect("16 bytes");
+
+    let mut core = trust_closure::escrow_core(
+        &ready.closure,
+        trust_closure::ESCROW_READER_SUBJECT,
+        ESCROW_ISSUED_AT,
+    );
+    core.organization_id = foreign;
+    let mut approval =
+        trust_closure::escrow_approval_core(&ready.closure, 0x91, ESCROW_APPROVAL_WINDOW);
+    approval.organization_id = foreign;
+    let (approval_bytes, escrow_bytes) = trust_closure::escrow_objects(&core, &approval);
+    let recovery_bytes = trust_closure::escrow_recovery_authorization(
+        &ready.closure,
+        &escrow_bytes,
+        &core,
+        0x92,
+        ESCROW_RECOVERY_WINDOW,
+        &[0, 1],
+    );
+
+    let indexed_before = indexed_trust_objects(database.pool()).await;
+    for (marker, (name, bytes)) in [
+        ("readerKeyEscrowApproval", approval_bytes),
+        ("readerKeyEscrow", escrow_bytes),
+        ("readerKeyEscrowRecoveryAuthorization", recovery_bytes),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response =
+            post_escrow_object(&ready, &bytes, u8::try_from(marker).expect("three cases")).await;
+        assert_eq!(
+            (response.status, error_code(&response.body).as_deref()),
+            (403, Some("EA-TRUST-EVENT-ORGANIZATION")),
+            "{name} of a foreign organization must be refused before validation"
+        );
+        assert!(
+            !stored(ea_crypto::object_hash(&bytes)).await,
+            "{name}: a refused object never reaches the object store"
+        );
+    }
+    assert_eq!(
+        indexed_trust_objects(database.pool()).await,
+        indexed_before,
+        "no row for a foreign-organization escrow object"
+    );
+
+    database.cleanup().await;
+}

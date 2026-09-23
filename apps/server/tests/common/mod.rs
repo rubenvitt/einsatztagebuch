@@ -1108,7 +1108,7 @@ pub async fn stand_up_destruction_server(database: &TestDatabase) -> ReadyServer
     )
     .await
 }
-async fn stand_up_read_server_with_closure(
+pub async fn stand_up_read_server_with_closure(
     database: &TestDatabase,
     now_millis: i64,
     closure: trust_closure::ExtendedClosure,
@@ -1522,4 +1522,51 @@ pub async fn receipt_object_hash_of(
             .await
             .expect("reading the receipt address must succeed");
     ea_types::ObjectHash::try_from(row.0.as_slice()).expect("32 bytes")
+}
+
+/// Legt exakte `.etb`-Bytes in den Object Store UND in den Index
+/// (`object_index`, `trust_events`) — ohne den Annahmeweg.
+///
+/// Anders als [`seed_trust_object_bytes`] sieht der Katalog das Objekt danach:
+/// `PostgresTrustAuthority` liest ihn aus `trust_events`. Gebraucht für die
+/// `webBundleRelease` der Escrow-Cutover-Vorbedingung, für die es bis Scheibe
+/// (f) keinen Annahmeweg gibt. Der Trigger auf `trust_events` hebt die
+/// Katalogrevision wie bei jeder Indexierung.
+///
+/// # Panics
+///
+/// Wenn Ablage oder Index scheitern.
+pub async fn seed_indexed_trust_object(
+    pool: &PgPool,
+    organization_id: ea_types::OrganizationId,
+    bytes: &[u8],
+) -> ea_types::ObjectHash {
+    let hash = seed_trust_object_bytes(bytes).await;
+    let ea_format::ParsedArchiveObject::Trust(parsed) =
+        ea_format::decode_exact_object(bytes).expect("a seeded trust object parses")
+    else {
+        panic!("only trust objects are seeded here");
+    };
+    sqlx::query(
+        "INSERT INTO object_index (object_hash, organization_id, object_type_code, \
+         size_bytes, stored_at_millis) VALUES ($1, $2, 5, $3, 0)",
+    )
+    .bind(&hash.as_bytes()[..])
+    .bind(&organization_id.as_bytes()[..])
+    .bind(i64::try_from(bytes.len()).expect("a fixture object is small"))
+    .execute(pool)
+    .await
+    .expect("indexing a seeded trust object must succeed");
+    sqlx::query(
+        "INSERT INTO trust_events (organization_id, event_id, object_hash, event_code, \
+         received_at_millis) VALUES ($1, $2, $3, $4, 0)",
+    )
+    .bind(&organization_id.as_bytes()[..])
+    .bind(&hash.as_bytes()[..16])
+    .bind(&hash.as_bytes()[..])
+    .bind(parsed.value().subtype().as_str())
+    .execute(pool)
+    .await
+    .expect("recording a seeded trust object must succeed");
+    hash
 }
