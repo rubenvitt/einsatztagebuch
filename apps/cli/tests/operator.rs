@@ -24,6 +24,9 @@ mod posture_command;
 #[allow(dead_code)]
 #[path = "../src/commands/recovery_test.rs"]
 mod recovery_command;
+#[allow(dead_code)]
+#[path = "../src/commands/web_bundle.rs"]
+mod web_bundle_command;
 
 mod support;
 
@@ -1131,6 +1134,32 @@ mod process_native {
                 &invocation,
                 config,
                 inbox,
+                support::live_clock(),
+                &escrow_opener,
+            )),
+            args::Command::OrganizationWebBundleRelease {
+                ref config,
+                ref bundle,
+                ref bundle_version,
+                effective_from,
+            } => Some(web_bundle_command::run_release_with_runtime_opener(
+                &invocation,
+                config,
+                bundle,
+                bundle_version,
+                effective_from,
+                support::live_clock(),
+                &escrow_opener,
+            )),
+            args::Command::OrganizationWebBundleRevoke {
+                ref config,
+                ref release,
+                effective_from,
+            } => Some(web_bundle_command::run_revoke_with_runtime_opener(
+                &invocation,
+                config,
+                release,
+                effective_from,
                 support::live_clock(),
                 &escrow_opener,
             )),

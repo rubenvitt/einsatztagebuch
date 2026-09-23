@@ -983,3 +983,178 @@ fn the_canary_encodings_match_known_base64() {
     assert!(encodings.contains(&b"8BU6X4SpzvMYPWKHrNH2G0Bliq_U-R5DaI2y1_whRms".to_vec()));
     assert!(encodings.contains(&hex::encode(secret).into_bytes()));
 }
+
+// ---------------------------------------------------------------------------
+// Die Root-Zeremonie der Bundle-Familie (Scheibe f, U4)
+// ---------------------------------------------------------------------------
+
+impl EscrowInstallation {
+    fn trust_files(&self) -> Vec<String> {
+        let directory = self.path("archive").join(ea_archive::TRUST_DIR_V1);
+        let mut names: Vec<String> = fs::read_dir(directory)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    fn bundle_command(&self, arguments: &[&str]) -> std::process::Output {
+        let mut full = vec!["organization"];
+        full.extend_from_slice(arguments);
+        full.extend_from_slice(&["--operator-config", self.config.to_str().unwrap()]);
+        self.run(&full, None)
+    }
+}
+
+/// Der Objekthash aus `web-bundle <action> object=<hex> …`.
+fn reported_object(output: &std::process::Output, action: &str) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with(&format!("web-bundle {action} object=")))
+        .unwrap_or_else(|| panic!("no {action} line in {stdout:?}"));
+    line.split_whitespace()
+        .nth(2)
+        .unwrap()
+        .trim_start_matches("object=")
+        .to_owned()
+}
+
+/// Positivpfad über die echte native Laufzeit: Root signiert eine Freigabe
+/// (Hash des Bundles, Fassung, Organisation aus dem Anker), die Datei liegt
+/// unter `trust/`; der Widerruf dieser Datei schließt die Cutover-Regel.
+#[test]
+fn web_bundle_release_and_revoke_are_root_signed_into_the_archive() {
+    let installation = EscrowInstallation::new("web-bundle-release", "admin-root-ceremony");
+    let bundle = installation.path("reader-bundle.bin");
+    fs::write(&bundle, b"reader bundle 2026.4.0").unwrap();
+    let before = installation.trust_files();
+    let output = installation.bundle_command(&[
+        "web-bundle-release",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--bundle-version",
+        ea_trust::MIN_ESCROW_BUNDLE_VERSION,
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("reader-key-escrow-capable=yes"));
+    let release_hex = reported_object(&output, "released");
+    let release_path = installation
+        .path("archive")
+        .join(ea_archive::TRUST_DIR_V1)
+        .join(format!("{release_hex}.etb"));
+    let release = fs::read(&release_path).unwrap();
+    assert_eq!(hex::encode(ea_crypto::object_hash(&release).as_bytes()), release_hex);
+    let ea_format::ParsedArchiveObject::Trust(parsed) =
+        ea_format::decode_exact_object(&release).unwrap()
+    else {
+        panic!("a trust object");
+    };
+    let ea_format::DecodedTrustPayloadV1::WebBundleRelease(core) =
+        parsed.value().decoded_payload().unwrap()
+    else {
+        panic!("a web bundle release");
+    };
+    assert!(core.bundle_hash == ea_crypto::web_bundle_hash(b"reader bundle 2026.4.0"));
+    assert_eq!(core.bundle_version, ea_trust::MIN_ESCROW_BUNDLE_VERSION);
+    assert!(core.organization_id == trust_support::organization());
+    let calls = fs::read_to_string(installation.path("helper-calls")).unwrap_or_default();
+    assert!(calls.contains("sign root-signing"), "{calls}");
+
+    let anchor =
+        ea_trust::decode_trust_anchor(&fs::read(&installation.anchor).unwrap()).unwrap();
+    let any_version = ea_types::RegistryVersion::new(u64::MAX);
+    assert_eq!(
+        ea_trust::reader_key_escrow_cutover_release(&anchor, &[&release], any_version)
+            .map(|hash| hex::encode(hash.as_bytes())),
+        Ok(release_hex.clone())
+    );
+
+    let output = installation.bundle_command(&[
+        "web-bundle-revoke",
+        "--release",
+        release_path.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let revocation_hex = reported_object(&output, "revoked");
+    let revocation = fs::read(
+        installation
+            .path("archive")
+            .join(ea_archive::TRUST_DIR_V1)
+            .join(format!("{revocation_hex}.etb")),
+    )
+    .unwrap();
+    assert_eq!(
+        ea_trust::reader_key_escrow_cutover_release(&anchor, &[&release, &revocation], any_version)
+            .map(|hash| hex::encode(hash.as_bytes())),
+        Err(ea_trust::EscrowCutoverError::NoActiveRelease)
+    );
+    let mut expected = before;
+    expected.push(format!("{release_hex}.etb"));
+    expected.push(format!("{revocation_hex}.etb"));
+    expected.sort();
+    assert_eq!(installation.trust_files(), expected, "exactly two new files");
+    // Keine Auditzeile der Zeremonie selbst (Ruling Q2): nur die beiden
+    // Reauthentifizierungen (Aktion 0) stehen im Audit.
+    let actions: Vec<u8> = installation
+        .audit_rows()
+        .iter()
+        .map(|row| row.action().code())
+        .collect();
+    assert_eq!(actions, [0, 0]);
+}
+
+/// Ein Wirt ohne Autorität oder mit anderem Zweck signiert nichts und legt
+/// nichts ab; eine JSON-Form gibt es nicht.
+#[test]
+fn web_bundle_release_needs_the_root_ceremony_host_and_has_no_json_form() {
+    let installation =
+        EscrowInstallation::new("web-bundle-release-refused", "reader-key-escrow-recovery");
+    let bundle = installation.path("reader-bundle.bin");
+    fs::write(&bundle, b"reader bundle 2026.4.0").unwrap();
+    let before = installation.trust_files();
+    let output = installation.bundle_command(&[
+        "web-bundle-release",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--bundle-version",
+        ea_trust::MIN_ESCROW_BUNDLE_VERSION,
+    ]);
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("EA-ESCROW-OPERATOR-UNAUTHORIZED"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(installation.path("helper-calls")).unwrap_or_default();
+    assert!(!calls.contains("sign root-signing"), "{calls}");
+    assert_eq!(installation.trust_files(), before);
+
+    let authority = EscrowInstallation::new("web-bundle-release-json", "admin-root-ceremony");
+    let output = authority.bundle_command(&[
+        "--format",
+        "json",
+        "web-bundle-release",
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--bundle-version",
+        ea_trust::MIN_ESCROW_BUNDLE_VERSION,
+    ]);
+    assert_eq!(output.status.code(), Some(21));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("web-bundle "));
+    assert!(authority.trust_files().len() == before.len());
+}

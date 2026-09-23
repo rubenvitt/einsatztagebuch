@@ -100,7 +100,7 @@ use crate::args::{Format, UsageError};
 /// Pfad benennt also einen Platz, der noch frei sein muss. Die Begruendung
 /// steht in `crate::commands::organization`; hier steht sie in einem Wort,
 /// damit ein Aufrufer sie schon in der Grammatik sieht.
-const GRAMMAR_V1: [&str; 21] = [
+const GRAMMAR_V1: [&str; 23] = [
     "einsatzarchiv --trust-anchor <file> verify <archive-path>",
     "einsatzarchiv --trust-anchor <file> list <archive-path>",
     "einsatzarchiv --trust-anchor <file> decrypt <archive-path> --key <key-source> --output <target>",
@@ -111,6 +111,8 @@ const GRAMMAR_V1: [&str; 21] = [
     "einsatzarchiv --trust-anchor <new-file> organization init",
     "einsatzarchiv --trust-anchor <new-file> organization certify-root --initial-registry-version <u64>",
     "einsatzarchiv --trust-anchor <file> organization reader-key-escrow-publish --operator-config <file> --escrow-inbox <dir>",
+    "einsatzarchiv --trust-anchor <file> organization web-bundle-release --operator-config <file> --bundle <file> --bundle-version <version> [--effective-from-registry-version <u64>]",
+    "einsatzarchiv --trust-anchor <file> organization web-bundle-revoke --operator-config <file> --release <release.etb> [--effective-from-registry-version <u64>]",
     "einsatzarchiv --trust-anchor <file> posture target --operator-config <file> --output <new-target.json>",
     "einsatzarchiv --trust-anchor <file> posture issue --operator-config <file> --posture-target <target.json> --evidence-reference <public-document> --valid-for-ms <1..86400000> --output <new-document.cbor>",
     "einsatzarchiv --trust-anchor <file> posture import --operator-config <file> --posture-document <document.cbor>",
@@ -415,6 +417,29 @@ pub fn print_reader_key_escrow_report(action: &str, fields: &[(&str, &[u8])]) {
         for byte in *bytes {
             line.push_str(&format!("{byte:02x}"));
         }
+    }
+    println!("{line}");
+}
+
+pub fn print_web_bundle_json_refusal() {
+    eprintln!(
+        "einsatzarchiv: web-bundle-release and web-bundle-revoke have a text form only: no versioned web bundle report JSON schema is available"
+    );
+}
+
+/// Der Bericht der Bundle-Zeremonie: der Objekthash als Kleinbuchstaben-Hex
+/// und, bei einer Freigabe, ob die Fassung das Reader-Key-Escrow trägt.
+pub fn print_web_bundle_report(action: &str, object_hash: &[u8], capable: Option<bool>) {
+    let mut line = format!("web-bundle {action} object=");
+    for byte in object_hash {
+        line.push_str(&format!("{byte:02x}"));
+    }
+    if let Some(capable) = capable {
+        line.push_str(if capable {
+            " reader-key-escrow-capable=yes"
+        } else {
+            " reader-key-escrow-capable=no"
+        });
     }
     println!("{line}");
 }

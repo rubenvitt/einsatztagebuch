@@ -66,7 +66,12 @@ pub const ORGANIZATION_INIT_SUBCOMMAND: &str = "init";
 pub const ORGANIZATION_CERTIFY_ROOT_SUBCOMMAND: &str = "certify-root";
 /// Zeremonie A des Reader-Key-Escrows (DRK-458) — bis zum Cutover gesperrt.
 pub const ORGANIZATION_READER_KEY_ESCROW_PUBLISH_SUBCOMMAND: &str = "reader-key-escrow-publish";
-pub const ORGANIZATION_SUBCOMMANDS: &str = "init|certify-root|reader-key-escrow-publish";
+/// Die minimale Root-Zeremonie der Bundle-Familie (U4): Freigabe und Widerruf
+/// einer Fassung des Web-Bundles, neben `certify-root`.
+pub const ORGANIZATION_WEB_BUNDLE_RELEASE_SUBCOMMAND: &str = "web-bundle-release";
+pub const ORGANIZATION_WEB_BUNDLE_REVOKE_SUBCOMMAND: &str = "web-bundle-revoke";
+pub const ORGANIZATION_SUBCOMMANDS: &str =
+    "init|certify-root|reader-key-escrow-publish|web-bundle-release|web-bundle-revoke";
 /// Die beiden Unterkommandos von `reader-key-escrow` (Zeremonie B).
 pub const READER_KEY_ESCROW_OPEN_SUBCOMMAND: &str = "open";
 pub const READER_KEY_ESCROW_PICKUP_SUBCOMMAND: &str = "pickup";
@@ -235,6 +240,15 @@ pub const ESCROW_INBOX_SWITCH: &str = "--escrow-inbox";
 /// `--escrow-outbox <dir>`, nur bei `reader-key-escrow`: dorthin geht allein
 /// der versiegelte Umschlag.
 pub const ESCROW_OUTBOX_SWITCH: &str = "--escrow-outbox";
+/// `--bundle <file>`, nur bei `organization web-bundle-release`: die exakten
+/// Bytes des Bundles, dessen Hash (`ea_crypto::web_bundle_hash`) die Freigabe
+/// nennt.
+pub const BUNDLE_SWITCH: &str = "--bundle";
+/// `--bundle-version <version>`, nur bei `organization web-bundle-release`.
+pub const BUNDLE_VERSION_SWITCH: &str = "--bundle-version";
+/// `--effective-from-registry-version <u64>`, nur bei den beiden
+/// Bundle-Unterkommandos; ohne ihn gilt die Version des gewählten Kopfes.
+pub const EFFECTIVE_FROM_REGISTRY_VERSION_SWITCH: &str = "--effective-from-registry-version";
 /// `--report-signing-key <source>`, nur bei `report` — und IMMER verweigert.
 ///
 /// # Warum ein Schalter, der nie etwas tut
@@ -416,6 +430,19 @@ pub enum Command {
     },
     /// Zeremonie A des Reader-Key-Escrows; bis zum Cutover gesperrt.
     OrganizationReaderKeyEscrowPublish { config: PathBuf, inbox: PathBuf },
+    /// Root signiert eine `webBundleRelease` (U4).
+    OrganizationWebBundleRelease {
+        config: PathBuf,
+        bundle: PathBuf,
+        bundle_version: String,
+        effective_from: Option<RegistryVersion>,
+    },
+    /// Root signiert einen `webBundleRevocation` der Freigabe in `release`.
+    OrganizationWebBundleRevoke {
+        config: PathBuf,
+        release: PathBuf,
+        effective_from: Option<RegistryVersion>,
+    },
     /// Zeremonie B: ein Escrow öffnen und den Umschlag ausliefern.
     ReaderKeyEscrowOpen {
         config: PathBuf,
@@ -883,6 +910,9 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
     let mut not_after: Option<u64> = None;
     let mut escrow_inbox: Option<PathBuf> = None;
     let mut escrow_outbox: Option<PathBuf> = None;
+    let mut bundle: Option<PathBuf> = None;
+    let mut bundle_version: Option<PathBuf> = None;
+    let mut effective_from_registry_version: Option<u64> = None;
     let mut format: Option<Format> = None;
     let mut include_runtime_metadata: Option<bool> = None;
     let mut command_kind: Option<CommandKind> = None;
@@ -990,6 +1020,15 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                 ESCROW_OUTBOX_SWITCH => {
                     take_path_value(&mut escrow_outbox, ESCROW_OUTBOX_SWITCH, &mut arguments)?
                 }
+                BUNDLE_SWITCH => take_path_value(&mut bundle, BUNDLE_SWITCH, &mut arguments)?,
+                BUNDLE_VERSION_SWITCH => {
+                    take_path_value(&mut bundle_version, BUNDLE_VERSION_SWITCH, &mut arguments)?
+                }
+                EFFECTIVE_FROM_REGISTRY_VERSION_SWITCH => take_number_value(
+                    &mut effective_from_registry_version,
+                    EFFECTIVE_FROM_REGISTRY_VERSION_SWITCH,
+                    &mut arguments,
+                )?,
                 REPORT_SIGNING_KEY_SWITCH => take_path_value(
                     &mut report_signing_key,
                     REPORT_SIGNING_KEY_SWITCH,
@@ -1122,12 +1161,37 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
         });
     }
     // `organization` nimmt die Bedienerdatei und die Escrow-Inbox allein für
-    // `reader-key-escrow-publish`; `init` und `certify-root` bleiben ohne.
-    let escrow_publication = command_kind == CommandKind::Organization
-        && positionals.first().map(PathBuf::as_path)
-            == Some(Path::new(ORGANIZATION_READER_KEY_ESCROW_PUBLISH_SUBCOMMAND));
+    // `reader-key-escrow-publish`, die Bedienerdatei auch für die beiden
+    // Bundle-Unterkommandos; `init` und `certify-root` bleiben ohne.
+    let organization_subcommand = |name: &str| {
+        command_kind == CommandKind::Organization
+            && positionals.first().map(PathBuf::as_path) == Some(Path::new(name))
+    };
+    let escrow_publication =
+        organization_subcommand(ORGANIZATION_READER_KEY_ESCROW_PUBLISH_SUBCOMMAND);
+    let bundle_release = organization_subcommand(ORGANIZATION_WEB_BUNDLE_RELEASE_SUBCOMMAND);
+    let bundle_revoke = organization_subcommand(ORGANIZATION_WEB_BUNDLE_REVOKE_SUBCOMMAND);
+    for (present, switch) in [
+        (bundle.is_some(), BUNDLE_SWITCH),
+        (bundle_version.is_some(), BUNDLE_VERSION_SWITCH),
+    ] {
+        if present && !bundle_release {
+            return Err(UsageError::SwitchNotAllowed {
+                switch,
+                command: command_name,
+            });
+        }
+    }
+    if effective_from_registry_version.is_some() && !bundle_release && !bundle_revoke {
+        return Err(UsageError::SwitchNotAllowed {
+            switch: EFFECTIVE_FROM_REGISTRY_VERSION_SWITCH,
+            command: command_name,
+        });
+    }
     if operator_config.is_some()
         && !escrow_publication
+        && !bundle_release
+        && !bundle_revoke
         && !matches!(
             command_kind,
             CommandKind::RecoveryTest
@@ -1167,7 +1231,7 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
             command: command_name,
         });
     }
-    if release.is_some() && command_kind != CommandKind::ClockRelease {
+    if release.is_some() && command_kind != CommandKind::ClockRelease && !bundle_revoke {
         return Err(UsageError::SwitchNotAllowed {
             switch: RELEASE_SWITCH,
             command: command_name,
@@ -1353,6 +1417,54 @@ pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Invocation, Us
                         switch: ESCROW_INBOX_SWITCH,
                         command: COMMAND,
                     })?,
+                }
+            }
+            Some(ORGANIZATION_WEB_BUNDLE_RELEASE_SUBCOMMAND) => {
+                const COMMAND: &str = "organization web-bundle-release";
+                if initial_registry_version.is_some() {
+                    return Err(UsageError::SwitchNotAllowed {
+                        switch: INITIAL_REGISTRY_VERSION_SWITCH,
+                        command: COMMAND,
+                    });
+                }
+                let bundle_version = bundle_version.ok_or(UsageError::MissingSwitch {
+                    switch: BUNDLE_VERSION_SWITCH,
+                    command: COMMAND,
+                })?;
+                Command::OrganizationWebBundleRelease {
+                    config: operator_config.ok_or(UsageError::MissingSwitch {
+                        switch: OPERATOR_CONFIG_SWITCH,
+                        command: COMMAND,
+                    })?,
+                    bundle: bundle.ok_or(UsageError::MissingSwitch {
+                        switch: BUNDLE_SWITCH,
+                        command: COMMAND,
+                    })?,
+                    bundle_version: bundle_version
+                        .to_str()
+                        .ok_or(UsageError::MissingValue(BUNDLE_VERSION_SWITCH))?
+                        .to_owned(),
+                    effective_from: effective_from_registry_version.map(RegistryVersion::new),
+                }
+            }
+            Some(ORGANIZATION_WEB_BUNDLE_REVOKE_SUBCOMMAND) => {
+                const COMMAND: &str = "organization web-bundle-revoke";
+                if initial_registry_version.is_some() {
+                    return Err(UsageError::SwitchNotAllowed {
+                        switch: INITIAL_REGISTRY_VERSION_SWITCH,
+                        command: COMMAND,
+                    });
+                }
+                Command::OrganizationWebBundleRevoke {
+                    config: operator_config.ok_or(UsageError::MissingSwitch {
+                        switch: OPERATOR_CONFIG_SWITCH,
+                        command: COMMAND,
+                    })?,
+                    release: release.ok_or(UsageError::MissingSwitch {
+                        switch: RELEASE_SWITCH,
+                        command: COMMAND,
+                    })?,
+                    effective_from: effective_from_registry_version.map(RegistryVersion::new),
                 }
             }
             _ => {
@@ -2844,6 +2956,114 @@ mod tests {
                 Err(UsageError::UnknownSwitch(_))
             ));
         }
+    }
+
+    /// Die Bundle-Unterkommandos (U4): `--bundle` und `--bundle-version` nur
+    /// bei der Freigabe, `--release` nur beim Widerruf, die Wirksamkeit bei
+    /// beiden und sonst nirgends.
+    #[test]
+    fn web_bundle_commands_parse_with_their_own_switches() {
+        let base = [TRUST_ANCHOR_SWITCH, "anchor.etb", "organization"];
+        let with = |tail: &[&'static str]| {
+            let mut tokens = base.to_vec();
+            tokens.extend_from_slice(tail);
+            tokens
+        };
+        assert_eq!(
+            parsed(&with(&[
+                "web-bundle-release",
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                super::BUNDLE_SWITCH,
+                "bundle.bin",
+                super::BUNDLE_VERSION_SWITCH,
+                "2026.4.0",
+            ]))
+            .expect("web-bundle-release muss parsen")
+            .command,
+            Command::OrganizationWebBundleRelease {
+                config: PathBuf::from("operator.json"),
+                bundle: PathBuf::from("bundle.bin"),
+                bundle_version: "2026.4.0".to_owned(),
+                effective_from: None,
+            }
+        );
+        assert_eq!(
+            parsed(&with(&[
+                "web-bundle-revoke",
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                RELEASE_SWITCH,
+                "release.etb",
+                super::EFFECTIVE_FROM_REGISTRY_VERSION_SWITCH,
+                "7",
+            ]))
+            .expect("web-bundle-revoke muss parsen")
+            .command,
+            Command::OrganizationWebBundleRevoke {
+                config: PathBuf::from("operator.json"),
+                release: PathBuf::from("release.etb"),
+                effective_from: Some(super::RegistryVersion::new(7)),
+            }
+        );
+        assert_eq!(
+            rejected(&with(&[
+                "web-bundle-release",
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                super::BUNDLE_SWITCH,
+                "bundle.bin",
+            ])),
+            UsageError::MissingSwitch {
+                switch: super::BUNDLE_VERSION_SWITCH,
+                command: "organization web-bundle-release",
+            }
+        );
+        assert_eq!(
+            rejected(&with(&[
+                "web-bundle-revoke",
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                RELEASE_SWITCH,
+                "release.etb",
+                super::BUNDLE_SWITCH,
+                "bundle.bin",
+            ])),
+            UsageError::SwitchNotAllowed {
+                switch: super::BUNDLE_SWITCH,
+                command: "organization",
+            }
+        );
+        assert_eq!(
+            rejected(&with(&[
+                "web-bundle-release",
+                OPERATOR_CONFIG_SWITCH,
+                "operator.json",
+                super::BUNDLE_SWITCH,
+                "bundle.bin",
+                super::BUNDLE_VERSION_SWITCH,
+                "2026.4.0",
+                RELEASE_SWITCH,
+                "release.etb",
+            ])),
+            UsageError::SwitchNotAllowed {
+                switch: RELEASE_SWITCH,
+                command: "organization",
+            }
+        );
+        assert_eq!(
+            rejected(&with(&[
+                "certify-root",
+                super::INITIAL_REGISTRY_VERSION_SWITCH,
+                "1",
+                super::EFFECTIVE_FROM_REGISTRY_VERSION_SWITCH,
+                "2",
+            ])),
+            UsageError::SwitchNotAllowed {
+                switch: super::EFFECTIVE_FROM_REGISTRY_VERSION_SWITCH,
+                command: "organization",
+            }
+        );
     }
 
     /// DRK-458: die drei Escrow-Kommandos, ihre Pflichtschalter und ihre
