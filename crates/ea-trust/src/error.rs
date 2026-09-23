@@ -29,6 +29,9 @@ pub enum TrustError {
     EscrowEnrollmentMismatch,
     /// Das Escrow ist voll geprüft, gilt aber für den gewählten Kopf nicht.
     EscrowInactive,
+    /// Zwei gültige Escrows teilen Reader-Zertifikat oder
+    /// `(organizationId, readerSubjectId)` (Entscheidungen 3a und 5).
+    EscrowConflict,
 }
 
 impl TrustError {
@@ -58,6 +61,7 @@ impl TrustError {
             Self::StateUnavailable => "EA-TRUST-STATE-UNAVAILABLE",
             Self::EscrowEnrollmentMismatch => "EA-TRUST-ESCROW-ENROLLMENT-MISMATCH",
             Self::EscrowInactive => "EA-TRUST-ESCROW-INACTIVE",
+            Self::EscrowConflict => "EA-TRUST-ESCROW-CONFLICT",
         }
     }
 }

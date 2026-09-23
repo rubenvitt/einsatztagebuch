@@ -46,7 +46,7 @@ use crate::{
     AdminAuthorizationReplayKey, RegistryError, RegistryHeadPin, SelectedRegistryHead, TrustError,
     TrustStateStore, VerifiedTrust,
     admin_authorization::{AdminSignerClaim, consume_replay_keys, verify_admin_signer_claim},
-    registry::replay_to_exact_pin,
+    registry::{replay_to_exact_pin, replay_to_line_tip},
     resolver::PreviousHeadState,
 };
 
@@ -67,6 +67,9 @@ pub(crate) enum WindowRule {
     /// `t < issued-at` ist noch nicht gültig, `t > expires-at` abgelaufen;
     /// `t == expires-at` ist gültig (Entscheidung 10).
     At(UnixMillis),
+    /// Kein signierter Nutzungszeitpunkt: es gilt nur die Höchstdauer des
+    /// Codecs.
+    CodecOnly,
 }
 
 /// Eine Publikationsfreigabe, die [`approval_rule`] bestanden hat.
@@ -288,7 +291,9 @@ pub(crate) fn require_window(
     expires_at: UnixMillis,
     rule: WindowRule,
 ) -> Result<(), TrustError> {
-    let WindowRule::At(use_time) = rule;
+    let WindowRule::At(use_time) = rule else {
+        return Ok(());
+    };
     if use_time < issued_at {
         return Err(TrustError::AuthNotYetValid);
     }
@@ -307,6 +312,9 @@ pub(crate) fn require_window(
 pub enum ReaderKeyEscrowStanding {
     /// Zählt zur Eindeutigkeit und ist zu öffnen.
     Valid,
+    /// Das Reader-Zertifikat ist im gewählten Kopf widerrufen (Ruling F4):
+    /// voll geprüft, zählt nicht zur Eindeutigkeit, ist nicht zu öffnen.
+    ReaderRevoked,
     /// Enrollment- oder Freigabe-Pin liegt jenseits des gewählten Kopfes: das
     /// Objekt ist voll geprüft, gilt aber für diesen Kopf noch nicht.
     NotYetEffective,
@@ -425,6 +433,9 @@ impl VerifiedReaderKeyEscrow {
 pub enum ReaderKeyEscrowHead<'a> {
     /// Der gewählte Kopf — Server, native Zeremonie, Reader.
     Selected(&'a SelectedRegistryHead),
+    /// Prüfer ohne gewählten Kopf (Datei-Modus): der letzte Kopf der
+    /// Katalog-Linie, über dieselbe Nachspielkante erreicht.
+    CatalogLineTip,
 }
 
 /// Alle Escrows des Katalogs, jedes voll geprüft.
@@ -446,6 +457,33 @@ impl VerifiedReaderKeyEscrowSet {
 
     pub fn iter(&self) -> impl Iterator<Item = &VerifiedReaderKeyEscrow> {
         self.escrows.values()
+    }
+
+    /// Das EINE gültige Escrow zu einem Reader-Zertifikat, falls es eins gibt.
+    #[must_use]
+    pub fn valid_for_reader_certificate(
+        &self,
+        reader_certificate_object_hash: CertificateHash,
+    ) -> Option<&VerifiedReaderKeyEscrow> {
+        self.valid().find(|escrow| {
+            escrow.core().reader_certificate_object_hash == reader_certificate_object_hash
+        })
+    }
+
+    /// Das EINE gültige Escrow zu einem Reader-Subjekt, falls es eins gibt.
+    #[must_use]
+    pub fn valid_for_subject(
+        &self,
+        reader_subject_id: SubjectId,
+    ) -> Option<&VerifiedReaderKeyEscrow> {
+        self.valid()
+            .find(|escrow| escrow.core().reader_subject_id == reader_subject_id)
+    }
+
+    fn valid(&self) -> impl Iterator<Item = &VerifiedReaderKeyEscrow> {
+        self.escrows
+            .values()
+            .filter(|escrow| escrow.standing() == ReaderKeyEscrowStanding::Valid)
     }
 
     #[must_use]
@@ -473,8 +511,15 @@ pub fn verify_reader_key_escrows(
     trust: &VerifiedTrust,
     head: ReaderKeyEscrowHead<'_>,
 ) -> Result<VerifiedReaderKeyEscrowSet, TrustError> {
-    let ReaderKeyEscrowHead::Selected(selected) = head;
-    let head_state = selected.candidate_state();
+    let line_tip;
+    let head_state = match head {
+        ReaderKeyEscrowHead::Selected(selected) => selected.candidate_state(),
+        ReaderKeyEscrowHead::CatalogLineTip => {
+            line_tip = replay_to_line_tip(trust)
+                .map_err(|error| pin_error(error, TrustError::ActionMismatch))?;
+            &line_tip
+        }
+    };
     let mut pins = PinStates::new(trust);
     let catalog = &trust.inner.catalog;
     // Die Öffnungsautorisierung hat hier noch keine historische Regel: bis
@@ -484,6 +529,27 @@ pub fn verify_reader_key_escrows(
         .is_empty()
     {
         return Err(TrustError::ActionMismatch);
+    }
+    // Jede Freigabe wird geprüft, auch eine, die kein Escrow nennt: kein
+    // Familienobjekt wird übersprungen (Profil §9). Ohne signierten
+    // Nutzungszeitpunkt gilt nur die Höchstdauer des Codecs; das Fenster
+    // prüft die Escrow-Regel zur Zeit des Escrows.
+    for object_hash in catalog.hashes_for_subtype(TrustSubtypeV1::ReaderKeyEscrowApproval) {
+        let record = catalog.get(object_hash).ok_or(TrustError::Source)?;
+        let (_, object, approval) = decode_approval(record.exact_bytes().as_bytes())?;
+        if approval.organization_id != trust.organization_id() {
+            return Err(TrustError::ActionMismatch);
+        }
+        let approval_state = pins
+            .state(approval.registry_version, approval.registry_head_hash)
+            .map_err(|error| pin_error(error, TrustError::ActionMismatch))?;
+        approval_rule(
+            &approval_state,
+            &object,
+            &approval,
+            SequenceRule::Lease,
+            WindowRule::CodecOnly,
+        )?;
     }
     let mut escrows = BTreeMap::new();
     for object_hash in catalog.hashes_for_subtype(TrustSubtypeV1::ReaderKeyEscrow) {
@@ -498,7 +564,31 @@ pub fn verify_reader_key_escrows(
         )?;
         escrows.insert(*object_hash, escrow);
     }
+    require_unique(escrows.values())?;
     Ok(VerifiedReaderKeyEscrowSet { escrows })
+}
+
+/// Entscheidungen 3a und 5: unter den GÜLTIGEN Escrows ist jedes
+/// Reader-Zertifikat und jedes `(organizationId, readerSubjectId)` höchstens
+/// einmal vertreten. Zwei widersprüchliche gültige Escrows lassen den ganzen
+/// Bestand scheitern (Ruling F4).
+fn require_unique<'e>(
+    escrows: impl Iterator<Item = &'e VerifiedReaderKeyEscrow>,
+) -> Result<(), TrustError> {
+    let mut certificates = std::collections::BTreeSet::new();
+    let mut subjects = std::collections::BTreeSet::new();
+    for escrow in escrows.filter(|escrow| escrow.standing() == ReaderKeyEscrowStanding::Valid) {
+        let core = escrow.core();
+        if !certificates.insert(*core.reader_certificate_object_hash.as_bytes())
+            || !subjects.insert((
+                *core.organization_id.as_bytes(),
+                *core.reader_subject_id.as_bytes(),
+            ))
+        {
+            return Err(TrustError::EscrowConflict);
+        }
+    }
+    Ok(())
 }
 
 /// Zeremonie A VOR der Wurzelsignatur: alles außer der Signatur, gegen die
@@ -565,8 +655,19 @@ pub fn verify_intended_reader_key_escrow(
     let mut pins = PinStates::new(trust);
     let reader_kem_key =
         escrow_binding_rule(trust, &mut pins, approval.fields(), head_state, intended)?;
-    if standing(head_state, intended.core(), approval.fields()) != ReaderKeyEscrowStanding::Valid {
+    if standing(head_state, intended.core(), approval.fields())? != ReaderKeyEscrowStanding::Valid {
         return Err(TrustError::EscrowInactive);
+    }
+    // Eindeutigkeit gegen den Bestand des gewählten Kopfes. Nur dieselbe
+    // Nutzlast darf schon gültig veröffentlicht sein (exakte Wiederholung).
+    let current = verify_reader_key_escrows(trust, ReaderKeyEscrowHead::Selected(head))?;
+    let core = intended.core();
+    if current.valid().any(|existing| {
+        (existing.core().reader_certificate_object_hash == core.reader_certificate_object_hash
+            || existing.core().reader_subject_id == core.reader_subject_id)
+            && existing.inner.payload != *intended
+    }) {
+        return Err(TrustError::EscrowConflict);
     }
     Ok(VerifiedReaderKeyEscrowIntent {
         inner: IntentInner {
@@ -712,7 +813,7 @@ fn escrow_rule(
         CertificateHash::from(approval_state.root.object_hash),
         object,
     )?;
-    let standing = standing(head_state, core, &approval);
+    let standing = standing(head_state, core, &approval)?;
     Ok(VerifiedReaderKeyEscrow {
         inner: Arc::new(EscrowInner {
             exact_bytes: exact_bytes.to_vec(),
@@ -843,16 +944,28 @@ fn verify_escrow_root_signature(
     .map_err(|_| TrustError::Signature)
 }
 
-/// Der Stand eines voll geprüften Escrows zum gewählten Kopf.
+/// Der Stand eines voll geprüften Escrows zum gewählten Kopf (Ruling F4:
+/// widerrufsbewusst).
+///
+/// Ein Widerruf setzt `revoked_from_sequence` auf die wirksame Sequenz des
+/// widerrufenden Kopfes, also höchstens auf die des gewählten; „im gewählten
+/// Kopf widerrufen“ ist damit gleichbedeutend mit einem gesetzten Wert.
 fn standing(
     head_state: &PreviousHeadState,
     core: &ReaderKeyEscrowCoreV1,
     approval: &ReaderKeyEscrowApprovalCoreV1,
-) -> ReaderKeyEscrowStanding {
+) -> Result<ReaderKeyEscrowStanding, TrustError> {
     if core.enrollment_registry_version > head_state.registry_version
         || approval.registry_version > head_state.registry_version
     {
-        return ReaderKeyEscrowStanding::NotYetEffective;
+        return Ok(ReaderKeyEscrowStanding::NotYetEffective);
     }
-    ReaderKeyEscrowStanding::Valid
+    let reader = head_state
+        .certificates
+        .get(&core.reader_certificate_object_hash)
+        .ok_or(TrustError::EscrowEnrollmentMismatch)?;
+    if reader.fields.revoked_from_sequence.is_some() {
+        return Ok(ReaderKeyEscrowStanding::ReaderRevoked);
+    }
+    Ok(ReaderKeyEscrowStanding::Valid)
 }
