@@ -797,7 +797,7 @@ async fn a_writer_cannot_acknowledge_reading() {
 async fn the_escrow_families_replicate_byte_exact_but_stay_off_the_registry_line() {
     let database = common::fresh_database().await;
     let ready = common::stand_up_escrow_server(&database).await;
-    let family = common::publish_escrow_family(&database, &ready).await;
+    let family = common::publish_escrow_family(&ready).await;
 
     for (index, (name, bytes)) in family.iter().enumerate() {
         let hash = ea_crypto::object_hash(bytes);
@@ -808,7 +808,7 @@ async fn the_escrow_families_replicate_byte_exact_but_stay_off_the_registry_line
             endpoint: EndpointV1::Objects,
             target: &target,
             body: None,
-            request_id: [0x71 + u8::try_from(index).expect("three objects"); 16],
+            request_id: [0x71 + u8::try_from(index).expect("six objects"); 16],
         })
         .await;
         assert_eq!(

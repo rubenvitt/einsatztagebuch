@@ -340,7 +340,7 @@ async fn an_authentic_export_cursor_resumes_where_it_points() {
 async fn the_export_carries_the_escrow_families_byte_exact() {
     let database = common::fresh_database().await;
     let ready = common::stand_up_escrow_server(&database).await;
-    let family = common::publish_escrow_family(&database, &ready).await;
+    let family = common::publish_escrow_family(&ready).await;
 
     let inventory = server_inventory(database.pool(), ready.closure.organization_id).await;
     let response = common::call(&common::ApiCall {

@@ -69,6 +69,7 @@ use ea_trust::{
     is_reader_key_escrow_family, load_trust_state, prepare_local_time,
     reader_key_escrow_cutover_release, select_registry_head, verify_catalogue_admission,
     verify_reader_key_escrow_family_admission, verify_registry_candidate, verify_trust,
+    verify_web_bundle_family_admission,
 };
 use ea_types::{
     ChainSequence, DeviceId, KeyThumbprint, ObjectHash, OrganizationId, RegistryVersion, UnixMillis,
@@ -312,6 +313,26 @@ impl PostgresTrustAuthority {
             Err(AuthorityError::Unavailable) => Err(TrustServiceError::DependencyUnavailable),
             Err(AuthorityError::StateConflict) => Err(TrustServiceError::StateConflict),
         }
+    }
+
+    /// Rahmt ein Urteil über die ganze Objektmenge mit dem Katalogstand ein.
+    ///
+    /// Die Object-Store-Lesungen liegen außerhalb des SQL-Snapshots. Nur ein
+    /// Lauf, den DERSELBE Katalogstand einrahmt, zählt; der Index vergleicht
+    /// ihn noch einmal unter der Organisationssperre.
+    async fn fenced(
+        &self,
+        organization_id: OrganizationId,
+        before: CatalogIdentity,
+    ) -> Result<ValidatedTrustEventV1, TrustPublishError> {
+        if self.catalog_identity(organization_id).await? != before {
+            return Err(TrustServiceError::StateConflict.into());
+        }
+        Ok(ValidatedTrustEventV1 {
+            catalog_fence: Some(TrustCatalogFenceV1 {
+                catalog_revision: before.revision,
+            }),
+        })
     }
 
     /// Alle indizierten `.etb` dieser Organisation, mit ihren EXAKTEN Bytes.
@@ -601,7 +622,13 @@ impl TrustEventValidator for PostgresTrustAuthority {
     ///    Escrow ohne angenommene Freigabe ist ungültig. Die Freigabe muss
     ///    innerhalb ihrer 300-s-Frist gegen die SERVERUHR hochgeladen werden;
     ///    das Escrow selbst ist nicht an `now` gebunden.
-    /// 3. Jedes andere `.etb` läuft durch
+    /// 3. `webBundleRelease` und `webBundleRevocation` laufen durch IHREN
+    ///    Einstieg, [`ea_trust::verify_web_bundle_family_admission`] (Ruling
+    ///    U4): Wurzel, Organisation, die ganze Familie fail-closed, ein
+    ///    Widerruf nur zu einer Freigabe des Katalogs. Sie verschieben die
+    ///    Cutover-Sperre und tragen deshalb den Katalogzaun wie die
+    ///    Escrow-Familien. Die Freigabe kommt VOR der Escrow-Freigabe.
+    /// 4. Jedes andere `.etb` läuft durch
     ///    [`ea_trust::verify_catalogue_admission`]: Organisationsbindung,
     ///    die Signiererregel SEINER Objektart im aktuellen Abschluss, und sein
     ///    Zeitfenster. Aufnahme ist keine Autoritaet — sie legt das Objekt in
@@ -619,10 +646,17 @@ impl TrustEventValidator for PostgresTrustAuthority {
         now: UnixMillis,
     ) -> Result<ValidatedTrustEventV1, TrustPublishError> {
         let escrow_family = subtype_of(exact_etb_bytes).is_some_and(is_reader_key_escrow_family);
+        let bundle_family = subtype_of(exact_etb_bytes).is_some_and(|subtype| {
+            matches!(
+                subtype,
+                TrustSubtypeV1::WebBundleRelease | TrustSubtypeV1::WebBundleRevocation
+            )
+        });
         // Das Urteil über ein Escrow-Familienobjekt gilt der GANZEN Menge
-        // (Eindeutigkeit). Der Katalogstand wird deshalb VOR dem Lesen
-        // festgehalten und an den Index weitergereicht.
-        let before = if escrow_family {
+        // (Eindeutigkeit), und ein Objekt der Bundle-Familie verschiebt die
+        // Cutover-Sperre jeder Escrow-Annahme. Der Katalogstand wird deshalb
+        // VOR dem Lesen festgehalten und an den Index weitergereicht.
+        let before = if escrow_family || bundle_family {
             Some(self.catalog_identity(organization_id).await?)
         } else {
             None
@@ -660,6 +694,17 @@ impl TrustEventValidator for PostgresTrustAuthority {
             };
         }
 
+        if bundle_family && let Some(before) = before {
+            // Der eigene Einstieg der Bundle-Familie (U4): Wurzel, Organisation,
+            // die ganze Familie fail-closed, ein Widerruf nur zu einer Freigabe
+            // des Katalogs. Kein Kopf nötig — ob eine Freigabe wirkt, entscheidet
+            // die Cutover-Sperre zu ihrem Stand.
+            let catalog: Vec<&[u8]> = prepared.source.0.values().map(AsRef::as_ref).collect();
+            verify_web_bundle_family_admission(&prepared.anchor, &catalog, exact_etb_bytes)
+                .map_err(|_| TrustPublishError::from(TrustServiceError::EventInvalid))?;
+            return self.fenced(organization_id, before).await;
+        }
+
         if let Some(before) = before {
             let admission = verify_reader_key_escrow_family_admission(
                 &trust,
@@ -669,17 +714,7 @@ impl TrustEventValidator for PostgresTrustAuthority {
             )
             .map_err(|error| TrustPublishError::from(map_escrow_admission_error(error)))?;
             escrow_cutover_gate(&prepared, exact_etb_bytes, &admission)?;
-            // Die Object-Store-Lesungen liegen außerhalb des SQL-Snapshots.
-            // Nur ein Lauf, den DERSELBE Katalogstand einrahmt, zählt; der
-            // Index vergleicht ihn noch einmal unter der Organisationssperre.
-            if self.catalog_identity(organization_id).await? != before {
-                return Err(TrustServiceError::StateConflict.into());
-            }
-            return Ok(ValidatedTrustEventV1 {
-                catalog_fence: Some(TrustCatalogFenceV1 {
-                    catalog_revision: before.revision,
-                }),
-            });
+            return self.fenced(organization_id, before).await;
         }
 
         verify_catalogue_admission(

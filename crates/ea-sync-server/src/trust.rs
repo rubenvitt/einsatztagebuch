@@ -519,13 +519,15 @@ fn organization_of(payload: &DecodedTrustPayloadV1) -> Option<OrganizationId> {
         DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(core) => {
             Some(core.organization_id)
         }
+        // Die Bundle-Familie hat seit Scheibe (f) ihren eigenen Annahmeweg
+        // (U4): eine fremde Organisation fällt hier, vor der Prüfung.
+        DecodedTrustPayloadV1::WebBundleRelease(core) => Some(core.organization_id),
+        DecodedTrustPayloadV1::WebBundleRevocation(core) => Some(core.organization_id),
         // Bleibt bei der geteilten Prüfung, Umstellung = Folgeticket.
         DecodedTrustPayloadV1::Policy(_)
         | DecodedTrustPayloadV1::WriterTransition(_)
         | DecodedTrustPayloadV1::GrantAuthorization(_)
-        | DecodedTrustPayloadV1::DestructionAuthorization(_)
-        | DecodedTrustPayloadV1::WebBundleRelease(_)
-        | DecodedTrustPayloadV1::WebBundleRevocation(_) => None,
+        | DecodedTrustPayloadV1::DestructionAuthorization(_) => None,
         // Ohne eigenes `organizationId`-Feld: die Bindung läuft über die
         // Kette der geteilten Prüfung.
         DecodedTrustPayloadV1::DestructionTransition(_)
@@ -666,6 +668,44 @@ mod tests {
             // Nur das Registry-Ereignis steht auf der Registry-Linie.
             assert!(registry_version_of(&payload).is_none(), "{name}");
             assert!(effective_from(&payload).is_none(), "{name}");
+        }
+    }
+
+    /// Die Bundle-Familie nennt ihre Organisation ebenso: seit sie einen
+    /// Annahmeweg hat, fällt eine fremde vor der Prüfung (403).
+    #[test]
+    fn the_web_bundle_family_names_its_organization() {
+        let release = ea_testkit::reader_key_escrow_fixture::signed_web_bundle_release(
+            &ea_format::WebBundleReleaseCoreV1 {
+                organization_id: organization(),
+                bundle_hash: hash32(0x51),
+                bundle_version: "2026.4.0".to_owned(),
+                effective_from_registry_version: RegistryVersion::new(2),
+                issued_at: UnixMillis::new(1_000),
+                root_key_thumbprint: thumbprint([0x11; 32]),
+            },
+            &signer(0x11),
+        );
+        let revocation = ea_testkit::reader_key_escrow_fixture::signed_web_bundle_revocation(
+            &ea_format::WebBundleRevocationCoreV1 {
+                organization_id: organization(),
+                release_object_hash: ea_crypto::object_hash(&release),
+                effective_from_registry_version: RegistryVersion::new(3),
+                issued_at: UnixMillis::new(1_001),
+                root_key_thumbprint: thumbprint([0x11; 32]),
+            },
+            &signer(0x11),
+        );
+        for (name, bytes) in [
+            ("webBundleRelease", release),
+            ("webBundleRevocation", revocation),
+        ] {
+            let payload = decoded(&bytes);
+            assert!(
+                organization_of(&payload) == Some(organization()),
+                "{name} must name its organization"
+            );
+            assert!(registry_version_of(&payload).is_none(), "{name}");
         }
     }
 }
