@@ -1,42 +1,49 @@
 //! Zeremonie A nativ: die Publikation eines Reader-Key-Escrows beim
-//! Enrollment (Profil §5, DRK-458) — gebaut und bezeugt, aber bis Scheibe (f)
-//! GESPERRT.
+//! Enrollment (Profil §5, DRK-458/DRK-461).
 //!
 //! # Die Sperre (GC:26)
 //!
-//! Der erste Schritt ist der Cutover-Port [`ReaderKeyEscrowCutover`]. Der
-//! produktive Port [`CutoverPending`] scheitert immer mit
+//! Der erste Schritt ist der Cutover-Port [`ReaderKeyEscrowCutover`] über die
+//! exakten Trust-Objekte des Bestands. Der echte Port
+//! [`ActiveWebBundleRelease`] verlangt eine aktive, wurzelsignierte
+//! `webBundleRelease` eines v1.1-fähigen Bundles zur Version des gewählten
+//! Kopfes — dieselbe Regel wie am Server
+//! (`ea_trust::reader_key_escrow_cutover_release`); sonst
 //! `EA-ESCROW-CUTOVER-NOT-READY` (Exit 21) — vor dem Lesen der Inbox, vor der
 //! Reauthentifizierung, vor jeder Sperrzeile, jeder Auditzeile und jeder
-//! Datei. Scheibe (f) ersetzt nur diesen Port durch die echte Prüfung der
-//! aktiven v1.1-`webBundleRelease`. Die Fixture-Variante liegt allein hinter
-//! `test-support` und ist über keinen Befehl, keine Konfiguration und keine
-//! Umgebung erreichbar.
+//! Datei. [`CutoverPending`] scheitert immer. Die Fixture-Variante liegt
+//! allein hinter `test-support`.
 //!
 //! # Der Ablauf hinter der Sperre
 //!
 //! 1. Genau ein Paket aus der eigenen Escrow-Inbox. Ein schon publiziertes
 //!    Paket liefert dieselben exakten Bytes zurück, ohne Verbrauch und ohne
-//!    Audit (Profil §5: exakter Wiedereinspielversuch).
+//!    Audit (Profil §5: exakter Wiedereinspielversuch), und wird erneut
+//!    verteilt.
 //! 2. Frische (Ruling Q2): `issued-at <= now <= issued-at + 300 000`, sonst
 //!    `EA-ESCROW-PACKAGE-STALE`.
-//! 3. Lokale Eindeutigkeit vor (f): kein publiziertes Escrow derselben
+//! 3. Lokale Vorprüfung der Eindeutigkeit: kein publiziertes Escrow derselben
 //!    Organisation zum selben Reader-Zertifikat, keines zur selben Person,
 //!    deren Reader-Zertifikat im Kopf noch aktiv ist
-//!    (`EA-ESCROW-PUBLICATION-CONFLICT`). Vor (f) liegen publizierte Escrows
-//!    nur hier, der Katalog sieht sie noch nicht.
+//!    (`EA-ESCROW-PUBLICATION-CONFLICT`). Die Katalog-Eindeutigkeit prüft die
+//!    Absichtsregel des Trust-Kerns über die ganze Escrow-Menge.
 //! 4. Frische Reauthentifizierung `AdminRootCeremony` an `escrow-core-hash`.
 //! 5. Freigabe bauen, Admin signiert, Prüfung über
 //!    `verify_reader_key_escrow_approval`; Nutzlast, Prüfung über
 //!    `verify_intended_reader_key_escrow`, Root signiert, Prüfung über
 //!    `verify_signed_reader_key_escrow`.
-//! 6. EINE Transaktion: beide Sperrzeilen im geteilten Namensraum (F8), die
+//! 6. Frisch geöffnete Laufzeit: dieselbe Autorität und derselbe Port-Befund
+//!    (ein Bundle-Widerruf bewegt den Kopf nicht).
+//! 7. EINE Transaktion: beide Sperrzeilen im geteilten Namensraum (F8), die
 //!    Publikationszeile mit den exakten Bytes und die Auditzeile
 //!    13/`completed` mit dem Bundle-Release-Hash.
+//! 8. Verteilung: Freigabe, dann Escrow unter `trust/` des Archivs; der
+//!    frisch geöffnete Bestand trägt das Escrow als gültig.
 //!
 //! Signiert wird ohne `CoseSigner`, über die Slots des Autoritätswirts
-//! (`NativeSigningSlot::Admin` und `::Root`). Nichts geht in Archiv oder
-//! Server; die Verteilung ist Sache von (f).
+//! (`NativeSigningSlot::Admin` und `::Root`). Einen nativen Uploader gibt es
+//! nicht: zum Server gehen die Dateien über den Trust-Endpunkt, Release vor
+//! Freigabe vor Escrow.
 
 use std::path::Path;
 
@@ -54,9 +61,10 @@ use ea_local_store::{EncryptedDatabase, StoreError, StoreRow, StoreValue};
 use ea_operator::{OperatorSessionProof, ReauthPurpose};
 use ea_recovery::ReaderKeyEscrowError;
 use ea_trust::{
-    AdminAuthorizationReplayDimension, SelectedRegistryHead, TrustError, VerifiedTrust,
+    AdminAuthorizationReplayDimension, ReaderKeyEscrowHead, SelectedRegistryHead, TrustAnchorV1,
+    TrustError, VerifiedTrust, reader_key_escrow_cutover_release,
     verify_intended_reader_key_escrow, verify_reader_key_escrow_approval,
-    verify_signed_reader_key_escrow,
+    verify_reader_key_escrows, verify_signed_reader_key_escrow,
 };
 use ea_types::{AuthorizationId, CertificateHash, Hash32, ObjectHash, UnixMillis};
 
@@ -84,7 +92,8 @@ pub const READER_KEY_ESCROW_PACKAGE_WINDOW_MS: i64 = 300_000;
 /// impl ea_admin::reader_key_escrow_publication::ReaderKeyEscrowCutover for Open {
 ///     fn active_v11_bundle_release(
 ///         &self,
-///         _trust: &ea_trust::VerifiedTrust,
+///         _anchor: &ea_trust::TrustAnchorV1,
+///         _exact_trust_objects: &[&[u8]],
 ///         _head: &ea_trust::SelectedRegistryHead,
 ///     ) -> Result<ea_types::ObjectHash, ea_recovery::ReaderKeyEscrowError> {
 ///         unimplemented!()
@@ -92,13 +101,17 @@ pub const READER_KEY_ESCROW_PACKAGE_WINDOW_MS: i64 = 300_000;
 /// }
 /// ```
 pub trait ReaderKeyEscrowCutover: sealed::Sealed {
+    /// Der Objekthash der aktiven v1.1-Freigabe zum gewählten Kopf, über die
+    /// exakten Trust-Objekte des Bestands.
+    ///
     /// # Errors
     ///
     /// `EA-ESCROW-CUTOVER-NOT-READY`, solange die Vorbedingung nicht erfüllt
     /// ist.
     fn active_v11_bundle_release(
         &self,
-        trust: &VerifiedTrust,
+        anchor: &TrustAnchorV1,
+        exact_trust_objects: &[&[u8]],
         head: &SelectedRegistryHead,
     ) -> Result<ObjectHash, ReaderKeyEscrowError>;
 }
@@ -117,10 +130,31 @@ impl sealed::Sealed for CutoverPending {}
 impl ReaderKeyEscrowCutover for CutoverPending {
     fn active_v11_bundle_release(
         &self,
-        _trust: &VerifiedTrust,
+        _anchor: &TrustAnchorV1,
+        _exact_trust_objects: &[&[u8]],
         _head: &SelectedRegistryHead,
     ) -> Result<ObjectHash, ReaderKeyEscrowError> {
         Err(ReaderKeyEscrowError::CutoverNotReady)
+    }
+}
+
+/// Der echte Port: die aktive, wurzelsignierte `webBundleRelease` eines
+/// v1.1-fähigen Bundles zur Version des gewählten Kopfes — dieselbe Regel
+/// ([`ea_trust::reader_key_escrow_cutover_release`]), mit der der Server
+/// annimmt. Jeder Befund wird `EA-ESCROW-CUTOVER-NOT-READY`.
+pub struct ActiveWebBundleRelease;
+
+impl sealed::Sealed for ActiveWebBundleRelease {}
+
+impl ReaderKeyEscrowCutover for ActiveWebBundleRelease {
+    fn active_v11_bundle_release(
+        &self,
+        anchor: &TrustAnchorV1,
+        exact_trust_objects: &[&[u8]],
+        head: &SelectedRegistryHead,
+    ) -> Result<ObjectHash, ReaderKeyEscrowError> {
+        reader_key_escrow_cutover_release(anchor, exact_trust_objects, head.registry_version())
+            .map_err(|_| ReaderKeyEscrowError::CutoverNotReady)
     }
 }
 
@@ -137,7 +171,8 @@ impl sealed::Sealed for FixtureBundleRelease {}
 impl ReaderKeyEscrowCutover for FixtureBundleRelease {
     fn active_v11_bundle_release(
         &self,
-        _trust: &VerifiedTrust,
+        _anchor: &TrustAnchorV1,
+        _exact_trust_objects: &[&[u8]],
         _head: &SelectedRegistryHead,
     ) -> Result<ObjectHash, ReaderKeyEscrowError> {
         Ok(self.0)
@@ -306,6 +341,13 @@ pub type TrustDigestSigner<'a> =
 /// `test-support`; der Produktivpfad ist allein [`publish_reader_key_escrow`].
 #[doc(hidden)]
 pub struct ReaderKeyEscrowPublicationContext<'a> {
+    pub anchor: &'a TrustAnchorV1,
+    /// Die exakten Trust-Objekte des Bestands — Eingabe des Cutover-Ports.
+    pub catalog: &'a [&'a [u8]],
+    /// Legt exakte Trust-Bytes ins Archiv; nach dem Commit, erst die
+    /// Freigabe, dann das Escrow (review-b P3-2), auch beim exakten
+    /// Wiedereinspielen (idempotent).
+    pub distribute: &'a dyn Fn(&[u8]) -> Result<(), ReaderKeyEscrowError>,
     pub database: &'a EncryptedDatabase,
     pub trust: &'a VerifiedTrust,
     pub head: &'a SelectedRegistryHead,
@@ -484,18 +526,40 @@ pub fn publish_reader_key_escrow_in_context(
     context: &ReaderKeyEscrowPublicationContext<'_>,
     exact_package: &[u8],
 ) -> Result<PublishedReaderKeyEscrow, ReaderKeyEscrowError> {
-    let bundle_release = cutover.active_v11_bundle_release(context.trust, context.head)?;
-    match prepare_reader_key_escrow_package(
+    let bundle_release =
+        cutover.active_v11_bundle_release(context.anchor, context.catalog, context.head)?;
+    let published = match prepare_reader_key_escrow_package(
         context.database,
         context.head,
         exact_package,
         context.now,
     )? {
-        PreparedReaderKeyEscrowPackage::Published(published) => Ok(published),
+        PreparedReaderKeyEscrowPackage::Published(published) => published,
         PreparedReaderKeyEscrowPackage::Fresh(fresh) => {
-            commit_reader_key_escrow_publication(context, &fresh, bundle_release)
+            commit_reader_key_escrow_publication(context, &fresh, bundle_release)?
         }
-    }
+    };
+    distribute_published(context.distribute, &published)?;
+    Ok(published)
+}
+
+/// Freigabe, dann Escrow ins Archiv — erst nach dem Commit (review-b P3-2).
+fn distribute_published(
+    distribute: &dyn Fn(&[u8]) -> Result<(), ReaderKeyEscrowError>,
+    published: &PublishedReaderKeyEscrow,
+) -> Result<(), ReaderKeyEscrowError> {
+    distribute(&published.exact_approval)?;
+    distribute(&published.exact_escrow)
+}
+
+/// Die exakten Trust-Objekte des Bestands einer Laufzeit.
+fn trust_objects(runtime: &OperatorRuntime) -> Vec<&[u8]> {
+    runtime
+        .inventory()
+        .trust()
+        .iter()
+        .map(|object| object.exact_bytes().as_bytes())
+        .collect()
 }
 
 /// Genau ein Paket in der Escrow-Inbox.
@@ -533,9 +597,19 @@ pub(crate) fn trust_digest_signer(
 
 /// Zeremonie A in der Laufzeit des Autoritätswirts.
 ///
-/// Der ERSTE Schritt ist `cutover`; mit dem produktiven [`CutoverPending`]
-/// endet die Zeremonie dort, ohne Inbox, Reauthentifizierung, Sperrzeile,
-/// Audit oder Datei.
+/// Der ERSTE Schritt ist `cutover` über die exakten Trust-Objekte des
+/// Bestands; ohne aktive v1.1-Freigabe endet die Zeremonie dort, ohne Inbox,
+/// Reauthentifizierung, Sperrzeile, Audit oder Datei.
+///
+/// Vor dem Commit wird die Laufzeit frisch geöffnet: dieselbe Autorität
+/// (Kopf, Version, vorgeschlagene Sequenz, Konto, Zeitgrenzen) UND derselbe
+/// Port-Befund. Ein `webBundleRevocation` bewegt den Registry-Kopf nicht; nur
+/// der zweite Lauf des Ports sieht ihn. Er muss GENAU die Freigabe nennen, die
+/// ins Audit 13 geht.
+///
+/// Nach dem Commit gehen Freigabe, dann Escrow inhaltsadressiert unter
+/// `trust/` ins Archiv (auch beim exakten Wiedereinspielen), und der frisch
+/// geöffnete Bestand muss das Escrow im gewählten Kopf als gültig tragen.
 ///
 /// # Errors
 ///
@@ -545,7 +619,11 @@ pub fn publish_reader_key_escrow(
     cutover: &dyn ReaderKeyEscrowCutover,
     inbox: &Path,
 ) -> Result<PublishedReaderKeyEscrow, ReaderKeyEscrowError> {
-    let bundle_release = cutover.active_v11_bundle_release(runtime.trust(), runtime.head())?;
+    let bundle_release = cutover.active_v11_bundle_release(
+        runtime.anchor(),
+        &trust_objects(runtime),
+        runtime.head(),
+    )?;
     let config = runtime.config();
     if !config.authority
         || config.role != OperatorRoleV1::OrganizationAdmin
@@ -553,18 +631,25 @@ pub fn publish_reader_key_escrow(
     {
         return Err(ReaderKeyEscrowError::Operator);
     }
-    // Verfall beim Kommandostart, hinter dem Cutover-Port (bis (f) nie
-    // erreicht) und vor jeder Reauthentifizierung.
+    // Verfall beim Kommandostart, hinter dem Cutover-Port und vor jeder
+    // Reauthentifizierung.
     purge_expired_reader_key_escrow_results(runtime)?;
     let exact_package = single_package(inbox)?;
     let now = || fresh_wall_clock().map_err(|_| ReaderKeyEscrowError::Operator);
+    let archive_directory = config.archive_directory.clone();
+    let distribute = |bytes: &[u8]| {
+        crate::web_bundle_release::distribute_trust_object(&archive_directory, bytes)
+    };
     let fresh = match prepare_reader_key_escrow_package(
         runtime.database(),
         runtime.head(),
         &exact_package,
         now()?,
     )? {
-        PreparedReaderKeyEscrowPackage::Published(published) => return Ok(published),
+        PreparedReaderKeyEscrowPackage::Published(published) => {
+            distribute_published(&distribute, &published)?;
+            return Ok(published);
+        }
         PreparedReaderKeyEscrowPackage::Fresh(fresh) => fresh,
     };
     let context_hash = fresh.escrow_core_hash();
@@ -577,13 +662,22 @@ pub fn publish_reader_key_escrow(
     let audit = runtime.audit_service();
     let admin_sign = trust_digest_signer(runtime, NativeSigningSlot::Admin);
     let root_sign = trust_digest_signer(runtime, NativeSigningSlot::Root);
-    // Vor dem Commit: dieselbe Autorität wie beim Öffnen — Kopf, Version,
-    // vorgeschlagene Sequenz, Konto und persistierte Zeitgrenzen frisch
-    // nachgelesen (Bauplan §5.2 Schritt 7, Vorbild `operator_ceremony`).
+    let operator = |_| ReaderKeyEscrowError::Operator;
     let session_current = || {
+        runtime.ensure_current().map_err(operator)?;
+        let reopened = runtime.reopened_for_action().map_err(operator)?;
+        reopened.ensure_current().map_err(operator)?;
         runtime
-            .ensure_same_action_authority()
-            .map_err(|_| ReaderKeyEscrowError::Operator)?;
+            .ensure_same_authority_as(&reopened)
+            .map_err(operator)?;
+        let again = cutover.active_v11_bundle_release(
+            reopened.anchor(),
+            &trust_objects(&reopened),
+            reopened.head(),
+        )?;
+        if again != bundle_release {
+            return Err(ReaderKeyEscrowError::CutoverNotReady);
+        }
         if !session
             .proof()
             .is_valid_at(ReauthPurpose::AdminRootCeremony, now()?)
@@ -592,8 +686,12 @@ pub fn publish_reader_key_escrow(
         }
         Ok(())
     };
-    commit_reader_key_escrow_publication(
+    let catalog = trust_objects(runtime);
+    let published = commit_reader_key_escrow_publication(
         &ReaderKeyEscrowPublicationContext {
+            anchor: runtime.anchor(),
+            catalog: &catalog,
+            distribute: &distribute,
             database: runtime.database(),
             trust: runtime.trust(),
             head: runtime.head(),
@@ -609,5 +707,20 @@ pub fn publish_reader_key_escrow(
         },
         &fresh,
         bundle_release,
-    )
+    )?;
+    distribute_published(&distribute, &published)?;
+    // Der Bestand trägt das Escrow jetzt selbst: frisch geöffnet (Gate `trust`
+    // über die ganze Escrow-Menge) und gültig im gewählten Kopf.
+    let reopened = runtime.reopened_for_action().map_err(operator)?;
+    let escrows = verify_reader_key_escrows(
+        reopened.trust(),
+        ReaderKeyEscrowHead::Selected(reopened.head()),
+    )?;
+    if escrows
+        .get(published.escrow_object_hash)
+        .is_none_or(|escrow| escrow.standing() != ea_trust::ReaderKeyEscrowStanding::Valid)
+    {
+        return Err(ReaderKeyEscrowError::Trust(TrustError::ActionMismatch));
+    }
+    Ok(published)
 }
