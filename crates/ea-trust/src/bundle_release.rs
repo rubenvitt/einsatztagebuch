@@ -304,3 +304,128 @@ fn select_active(releases: &[PinnedRelease]) -> Option<usize> {
 
     if ambiguous { None } else { best }
 }
+
+/// Die kleinste `bundle-version`, die die drei Reader-Key-Escrow-Familien
+/// trägt (v1.1-Profil §5, U4: „v1.1-fähig" heißt nicht kleiner als die
+/// gepinnte Mindestversion).
+///
+/// Der Wert liegt bewusst ÜBER jeder heute ausgelieferten Fassung (der
+/// eingefrorene Vektor trägt `2026.3.1`): keine bestehende Freigabe öffnet die
+/// Sperre. Die Ordnung steht in [`bundle_version_carries_reader_key_escrow`].
+pub const MIN_ESCROW_BUNDLE_VERSION: &str = "2026.4.0";
+
+/// Ob eine `bundle-version` die drei Escrow-Familien trägt.
+///
+/// Die Fassung ist eine Folge punktgetrennter Dezimalkomponenten; verglichen
+/// wird komponentenweise numerisch, fehlende Komponenten zählen als null
+/// (`2026.4` = `2026.4.0`). Alles, was sich so nicht zerlegen lässt — eine
+/// leere Komponente, ein Nicht-Ziffernzeichen, ein Vorzeichen, ein Überlauf
+/// —, gilt als NICHT fähig: die Sperre bleibt im Zweifel zu.
+#[must_use]
+pub fn bundle_version_carries_reader_key_escrow(bundle_version: &str) -> bool {
+    let (Some(candidate), Some(minimum)) = (
+        dotted_decimal(bundle_version),
+        dotted_decimal(MIN_ESCROW_BUNDLE_VERSION),
+    ) else {
+        return false;
+    };
+    let width = candidate.len().max(minimum.len());
+    let component = |parts: &[u64], index: usize| parts.get(index).copied().unwrap_or(0);
+    for index in 0..width {
+        let (have, need) = (component(&candidate, index), component(&minimum, index));
+        if have != need {
+            return have > need;
+        }
+    }
+    true
+}
+
+fn dotted_decimal(version: &str) -> Option<Vec<u64>> {
+    version
+        .split('.')
+        .map(|part| {
+            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            part.parse::<u64>().ok()
+        })
+        .collect()
+}
+
+/// Warum die Cutover-Vorbedingung nicht gilt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EscrowCutoverError {
+    /// Ein Objekt der Bundle-Familie besteht seine Wurzelprüfung nicht — ein
+    /// Angriff, keine Abwesenheit (siehe [`ReaderBundlePin::from_trust_objects`]).
+    Bundle(BundleRejectionCodeV1),
+    /// Zur Registry-Version der Publikation gilt keine aktive Freigabe.
+    NoActiveRelease,
+    /// Die aktive Freigabe nennt eine Fassung unter
+    /// [`MIN_ESCROW_BUNDLE_VERSION`] oder eine, die sich nicht ordnen lässt.
+    ReleaseNotCapable,
+}
+
+impl core::fmt::Display for EscrowCutoverError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Bundle(code) => {
+                core::fmt::Display::fmt(&ReaderBundleError { code: *code }, formatter)
+            }
+            Self::NoActiveRelease => formatter.write_str("no active web bundle release"),
+            Self::ReleaseNotCapable => formatter
+                .write_str("the active web bundle release does not carry the reader key escrow"),
+        }
+    }
+}
+
+impl std::error::Error for EscrowCutoverError {}
+
+impl ReaderBundlePin {
+    /// Objekthash und Fassung der aktiven Freigabe, falls eine gepinnt ist.
+    #[must_use]
+    pub fn active_release(&self) -> Option<(ObjectHash, &str)> {
+        self.active.map(|index| {
+            let release = &self.releases[index];
+            (release.object_hash, release.bundle_version.as_str())
+        })
+    }
+}
+
+/// Die Freigabe, die die Cutover-Vorbedingung des Reader-Key-Escrows erfüllt
+/// (v1.1-Profil §5, Entscheidung 9).
+///
+/// Vor der Annahme einer Publikation MUSS eine aktive, wurzelsignierte
+/// `webBundleRelease` eines v1.1-fähigen Bundles gelten, deren
+/// `effective-from-registry-version` nicht größer ist als
+/// `at_registry_version` — die Registry-Version der Publikation, also die der
+/// Publikationsfreigabe. „Aktiv" ist genau die Freigabe, die auch der Reader
+/// pinnt ([`ReaderBundlePin`]); eine jüngere Freigabe einer älteren Fassung
+/// schließt die Sperre deshalb wieder.
+///
+/// Der Rückgabewert ist der Objekthash dieser Freigabe: die native Zeremonie
+/// schreibt ihn als `bundle-release-object-hash` in ihr Audit (§8), der
+/// Server nimmt nur an, wenn es ihn gibt. Server und Zeremonie rufen dieselbe
+/// Funktion — es gibt keinen Serverschalter, der sie übergeht (§9).
+///
+/// # Errors
+///
+/// [`EscrowCutoverError::Bundle`] für eine Freigabe oder einen Widerruf, der
+/// seine Wurzelsignatur nicht belegt oder einer fremden Organisation gehört;
+/// [`EscrowCutoverError::NoActiveRelease`] ohne aktive Freigabe;
+/// [`EscrowCutoverError::ReleaseNotCapable`] für eine aktive Freigabe einer
+/// nicht v1.1-fähigen Fassung.
+pub fn reader_key_escrow_cutover_release(
+    anchor: &TrustAnchorV1,
+    exact_trust_objects: &[&[u8]],
+    at_registry_version: RegistryVersion,
+) -> Result<ObjectHash, EscrowCutoverError> {
+    let pin = ReaderBundlePin::from_trust_objects(anchor, exact_trust_objects, at_registry_version)
+        .map_err(|error| EscrowCutoverError::Bundle(error.code()))?;
+    let (object_hash, bundle_version) = pin
+        .active_release()
+        .ok_or(EscrowCutoverError::NoActiveRelease)?;
+    if !bundle_version_carries_reader_key_escrow(bundle_version) {
+        return Err(EscrowCutoverError::ReleaseNotCapable);
+    }
+    Ok(object_hash)
+}

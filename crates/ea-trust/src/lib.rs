@@ -580,7 +580,9 @@ pub use anchor::{
     encode_pre_anchor_v1, verify_pre_anchor_bootstrap_objects, verify_trust,
 };
 pub use bundle_release::{
-    BundleActivationDecisionV1, BundleRejectionCodeV1, ReaderBundleError, ReaderBundlePin,
+    BundleActivationDecisionV1, BundleRejectionCodeV1, EscrowCutoverError,
+    MIN_ESCROW_BUNDLE_VERSION, ReaderBundleError, ReaderBundlePin,
+    bundle_version_carries_reader_key_escrow, reader_key_escrow_cutover_release,
 };
 pub use clock_release::{VerifiedClockRelease, verify_clock_release};
 pub use clock_repair::{ClockRepairRegistryAuthority, verify_clock_repair_authority};

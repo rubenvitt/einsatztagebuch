@@ -23,7 +23,8 @@ use ea_crypto::{
 };
 use ea_format::{
     ReaderKeyEscrowApprovalCoreV1, ReaderKeyEscrowCoreV1, ReaderKeyEscrowHpkeContextV1,
-    ReaderKeyEscrowRecoveryAuthorizationCoreV1, TrustPayloadV1,
+    ReaderKeyEscrowRecoveryAuthorizationCoreV1, TrustPayloadV1, WebBundleReleaseCoreV1,
+    WebBundleRevocationCoreV1,
 };
 use ea_types::{CertificateHash, Hash32, ObjectHash};
 
@@ -178,6 +179,51 @@ pub fn escrow_with_approval(
     let escrow_bytes =
         signed_reader_key_escrow(core, ea_crypto::object_hash(&approval_bytes), root);
     (approval_bytes, escrow_bytes)
+}
+
+/// Eine wurzelsignierte `webBundleRelease` aus frei gewählten Feldern.
+///
+/// Die Cutover-Vorbedingung des Profils (§5) verlangt eine aktive Freigabe
+/// eines v1.1-fähigen Bundles, bevor ein Escrow angenommen wird. Zeugen des
+/// Trust-Kerns und des Servers brauchen sie zu IHRER Linie; die eingefrorene
+/// Freigabe unter `vectors/web-bundle/v1/` trägt eine fremde Organisation.
+///
+/// # Panics
+///
+/// Wenn der Kern die Grammatik verletzt.
+#[must_use]
+pub fn signed_web_bundle_release(
+    core: &WebBundleReleaseCoreV1,
+    root: &FixtureTrustSigner,
+) -> Vec<u8> {
+    let payload = TrustPayloadV1::web_bundle_release(core.clone())
+        .expect("a fixture release core is well formed");
+    let signature = trust_signed_normal(
+        root.seed,
+        root.certificate_hash,
+        trust_digest(payload.exact_digest_input()).as_bytes(),
+    );
+    trust_exact_object(payload, vec![signature])
+}
+
+/// Ein wurzelsignierter `webBundleRevocation` aus frei gewählten Feldern.
+///
+/// # Panics
+///
+/// Wenn der Kern die Grammatik verletzt.
+#[must_use]
+pub fn signed_web_bundle_revocation(
+    core: &WebBundleRevocationCoreV1,
+    root: &FixtureTrustSigner,
+) -> Vec<u8> {
+    let payload = TrustPayloadV1::web_bundle_revocation(core.clone())
+        .expect("a fixture revocation core is well formed");
+    let signature = trust_signed_normal(
+        root.seed,
+        root.certificate_hash,
+        trust_digest(payload.exact_digest_input()).as_bytes(),
+    );
+    trust_exact_object(payload, vec![signature])
 }
 
 #[cfg(test)]
