@@ -133,6 +133,9 @@ export function EscrowRestorePage({
                   disabled={begun === undefined || opened !== undefined || busy}
                   onChange={event => {
                     const envelope = event.currentTarget.files?.[0]
+                    // Zuruecksetzen, damit dieselbe Datei erneut gewaehlt
+                    // werden kann — die Antwort darauf gibt Rust.
+                    event.currentTarget.value = ''
                     if (begun === undefined || envelope === undefined) {
                       return
                     }
