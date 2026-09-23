@@ -28,4 +28,10 @@ ed25519-dalek.workspace = true
 # ea-format, die Objekthashes hexadezimal in Pfadhinweise schreiben und
 # Testvektoren aus Hex lesen. Dev-Dependency, also nie im wasm32-Lib-Graphen.
 hex.workspace = true
+# Die Escrow-Zeugen des Gates `trust` binden `ea-trust/tests/escrow_support`
+# per #[path] ein; das Modul baut Freigabe, Escrow und Öffnungsautorisierung mit
+# den Fixture-Bauern aus `ea_testkit::reader_key_escrow_fixture` — EINE
+# Kodierung. `ea-testkit` hängt nicht an `ea-verify`; Dev-Kante, also nie im
+# wasm32-Lib-Graphen.
+ea-testkit.workspace = true
 minicbor.workspace = true

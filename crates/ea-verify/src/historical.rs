@@ -6,7 +6,7 @@ use ea_format::{
     CertificateKindV1, DecodedTrustPayloadV1, EntryPackageV1, GrantKindV1, GrantPurposeV1, GrantV1,
     Parsed,
 };
-use ea_trust::{GrantAuthorizationError, TrustAnchorV1, load_trust_state, verify_trust};
+use ea_trust::{GrantAuthorizationError, TrustAnchorV1};
 use ea_types::{ChainSequence, ObjectHash, RegistryVersion, UnixMillis};
 
 /// Reconstruct exact signed Registry authority from the archive's trust bytes.
@@ -20,7 +20,8 @@ pub fn historical_registry_head(
 ) -> Option<ea_trust::HistoricalRegistryAuthority> {
     let key = verification_state_key(anchor.organization_id());
     let mut store = EphemeralTrustStateStore::new(key, UnixMillis::new(0));
-    let trust = verify_trust(anchor, inventory, load_trust_state(&mut store, key).ok()?).ok()?;
+    // Dasselbe Gate `trust` wie der Prüflauf: auch die Escrow-Menge muss tragen.
+    let trust = crate::trust_gate::verified_trust(&mut store, key, anchor, inventory)?;
     ea_trust::verify_historical_registry_authority(&trust, version, hash, sequence).ok()
 }
 

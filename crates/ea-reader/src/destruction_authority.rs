@@ -115,6 +115,9 @@ pub(crate) fn prepare_with<T>(
     let key = ea_verify::verification_state_key(anchor.organization_id());
     let mut state = ea_verify::EphemeralTrustStateStore::with_pin(key, now, pin);
     for _ in 0..=inventory.trust().len() {
+        // Die Escrow-Familien desselben Bestands hat `verify_archive` oben an
+        // Gate `trust` schon geprüft (fail-closed, ebenso
+        // `historical_registry_head`); diese Schleife wählt nur den Kopf.
         let trust = verify_trust(
             anchor,
             &inventory,

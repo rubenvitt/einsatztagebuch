@@ -28,7 +28,7 @@ use ea_chain::{
 };
 use ea_crypto::{HpkeRecipient, VerificationContext, parse_cose_sign1, verify_cose_sign1};
 use ea_format::{CertificateKindV1, EntryPackageV1, Parsed, ReceiptV1};
-use ea_trust::{TrustAnchorV1, TrustStateKey, VerifiedTrust, load_trust_state, verify_trust};
+use ea_trust::{TrustAnchorV1, TrustStateKey};
 use ea_types::{CertificateHash, KeyThumbprint, ObjectHash, UnixMillis};
 
 use crate::{
@@ -298,11 +298,12 @@ pub fn verify_archive_observed(
     let key = verification_state_key(anchor.organization_id());
     let mut store = EphemeralTrustStateStore::new(key, options.os_wall_clock());
 
-    // Gate `trust`: einmal fuer den ganzen Bestand. Traegt es nicht, endet der
-    // Lauf hier — ohne Vertrauenskette laesst sich ueber kein Objekt etwas
-    // sagen.
+    // Gate `trust`: einmal fuer den ganzen Bestand — die Vertrauenskette UND
+    // jedes Objekt der drei Escrow-Familien (`trust_gate`). Traegt es nicht,
+    // endet der Lauf hier — ohne Vertrauenskette laesst sich ueber kein Objekt
+    // etwas sagen.
     protocol.enter(Gate::Trust);
-    if verified_trust(&mut store, key, anchor, &inventory).is_none() {
+    if crate::trust_gate::verified_trust(&mut store, key, anchor, &inventory).is_none() {
         return report.seal();
     }
     // ERST HINTER DEM FAIL-CLOSED-AUSSTIEG, nie davor: `publicKeyThumbprints`
@@ -1161,19 +1162,6 @@ fn place_in_chain(
         report.chain_head = ChainHeadV1::new(chain_id, head.chain_sequence(), head.entry_hash());
     }
     Some(chain)
-}
-
-/// Gate `trust`: laedt den Stand und prueft die Vertrauenskette gegen den Anker.
-///
-/// `None` ist FAIL-CLOSED fuer den gesamten Bestand.
-fn verified_trust(
-    store: &mut EphemeralTrustStateStore,
-    key: TrustStateKey,
-    anchor: &TrustAnchorV1,
-    inventory: &ArchiveInventory,
-) -> Option<VerifiedTrust> {
-    let snapshot = load_trust_state(store, key).ok()?;
-    verify_trust(anchor, inventory, snapshot).ok()
 }
 
 /// Loest `writer_certificate_hash` in den zur Sequenz aktiven Zertifikaten auf.
