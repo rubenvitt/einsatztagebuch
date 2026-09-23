@@ -25,7 +25,8 @@ type WorkerCapability =
   | 'view'
   | 'replica-cache-removal'
   | 'replica-attestation'
-  // Die zwei Escrow-Zeremonien (Escrow-Profil §5–§7, DRK-460 Ruling Q3).
+  // Die zwei Escrow-Zeremonien (Escrow-Profil §5–§7, DRK-460 Ruling Q3),
+  // einschließlich der Entnahme des wiederhergestellten KEM ins Enrollment.
   | 'reader-key-escrow'
 
 // Zwei Netze, die sich ergänzen:
@@ -47,7 +48,7 @@ const WORKER_CAPABILITIES = {
   'enrollment-fingerprints': 'enrollment',
   'enrollment-confirm-fingerprints': 'enrollment',
   'enrollment-finish': 'enrollment',
-  'enrollment-begin-restored': 'enrollment',
+  'enrollment-begin-restored': 'reader-key-escrow',
   'enrollment-finish-restored': 'enrollment',
   'reader-registration-request': 'enrollment',
   'reader-key-escrow-seal-package': 'reader-key-escrow',
@@ -147,6 +148,25 @@ it('only the two replica capabilities touch destruction', () => {
       expect(['replica-attestation', 'replica-cache-removal']).toContain(capability)
     }
   }
+})
+
+// review-e F3: der Beginn des Enrollments um den wiederhergestellten KEM
+// entnimmt fremdes Schluesselmaterial und steht deshalb unter der
+// Escrow-Faehigkeit, nicht unter `enrollment`.
+it('the escrow capability holds every message that touches escrowed key material', () => {
+  expect(
+    sorted(
+      Object.entries(WORKER_CAPABILITIES)
+        .filter(([, capability]) => capability === 'reader-key-escrow')
+        .map(([kind]) => kind),
+    ),
+  ).toEqual([
+    'enrollment-begin-restored',
+    'reader-key-escrow-seal-package',
+    'reader-key-escrow-transport-abort',
+    'reader-key-escrow-transport-begin',
+    'reader-key-escrow-transport-open',
+  ])
 })
 
 it('the web imports only wasm exports pinned by the Rust capability allowlist', () => {

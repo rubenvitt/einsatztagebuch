@@ -200,10 +200,11 @@ enum Capability {
     /// Nur die eigene, jobgebundene Loeschattestierung (Web-Reader-Design §3).
     ReplicaAttestation,
     /// Die zwei Escrow-Zeremonien des Readers (Escrow-Profil §5–§7, DRK-460
-    /// Ruling Q3): das Paket aus dem eigenen KEM und der fluechtige
-    /// Transport-Schluessel. Eigene Faehigkeit, damit eine Zeremonie mit
-    /// fremdem Schluesselmaterial nicht unter `Enrollment` oder `Vault`
-    /// verschwindet.
+    /// Ruling Q3): das Paket aus dem eigenen KEM, der fluechtige
+    /// Transport-Schluessel und die Entnahme des wiederhergestellten KEM ins
+    /// Enrollment (`enrollmentBeginRestored`, review-e F3). Eigene Faehigkeit,
+    /// damit eine Zeremonie mit fremdem Schluesselmaterial nicht unter
+    /// `Enrollment` oder `Vault` verschwindet.
     ReaderKeyEscrow,
 }
 
@@ -215,7 +216,7 @@ const WASM_EXPORTS: &[(&str, Capability)] = &[
     ("blobPut", Capability::Storage),
     ("bridgeEcho", Capability::Diagnostics),
     ("enrollmentBegin", Capability::Enrollment),
-    ("enrollmentBeginRestored", Capability::Enrollment),
+    ("enrollmentBeginRestored", Capability::ReaderKeyEscrow),
     ("enrollmentConfirmFingerprints", Capability::Enrollment),
     ("enrollmentFingerprints", Capability::Enrollment),
     ("enrollmentFinish", Capability::Enrollment),
@@ -425,7 +426,7 @@ fn wasm_exports_match_the_capability_allowlist() {
         stale.is_empty(),
         "WASM_EXPORTS lists exports that no longer exist: {stale:?}"
     );
-    let replica = |wanted: Capability| -> BTreeSet<&str> {
+    let by_capability = |wanted: Capability| -> BTreeSet<&str> {
         WASM_EXPORTS
             .iter()
             .filter(|(_, capability)| *capability == wanted)
@@ -433,15 +434,28 @@ fn wasm_exports_match_the_capability_allowlist() {
             .collect()
     };
     assert_eq!(
-        replica(Capability::ReplicaAttestation),
+        by_capability(Capability::ReplicaAttestation),
         BTreeSet::from(["readerDestructionAttest", "readerDestructionAttestation"])
     );
     assert_eq!(
-        replica(Capability::ReplicaCacheRemoval),
+        by_capability(Capability::ReplicaCacheRemoval),
         BTreeSet::from([
             "readerDestructionApply",
             "readerDestructionApplyDelivery",
             "readerDestructionReceipt",
+        ])
+    );
+    // Jede Ausfuhr, die fremdes oder wiederhergestelltes Schluesselmaterial
+    // anfasst, steht unter `ReaderKeyEscrow` — auch die, die den
+    // wiederhergestellten KEM ins Enrollment entnimmt (review-e F3).
+    assert_eq!(
+        by_capability(Capability::ReaderKeyEscrow),
+        BTreeSet::from([
+            "enrollmentBeginRestored",
+            "readerKeyEscrowSealPackage",
+            "readerKeyEscrowTransportAbort",
+            "readerKeyEscrowTransportBegin",
+            "readerKeyEscrowTransportOpen",
         ])
     );
     for (name, capability) in WASM_EXPORTS {
