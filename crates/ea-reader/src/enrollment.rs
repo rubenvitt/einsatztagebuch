@@ -67,6 +67,7 @@ use crate::enrollment_endpoints::{
     EnrollmentEndpointError, EnrollmentEndpoints, EnrollmentRequestV1,
 };
 use crate::envelope::{AuthenticatorPrfV1, VaultEnvelopeV1};
+use crate::reader_key_escrow_restore::RestoredReaderKemV1;
 use crate::vault::{ReaderVault, ReaderVaultError, SealedVaultV1, UnlockedVault, VaultContentsV1};
 
 /// Das FESTE App-Salt der PRF-Auswertung (`web-reader-design.md` §6.2).
@@ -434,7 +435,64 @@ impl ReaderEnrollment {
         kem_bytes.zeroize();
         let audit_private_key = SecretBytes::new(audit_bytes);
         audit_bytes.zeroize();
+        Self::from_keys(
+            organization_id,
+            subject_id,
+            pinned_anchor,
+            bundle_fingerprint,
+            kem_private_key,
+            audit_private_key,
+        )
+    }
 
+    /// Zeremonie B, letzter Schritt (Escrow-Profil §6 Schritt 6): ein NEUES
+    /// Enrollment um den wiederhergestellten KEM.
+    ///
+    /// Dieselbe Weigerung wie [`ReaderEnrollment::begin`] — ein Geraet mit
+    /// Tresor beginnt nichts —, derselbe Weg durch
+    /// [`ReaderEnrollment::register_authenticator`] und das Fingerprint-Gate.
+    /// Neu ist nur die Herkunft des KEM: er kommt aus
+    /// [`RestoredReaderKemV1`], das nur nach allen Pruefungen der Oeffnung
+    /// entsteht. Der Ed25519-Geraete- und Auditschluessel wird FRISCH gezogen;
+    /// der alte ist mit dem verlorenen Tresor verloren. Der Abdruck, den das
+    /// Gate zeigt, ist deshalb der KEM des alten Reader-Zertifikats.
+    ///
+    /// # Errors
+    /// Wie [`ReaderEnrollment::begin`].
+    pub fn begin_restored(
+        store: &dyn ReaderBlobStore,
+        organization_id: OrganizationId,
+        subject_id: SubjectId,
+        pinned_anchor: TrustAnchorV1,
+        bundle_fingerprint: Hash32,
+        restored: RestoredReaderKemV1,
+    ) -> Result<Self, EnrollmentError> {
+        if matches!(Self::device_state(store)?, DeviceTrustStateV1::Pinned) {
+            return Err(EnrollmentError::VaultAlreadyOnDevice);
+        }
+        let mut audit_bytes = random_bytes::<32>()?;
+        let audit_private_key = SecretBytes::new(audit_bytes);
+        audit_bytes.zeroize();
+        Self::from_keys(
+            organization_id,
+            subject_id,
+            pinned_anchor,
+            bundle_fingerprint,
+            restored.into_secret(),
+            audit_private_key,
+        )
+    }
+
+    /// Die gemeinsame Konstruktion beider Anfaenge: der KEM-Abdruck wird HIER
+    /// einmal gerechnet und festgehalten.
+    fn from_keys(
+        organization_id: OrganizationId,
+        subject_id: SubjectId,
+        pinned_anchor: TrustAnchorV1,
+        bundle_fingerprint: Hash32,
+        kem_private_key: SecretBytes<32>,
+        audit_private_key: SecretBytes<32>,
+    ) -> Result<Self, EnrollmentError> {
         // `SecretBytes` hat KEIN `Clone`, und `HpkeRecipientPrivateKey::from_bytes`
         // KONSUMIERT sein Geheimnis. `with_exposed` ist der einzige Weg an die
         // Bytes, den `ea-crypto` anbietet, und er haelt den Zeroize-Vertrag: die
@@ -691,23 +749,8 @@ impl ReaderEnrollment {
         endpoints: &mut dyn EnrollmentEndpoints,
         store: &mut dyn ReaderBlobStore,
     ) -> Result<EnrolledReaderV1, EnrollmentError> {
-        // Die Bestaetigung wird gegen DIESES Enrollment gestellt. Ohne diese
-        // Probe oeffnete eine Bestaetigung aus einem zweiten, parallel
-        // gefuehrten Enrollment dieses hier — und der Typ allein saehe das
-        // nicht.
-        let belongs_here = fingerprints_match(
-            confirmation.confirmed_key.as_bytes(),
-            self.kem_key_thumbprint.as_bytes(),
-        ) & fingerprints_match(
-            confirmation.confirmed_bundle.as_bytes(),
-            self.bundle_fingerprint.as_bytes(),
-        );
-        if !belongs_here {
-            return Err(EnrollmentError::FingerprintMismatch);
-        }
-        if self.authenticators.len() < MIN_ENROLLED_AUTHENTICATORS_V1 {
-            return Err(EnrollmentError::SingleAuthenticator);
-        }
+        // Gate und Kardinalitaet — dieselbe Regel wie bei `finish_restored`.
+        self.require_finishable(&confirmation)?;
 
         // Der Signierer bekommt eine KOPIE; das Original geht unten an
         // `VaultContentsV1::new`, das es BESITZEND nimmt.
@@ -733,6 +776,83 @@ impl ReaderEnrollment {
             endpoints.send(&request)?;
         }
 
+        let subject_id = self.subject_id;
+        let sealed = self.seal_contents()?;
+        let sealed_bytes = sealed.to_deterministic_cbor();
+
+        let upload = VaultBlobUploadV1::new(subject_id, sealed_bytes.clone())?;
+        let request = signed_request(
+            &signer,
+            &context,
+            &tag,
+            EndpointV1::VaultBlobs,
+            upload.exact_bytes().to_vec(),
+        )?;
+        endpoints.send(&request)?;
+
+        let blob_key = reader_vault_blob_key()?;
+        store.put(&blob_key, &sealed_bytes)?;
+        Ok(EnrolledReaderV1 { sealed, blob_key })
+    }
+
+    /// Schliesst ein Enrollment aus [`ReaderEnrollment::begin_restored`] ab:
+    /// LOKAL, ohne Endpunkte.
+    ///
+    /// Die Reihenfolge von [`ReaderEnrollment::finish`] — Server vor lokal —
+    /// traegt hier nicht: die Endpunkte sind signiert, und der neue
+    /// Ed25519-Schluessel hat noch kein Zertifikat. Ein Abbruch am Server
+    /// verloere den nur einmal lieferbaren KEM. Der neue Tresor wird deshalb
+    /// zuerst lokal versiegelt; Neuzertifizierung, Server-Upload und
+    /// serverseitige WebAuthn-Registrierung brauchen wieder Root und Registry
+    /// (benannte Grenze). Gate und Kardinalitaet sind DIESELBEN wie bei
+    /// `finish`. Liegt inzwischen ein Tresor auf dem Geraet, wird er nicht
+    /// ueberschrieben.
+    ///
+    /// # Errors
+    /// Wie [`ReaderEnrollment::finish`] ohne die Endpunktcodes, dazu
+    /// `EA-READER-ENROLLMENT-VAULT-PRESENT`.
+    pub fn finish_restored(
+        self,
+        confirmation: FingerprintConfirmationV1,
+        store: &mut dyn ReaderBlobStore,
+    ) -> Result<EnrolledReaderV1, EnrollmentError> {
+        self.require_finishable(&confirmation)?;
+        if matches!(Self::device_state(store)?, DeviceTrustStateV1::Pinned) {
+            return Err(EnrollmentError::VaultAlreadyOnDevice);
+        }
+        let sealed = self.seal_contents()?;
+        let blob_key = reader_vault_blob_key()?;
+        store.put(&blob_key, &sealed.to_deterministic_cbor())?;
+        Ok(EnrolledReaderV1 { sealed, blob_key })
+    }
+
+    /// Das Gate und die Kardinalitaet beider Abschluesse — EINE Regel.
+    ///
+    /// Die Bestaetigung wird gegen DIESES Enrollment gestellt. Ohne diese
+    /// Probe oeffnete eine Bestaetigung aus einem zweiten, parallel gefuehrten
+    /// Enrollment dieses hier — und der Typ allein saehe das nicht.
+    fn require_finishable(
+        &self,
+        confirmation: &FingerprintConfirmationV1,
+    ) -> Result<(), EnrollmentError> {
+        let belongs_here = fingerprints_match(
+            confirmation.confirmed_key.as_bytes(),
+            self.kem_key_thumbprint.as_bytes(),
+        ) & fingerprints_match(
+            confirmation.confirmed_bundle.as_bytes(),
+            self.bundle_fingerprint.as_bytes(),
+        );
+        if !belongs_here {
+            return Err(EnrollmentError::FingerprintMismatch);
+        }
+        if self.authenticators.len() < MIN_ENROLLED_AUTHENTICATORS_V1 {
+            return Err(EnrollmentError::SingleAuthenticator);
+        }
+        Ok(())
+    }
+
+    /// Versiegelt den Tresorinhalt unter einem Envelope je Authenticator.
+    fn seal_contents(self) -> Result<SealedVaultV1, EnrollmentError> {
         let authenticators: Vec<AuthenticatorPrfV1> = self
             .authenticators
             .iter()
@@ -751,22 +871,7 @@ impl ReaderEnrollment {
             self.pinned_anchor.exact_bytes().to_vec(),
             None,
         );
-        let sealed = ReaderVault::seal(contents, &authenticators)?;
-        let sealed_bytes = sealed.to_deterministic_cbor();
-
-        let upload = VaultBlobUploadV1::new(self.subject_id, sealed_bytes.clone())?;
-        let request = signed_request(
-            &signer,
-            &context,
-            &tag,
-            EndpointV1::VaultBlobs,
-            upload.exact_bytes().to_vec(),
-        )?;
-        endpoints.send(&request)?;
-
-        let blob_key = reader_vault_blob_key()?;
-        store.put(&blob_key, &sealed_bytes)?;
-        Ok(EnrolledReaderV1 { sealed, blob_key })
+        Ok(ReaderVault::seal(contents, &authenticators)?)
     }
 
     /// Der Vertrauensstand DIESES Geraets, aus seinem Bytespeicher gelesen.
