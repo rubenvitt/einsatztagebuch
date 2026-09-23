@@ -477,6 +477,53 @@
 //! use ea_trust::LocalTimeBlock;
 //! let _: LocalTimeBlock<'static> = minicbor::decode(&[]).unwrap();
 //! ```
+//!
+//! The Reader-Key-Escrow proofs (v1.1 profile §3.1) come only out of their
+//! verifiers. None of them has a `Default`, none decodes from CBOR, and the
+//! standing of a verified escrow has no setter:
+//!
+//! ```compile_fail
+//! let _ = ea_trust::VerifiedReaderKeyEscrowApproval::default();
+//! ```
+//!
+//! ```compile_fail
+//! let _ = ea_trust::VerifiedReaderKeyEscrow::default();
+//! ```
+//!
+//! ```compile_fail
+//! let _ = ea_trust::VerifiedReaderKeyEscrowSet::default();
+//! ```
+//!
+//! ```compile_fail
+//! let _ = ea_trust::VerifiedReaderKeyEscrowIntent::default();
+//! ```
+//!
+//! ```compile_fail
+//! let _ = ea_trust::VerifiedReaderKeyEscrowRecoveryAuthorization::default();
+//! ```
+//!
+//! ```compile_fail
+//! let _ = ea_trust::AuthorizedEscrowTransportKey::default();
+//! ```
+//!
+//! ```compile_fail
+//! let _: ea_trust::VerifiedReaderKeyEscrow = minicbor::decode(&[]).unwrap();
+//! ```
+//!
+//! ```compile_fail
+//! let _: ea_trust::VerifiedReaderKeyEscrowRecoveryAuthorization =
+//!     minicbor::decode(&[]).unwrap();
+//! ```
+//!
+//! ```compile_fail
+//! fn promote(escrow: &mut ea_trust::VerifiedReaderKeyEscrow) {
+//!     escrow.set_standing(ea_trust::ReaderKeyEscrowStanding::Valid);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! let _: ea_trust::AuthorizedEscrowTransportKey = [9_u8; 32].into();
+//! ```
 #![forbid(unsafe_code)]
 
 #[cfg(test)]
@@ -539,10 +586,11 @@ pub use grant_authorization::{
     verify_archived_grant_authorization, verify_grant_authorization,
 };
 pub use reader_key_escrow::{
-    ReaderKeyEscrowHead, ReaderKeyEscrowStanding, ReaderKeyEscrowUniquenessKey,
-    VerifiedReaderKeyEscrow, VerifiedReaderKeyEscrowApproval, VerifiedReaderKeyEscrowIntent,
-    VerifiedReaderKeyEscrowSet, consume_reader_key_escrow_approval,
-    verify_intended_reader_key_escrow, verify_reader_key_escrow_approval,
+    ReaderKeyEscrowAdmission, ReaderKeyEscrowHead, ReaderKeyEscrowStanding,
+    ReaderKeyEscrowUniquenessKey, VerifiedReaderKeyEscrow, VerifiedReaderKeyEscrowApproval,
+    VerifiedReaderKeyEscrowIntent, VerifiedReaderKeyEscrowSet, consume_reader_key_escrow_approval,
+    is_reader_key_escrow_family, verify_intended_reader_key_escrow,
+    verify_reader_key_escrow_approval, verify_reader_key_escrow_family_admission,
     verify_reader_key_escrows, verify_signed_reader_key_escrow,
 };
 pub use reader_key_escrow_recovery::{

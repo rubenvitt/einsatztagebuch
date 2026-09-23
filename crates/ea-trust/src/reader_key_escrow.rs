@@ -46,7 +46,9 @@ use crate::{
     AdminAuthorizationReplayKey, RegistryError, RegistryHeadPin, SelectedRegistryHead, TrustError,
     TrustStateStore, VerifiedTrust,
     admin_authorization::{AdminSignerClaim, consume_replay_keys, verify_admin_signer_claim},
-    reader_key_escrow_recovery::{recovery_signers_rule, recovery_target_rule},
+    reader_key_escrow_recovery::{
+        recovery_signers_rule, recovery_target_rule, verify_recovery_for_admission,
+    },
     registry::{replay_to_exact_pin, replay_to_line_tip},
     resolver::PreviousHeadState,
 };
@@ -993,4 +995,134 @@ fn standing(
         return Ok(ReaderKeyEscrowStanding::ReaderRevoked);
     }
     Ok(ReaderKeyEscrowStanding::Valid)
+}
+
+// ---------------------------------------------------------------------------
+// Familien-Admission (Ruling F1)
+// ---------------------------------------------------------------------------
+
+/// Was die Familien-Admission über ein aufgenommenes Objekt beweist.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum ReaderKeyEscrowAdmission {
+    /// Eine Publikationsfreigabe, frisch gegen den gewählten Kopf.
+    Approval,
+    /// Ein im gewählten Kopf gültiges Escrow; der Schlüssel indiziert die
+    /// Eindeutigkeitssperre des Aufnehmenden.
+    Escrow(ReaderKeyEscrowUniquenessKey),
+    /// Eine Öffnungsautorisierung über das genannte gültige Escrow.
+    RecoveryAuthorization { escrow_object_hash: ObjectHash },
+}
+
+impl ReaderKeyEscrowAdmission {
+    #[must_use]
+    pub const fn subtype(&self) -> TrustSubtypeV1 {
+        match self {
+            Self::Approval => TrustSubtypeV1::ReaderKeyEscrowApproval,
+            Self::Escrow(_) => TrustSubtypeV1::ReaderKeyEscrow,
+            Self::RecoveryAuthorization { .. } => {
+                TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization
+            }
+        }
+    }
+}
+
+/// `true` für die drei Escrow-Familien — der Verteiler des Aufnehmenden.
+#[must_use]
+pub const fn is_reader_key_escrow_family(subtype: TrustSubtypeV1) -> bool {
+    matches!(
+        subtype,
+        TrustSubtypeV1::ReaderKeyEscrow
+            | TrustSubtypeV1::ReaderKeyEscrowApproval
+            | TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization
+    )
+}
+
+/// Der EIGENE Einstieg der drei Escrow-Familien in den Katalog (Ruling F1).
+///
+/// Dieselbe Gestalt wie [`crate::verify_catalogue_admission`], nur ohne
+/// `at_sequence`: Kopf und Sequenz kommen aus dem gewählten Kopf und aus dem
+/// Objekt selbst. Der Registrierungsabschluss bleibt für diese Familien zu
+/// (`ActionMismatch`); der Aufnehmende verteilt pro Subtyp wie beim
+/// Registry-Ereignis.
+///
+/// `exact_object_bytes` MUSS bereits im Katalog liegen, aus dem `trust`
+/// entstanden ist. Die Reihenfolge ist damit festgelegt: erst die Freigabe,
+/// dann das Escrow, das sie nennt, dann jede Öffnung.
+///
+/// - Freigabe: ihre Regel mit Kopfbindung, Sequenz im Lease und `now` im
+///   Fenster.
+/// - Escrow: der ganze Bestand muss bestehen, und dieses Escrow muss im
+///   gewählten Kopf gültig sein. Die Freigabe wird NICHT erneut an `now`
+///   gebunden — zwischen zwei Einreichungen darf ihre Frist ablaufen; die
+///   zeitliche Bindung trägt die wurzelsignierte Zeit des Escrows.
+/// - Öffnung: ihre Regel mit Sequenz im Lease und `now` im Fenster.
+///
+/// Aufnahme ist KEIN Verbrauch: der Einmal-Speicher sitzt dort, wo die
+/// Autorisierung wirkt (Zeremonie), nicht beim Katalog.
+///
+/// # Errors
+///
+/// [`TrustError::Source`] für Bytes, die nicht dekodieren oder nicht im
+/// Katalog liegen, und für ein Escrow, dessen Freigabe fehlt;
+/// [`TrustError::ActionMismatch`] für einen fremden Subtyp und ohne
+/// Registry-Kopf; [`TrustError::EscrowInactive`] für ein Escrow, das im
+/// gewählten Kopf nicht gültig ist; sowie jeden Befund der Familienregel.
+pub fn verify_reader_key_escrow_family_admission(
+    trust: &VerifiedTrust,
+    head: Option<&SelectedRegistryHead>,
+    exact_object_bytes: &[u8],
+    now: UnixMillis,
+) -> Result<ReaderKeyEscrowAdmission, TrustError> {
+    let ParsedArchiveObject::Trust(parsed) =
+        ea_format::decode_exact_object(exact_object_bytes).map_err(|_| TrustError::Source)?
+    else {
+        return Err(TrustError::ActionMismatch);
+    };
+    if !is_reader_key_escrow_family(parsed.value().subtype()) {
+        return Err(TrustError::ActionMismatch);
+    }
+    let object_hash = parsed.object_hash();
+    if trust.previous_head().catalog_object(object_hash).is_none() {
+        return Err(TrustError::Source);
+    }
+    // Ohne Registry gibt es kein aktiviertes Reader-Zertifikat und keinen
+    // Kopf, an den eine Autorisierung gebunden sein könnte.
+    let Some(head) = head else {
+        return Err(TrustError::ActionMismatch);
+    };
+    match parsed
+        .value()
+        .decoded_payload()
+        .map_err(|_| TrustError::Source)?
+    {
+        DecodedTrustPayloadV1::ReaderKeyEscrowApproval(fields) => {
+            if fields.organization_id != trust.organization_id() {
+                return Err(TrustError::ActionMismatch);
+            }
+            approval_rule(
+                head.candidate_state(),
+                parsed.value(),
+                &fields,
+                SequenceRule::Lease,
+                WindowRule::At(now),
+            )?;
+            Ok(ReaderKeyEscrowAdmission::Approval)
+        }
+        DecodedTrustPayloadV1::ReaderKeyEscrow(_) => {
+            let escrows = verify_reader_key_escrows(trust, ReaderKeyEscrowHead::Selected(head))?;
+            let escrow = escrows.get(object_hash).ok_or(TrustError::Source)?;
+            if escrow.standing() != ReaderKeyEscrowStanding::Valid {
+                return Err(TrustError::EscrowInactive);
+            }
+            Ok(ReaderKeyEscrowAdmission::Escrow(escrow.uniqueness_key()))
+        }
+        DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(_) => {
+            let authorization =
+                verify_recovery_for_admission(trust, head, exact_object_bytes, now)?;
+            Ok(ReaderKeyEscrowAdmission::RecoveryAuthorization {
+                escrow_object_hash: authorization.escrow().object_hash(),
+            })
+        }
+        _ => Err(TrustError::ActionMismatch),
+    }
 }
