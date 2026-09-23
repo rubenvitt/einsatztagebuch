@@ -23,6 +23,12 @@ pub enum TrustError {
     StateConflict,
     StateMonotonicity,
     StateUnavailable,
+    /// Das Escrow nennt nicht den Registry-Zustand, in dem sein
+    /// Reader-Zertifikat aktiv wurde, oder Reader- bzw. Recovery-Zertifikat
+    /// tragen nicht, was das Profil verlangt (v1.1-Profil §3.1).
+    EscrowEnrollmentMismatch,
+    /// Das Escrow ist voll geprüft, gilt aber für den gewählten Kopf nicht.
+    EscrowInactive,
 }
 
 impl TrustError {
@@ -50,6 +56,8 @@ impl TrustError {
             Self::StateConflict => "EA-TRUST-STATE-CONFLICT",
             Self::StateMonotonicity => "EA-TRUST-STATE-MONOTONICITY",
             Self::StateUnavailable => "EA-TRUST-STATE-UNAVAILABLE",
+            Self::EscrowEnrollmentMismatch => "EA-TRUST-ESCROW-ENROLLMENT-MISMATCH",
+            Self::EscrowInactive => "EA-TRUST-ESCROW-INACTIVE",
         }
     }
 }

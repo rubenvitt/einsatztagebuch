@@ -538,8 +538,11 @@ pub use grant_authorization::{
     verify_archived_grant_authorization, verify_grant_authorization,
 };
 pub use reader_key_escrow::{
-    VerifiedReaderKeyEscrowApproval, consume_reader_key_escrow_approval,
-    verify_reader_key_escrow_approval,
+    ReaderKeyEscrowHead, ReaderKeyEscrowStanding, ReaderKeyEscrowUniquenessKey,
+    VerifiedReaderKeyEscrow, VerifiedReaderKeyEscrowApproval, VerifiedReaderKeyEscrowIntent,
+    VerifiedReaderKeyEscrowSet, consume_reader_key_escrow_approval,
+    verify_intended_reader_key_escrow, verify_reader_key_escrow_approval,
+    verify_reader_key_escrows, verify_signed_reader_key_escrow,
 };
 pub use registry::{
     AdvancedRegistryHead, PendingFutureSuccessor, PreexistingEffectiveNow,

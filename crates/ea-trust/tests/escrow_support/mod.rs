@@ -95,6 +95,9 @@ pub struct EscrowLine {
     pub recovery: CertificateHash,
     pub approvers: Vec<CertificateHash>,
     pub reader: Enrollment,
+    /// Ein Reader-Zertifikat, das den KEM des Recovery-Empfängers trägt —
+    /// nur mit [`EscrowLineOptions::decoy_reader_with_recovery_kem`].
+    pub decoy: Option<CertificateHash>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -104,6 +107,9 @@ pub struct EscrowLineOptions {
     pub same_approver_person: bool,
     /// Der erste Key Approver trägt kein `historicalGrantApprove`.
     pub approver_without_capability: bool,
+    /// Vor dem Reader wird ein zweites Reader-Zertifikat mit dem KEM des
+    /// Recovery-Empfängers aktiviert: gleicher Abdruck, falsche Art.
+    pub decoy_reader_with_recovery_kem: bool,
 }
 
 pub fn escrow_line(options: EscrowLineOptions) -> EscrowLine {
@@ -138,12 +144,16 @@ pub fn escrow_line(options: EscrowLineOptions) -> EscrowLine {
         );
         approvers.push(certificate_of(head.direct_object_hash.unwrap()));
     }
+    let decoy = options
+        .decoy_reader_with_recovery_kem
+        .then(|| push_reader(&mut line, 0x8f, RECOVERY_KEM_SEED).certificate);
     let reader = push_reader(&mut line, 0x81, READER_KEM_SEED);
     EscrowLine {
         line,
         recovery: certificate_of(recovery.direct_object_hash.unwrap()),
         approvers,
         reader,
+        decoy,
     }
 }
 
