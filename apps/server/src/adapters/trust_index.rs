@@ -4,11 +4,12 @@
 //! sind, sagt ausschliesslich die geteilte Pruefung aus `ea-trust`, und was
 //! ausgeliefert wird, holt der Dienst als exakte Bytes aus dem Object Store.
 //!
-//! Die Aufnahme laeuft in EINER Transaktion ueber drei Tabellen —
-//! `object_index`, `trust_events` und, fuer ein `registryEvent`,
-//! `registry_events`. Bricht eine der drei, bricht die ganze Aufnahme: ein
-//! halb indiziertes Trust-Ereignis waere eine Registry-Linie mit einem Loch,
-//! und ein Reader liefe darueber in eine falsche Kopfauswahl.
+//! Die Aufnahme laeuft in EINER Transaktion ueber `object_index`,
+//! `trust_events` und, fuer ein `registryEvent`, `registry_events` — fuer ein
+//! `readerKeyEscrow` zusaetzlich `reader_key_escrows`. Bricht eine davon,
+//! bricht die ganze Aufnahme: ein halb indiziertes Trust-Ereignis waere eine
+//! Registry-Linie mit einem Loch, und ein Reader liefe darueber in eine
+//! falsche Kopfauswahl.
 
 use async_trait::async_trait;
 use ea_format::ObjectTypeV1;
@@ -137,6 +138,41 @@ impl TrustEventStore for PostgresRepository {
                 // zurueck — auch der Objektindex und `trust_events`.
                 transaction.rollback().await.map_err(|e| unavailable(&e))?;
                 return Ok(TrustIndexOutcome::Conflict);
+            }
+        }
+
+        if let Some(escrow) = event.reader_key_escrow {
+            let inserted = sqlx::query(
+                "INSERT INTO reader_key_escrows (object_hash, organization_id, \
+                 reader_certificate_object_hash, reader_subject_id) VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (organization_id, reader_certificate_object_hash) DO NOTHING",
+            )
+            .bind(&event.object_hash.as_bytes()[..])
+            .bind(&event.organization_id.as_bytes()[..])
+            .bind(&escrow.reader_certificate_object_hash.as_bytes()[..])
+            .bind(&escrow.reader_subject_id.as_bytes()[..])
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| unavailable(&e))?;
+            if inserted.rows_affected() != 1 {
+                // Dieselben Bytes (nach einer Katalogreparatur, die
+                // `trust_events` geleert hat) duerfen wieder hinein. Liegt zu
+                // diesem Reader-Zertifikat dagegen ein ANDERES Escrow, ist das
+                // ein Konflikt und kein Ausfall: kein sqlx-Fehler, der zu
+                // einem endlos wiederholbaren 503 wuerde.
+                let recorded: Vec<u8> = sqlx::query_scalar(
+                    "SELECT object_hash FROM reader_key_escrows WHERE organization_id = $1 \
+                     AND reader_certificate_object_hash = $2",
+                )
+                .bind(&event.organization_id.as_bytes()[..])
+                .bind(&escrow.reader_certificate_object_hash.as_bytes()[..])
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|e| unavailable(&e))?;
+                if recorded.as_slice() != event.object_hash.as_bytes().as_slice() {
+                    transaction.rollback().await.map_err(|e| unavailable(&e))?;
+                    return Ok(TrustIndexOutcome::Conflict);
+                }
             }
         }
 

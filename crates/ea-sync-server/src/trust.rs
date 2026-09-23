@@ -43,7 +43,9 @@ use ea_types::{ObjectHash, OrganizationId, RegistryVersion, UnixMillis};
 
 use crate::{
     RepositoryError, ServerClock, StoreError,
-    models::{TrustEventCommandV1, TrustIndexOutcome, ValidatedTrustEventV1},
+    models::{
+        ReaderKeyEscrowIndexV1, TrustEventCommandV1, TrustIndexOutcome, ValidatedTrustEventV1,
+    },
     ports::{ObjectStore, TrustEventStore},
 };
 
@@ -367,6 +369,7 @@ pub async fn publish_trust_event(
             effective_from: effective_from(&payload).unwrap_or(now),
             received_at: now,
             catalog_fence: validated.catalog_fence,
+            reader_key_escrow: reader_key_escrow_index_of(&payload),
         })
         .await?;
     match outcome {
@@ -442,6 +445,18 @@ fn registry_version_of(payload: &DecodedTrustPayloadV1) -> Option<RegistryVersio
         | DecodedTrustPayloadV1::ReaderKeyEscrow(_)
         | DecodedTrustPayloadV1::ReaderKeyEscrowApproval(_)
         | DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(_) => None,
+    }
+}
+
+/// Die Indexfelder eines `readerKeyEscrow`, gelesen aus seinem Core — erst
+/// NACH der geteilten Prüfung verwendet, also aus geprüften Feldern.
+fn reader_key_escrow_index_of(payload: &DecodedTrustPayloadV1) -> Option<ReaderKeyEscrowIndexV1> {
+    match payload {
+        DecodedTrustPayloadV1::ReaderKeyEscrow(escrow) => Some(ReaderKeyEscrowIndexV1 {
+            reader_certificate_object_hash: escrow.core().reader_certificate_object_hash,
+            reader_subject_id: escrow.core().reader_subject_id,
+        }),
+        _ => None,
     }
 }
 
