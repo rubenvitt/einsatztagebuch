@@ -45,11 +45,14 @@ use ea_crypto::{
     operator_profile_digest, parse_cose_sign1, payload_aad, reader_key_escrow_core_hash,
     receipt_digest, record_digest, recovery_test_digest, renewal_input_digest, trust_anchor_hash,
     trust_digest, validate_unsigned_protocol_core, verification_report_hash,
+    verify_reader_key_escrow_trust_signature,
 };
 use ea_format::{
     DecodedEvidencePayloadV1, DecodedTrustPayloadV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1,
-    GrantPurposeV1, GrantV1, ParsedArchiveObject, ReceiptV1, Rfc3161EvidenceFieldsV1,
-    TrustSubtypeV1, decode_exact_object, decode_local_audit_event,
+    GrantPurposeV1, GrantV1, ParsedArchiveObject, READER_KEY_ESCROW_RESTORE_SUITE_ID,
+    READER_KEY_ESCROW_SUITE_ID, ReaderKeyEscrowHpkeContextV1, ReaderKeyEscrowRestoreContextV1,
+    ReceiptV1, Rfc3161EvidenceFieldsV1, TrustSubtypeV1, decode_exact_object,
+    decode_local_audit_event,
 };
 use ea_schema::{CommonHeaderV1, NativeSourceV1, OperatorSnapshotV1, SchemaRegistry};
 use ea_system_tests::workspace_root;
@@ -4463,4 +4466,581 @@ fn check_web_bundle_binding(entries: &[VectorEntry]) {
         "the revocation must bind the object hash of the frozen release"
     );
     assert_eq!(fields.effective_from_registry_version.get(), 7);
+}
+
+// ---------------------------------------------------------------------------
+// reader-key-escrow/v1, reader-key-escrow-approval/v1,
+// reader-key-escrow-recovery/v1
+// ---------------------------------------------------------------------------
+//
+// Die drei Familien des Reader-Key-Escrows (v1.1-Profil §9, Entscheidung 11),
+// NEBEN `vectors/trust/v1/`. Auch hier wird nichts gegen sich selbst
+// verglichen: die Objekte laufen durch `decode_exact_object`, die
+// Wurzelsignatur des Escrows durch `verify_reader_key_escrow_trust_signature`,
+// die Kontexte werden aus den dekodierten Kernen NEU abgeleitet, und die beiden
+// eingefrorenen Kapselungen öffnen über `hpke_open`.
+
+/// Die Wurzel der Escrow-Familie.
+const READER_KEY_ESCROW_VECTOR_ROOT: &str = "vectors/reader-key-escrow/v1";
+
+/// Die Wurzel der Freigabefamilie.
+const READER_KEY_ESCROW_APPROVAL_VECTOR_ROOT: &str = "vectors/reader-key-escrow-approval/v1";
+
+/// Die Wurzel der Öffnungsfamilie.
+const READER_KEY_ESCROW_RECOVERY_VECTOR_ROOT: &str = "vectors/reader-key-escrow-recovery/v1";
+
+/// Die Einträge, mit denen DRK-318 die Escrow-Familie einfriert — Name UND
+/// `fileSha256`, nach dem Vorbild [`STAGE_THREE_WEB_BUNDLE_ENTRIES`]. Ab hier
+/// werden sie nicht neu erzeugt; eine Verhaltensänderung legt `v2/` daneben.
+const DRK_318_READER_KEY_ESCROW_ENTRIES: [(&str, &str); 14] = [
+    (
+        "context/hpke-aad",
+        "501ede349f5db986ed9b2e4cfaa2cfbfc51fe413b1e19ad03feaa5a4770262ad",
+    ),
+    (
+        "context/hpke-info",
+        "145724c321060c8aacba56bb6471b67f2395436d8cd4ced87c5a1435e8f613fa",
+    ),
+    (
+        "hpke/accepted-escrow-opens",
+        "2c212b64ed5de859b51792db3afdecab741d5f4273820c06d712174e55a43b1a",
+    ),
+    (
+        "hpke/rejected-escrow-with-changed-subject",
+        "2c212b64ed5de859b51792db3afdecab741d5f4273820c06d712174e55a43b1a",
+    ),
+    (
+        "object/accepted-escrow",
+        "1ccd8f9334c96a48cbe0854e6425380dd559af70d55df89ce0f947f56c7ef593",
+    ),
+    (
+        "object/rejected-escrow-core-with-fifteen-elements",
+        "6310bc748878e18fe545d48420e2f80d58fe106369e8842ab5a09b6f77e8320a",
+    ),
+    (
+        "object/rejected-escrow-core-without-extension-array",
+        "e77982d6b4edac04a7c4e308abe7f6b3eaff4ae38d24feab38b6c7936aaffc63",
+    ),
+    (
+        "object/rejected-escrow-encrypted-key-short",
+        "a8f49b3b154b2a50e220b0855bd5fb29ae77fa23d41508983098a6814f3b0d77",
+    ),
+    (
+        "object/rejected-escrow-payload-with-three-elements",
+        "e186894660804aab6be2e1b708bcdfcb580a4889d1865e5e9c4f8f7d71b8921d",
+    ),
+    (
+        "object/rejected-escrow-signature-over-neighbour-subtype",
+        "92e32f42397d28d035ee1a89186dba85ac80e32fce933f08898bf6e377d88128",
+    ),
+    (
+        "object/rejected-escrow-with-two-signatures",
+        "21817166b5ad5e49ed1784673f97cfc098cbfb8040084ae989ac322f1294e2e9",
+    ),
+    (
+        "object/rejected-escrow-without-signature",
+        "4dd1ba13994668f40fcefd8d0f5bb2567eef063a3ce46e53479760f2225d2c50",
+    ),
+    (
+        "suite/escrow-suite-identifier",
+        "8554621b96fad9268d0011b2adad6f75bcd56300158aa14600b338985a4b5d08",
+    ),
+    (
+        "suite/restore-suite-identifier",
+        "e39417c67ffde04875a42233e2caee8142f588e65edaaa9be2d84805d89627ea",
+    ),
+];
+
+/// Die eingefrorenen Einträge der Freigabefamilie.
+const DRK_318_READER_KEY_ESCROW_APPROVAL_ENTRIES: [(&str, &str); 10] = [
+    (
+        "object/accepted-approval",
+        "ed7b77de300a0f2937031c51381cbe0baa3bae2b0ed716525eb945a566273f87",
+    ),
+    (
+        "object/accepted-approval-lifetime-at-limit",
+        "1999de8308faa0d5cd0ae7ab1172515968a7163f4e95854694bab08a62fb5915",
+    ),
+    (
+        "object/rejected-approval-core-with-fifteen-elements",
+        "c19882b238c51d04e84e6e72d766e378bbb3ad978272bbbcadb95da558290e45",
+    ),
+    (
+        "object/rejected-approval-core-with-seventeen-elements",
+        "da18f7d5839256bec8ef8ec6ebe94c1e3abf94ea3f22507a18918a67c40e05e6",
+    ),
+    (
+        "object/rejected-approval-escrow-core-hash-short",
+        "030ca5c957487f446780a66e81c1a397abb3f331d03a1903443fad46023dedc9",
+    ),
+    (
+        "object/rejected-approval-expires-before-issued",
+        "ff018f1a49d89cacf585a0b71862d37a49d05736a3f8a632e162d42632785c68",
+    ),
+    (
+        "object/rejected-approval-lifetime-over-limit",
+        "c2eda375c478febcfd355435b980ccbd49867f0ecff731a1bfd49dd2d2d4c007",
+    ),
+    (
+        "object/rejected-approval-signature-over-neighbour-subtype",
+        "16edef43e7f2338ff8f9071b34ada0097c088579b92e10c2d9ff90cedff3cb10",
+    ),
+    (
+        "object/rejected-approval-with-two-signatures",
+        "70f42160dfaecdf30f32dc36deb99bca1547f0aeb20ea74577cf3f567cc74d09",
+    ),
+    (
+        "object/rejected-approval-without-signature",
+        "ecdc0f3bc73858a291d740396a1b0fefb93f2c0f51352efaa178bade86d4ac99",
+    ),
+];
+
+/// Die eingefrorenen Einträge der Öffnungsfamilie.
+const DRK_318_READER_KEY_ESCROW_RECOVERY_ENTRIES: [(&str, &str); 10] = [
+    (
+        "context/restore-hpke-aad",
+        "46ba5752034cceb22a92dfcccdd77bb954567ee6a51fdabc365cc6321d50ad4b",
+    ),
+    (
+        "context/restore-hpke-info",
+        "6c1e2c0be7217959c20beb6a78a85c3382b863dae9c22367ef8a96a85a9e751b",
+    ),
+    (
+        "hpke/accepted-restore-opens",
+        "554bfc715b39f7c2f0c683ae77b05c9038e1dcdd4e4aff0a13f7f299b6d4f981",
+    ),
+    (
+        "hpke/rejected-restore-with-changed-transport-key",
+        "554bfc715b39f7c2f0c683ae77b05c9038e1dcdd4e4aff0a13f7f299b6d4f981",
+    ),
+    (
+        "object/accepted-recovery-authorization",
+        "d0d5dc4685887da423f13f3d09821f15bde01035697e76a62d040b8d0a16b578",
+    ),
+    (
+        "object/rejected-recovery-authorization-core-with-sixteen-elements",
+        "6e7cd9386427857d4aac265c61e143b0b56211c1ab7d9934fd9a69567c737fb2",
+    ),
+    (
+        "object/rejected-recovery-authorization-lifetime-over-limit",
+        "b99910d2b592143c3e24d8f0a8b3aba7fae1294b3bd0ff27dbf568261e966f1b",
+    ),
+    (
+        "object/rejected-recovery-authorization-purpose-one",
+        "123c49491cfc6eab4da162e9f4524e27de815b96b11ff51eb74a5eb9a995ad55",
+    ),
+    (
+        "object/rejected-recovery-authorization-signature-over-neighbour-subtype",
+        "d89bbc67729d1d29e70e818c6534d1159e048566e98bb715fe10d23638bb80c4",
+    ),
+    (
+        "object/rejected-recovery-authorization-with-one-signature",
+        "892c9d4d0dcd6082ea5a76c96fd75d05a54d622b726e38e967d68a9f9b75a0b2",
+    ),
+];
+
+/// Die Einträge, die eine SPÄTERE Scheibe additiv hinzufügt — ausgeschrieben
+/// und LEER, damit ein stiller Zugang hinter derselben Summe auffällt.
+const LATER_READER_KEY_ESCROW_ADDITIONS: [&str; 0] = [];
+
+/// Liest ein Manifest, prüft es gegen seine Platte und gibt Text und Manifest
+/// zurück.
+fn reader_key_escrow_family(root: &str, family: &str) -> (String, VectorManifest) {
+    let workspace = workspace_root();
+    let path = workspace.join(root).join("manifest.json");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let manifest = VectorManifest::from_json(&text)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+    assert_eq!(manifest.family, family);
+    assert_eq!(manifest.version, "v1");
+    let report = verify_manifest_at(&workspace.join(root))
+        .unwrap_or_else(|error| panic!("failed to verify {root}: {error}"));
+    assert_eq!(report.entries_checked, manifest.entries.len());
+    assert!(
+        report.is_clean(),
+        "{root}: the frozen files contradict their manifest: {:?}",
+        report.mismatches
+    );
+    // Die Vektorhygiene, die die eigenen Familien begründet.
+    assert!(
+        !text.contains("readerKeyEscrow"),
+        "{root}: the subtype literals live in the hex recorded object bytes only"
+    );
+    (text, manifest)
+}
+
+/// Hält fest, dass die eingefrorenen Einträge der drei Familien UNVERÄNDERT
+/// sind und nichts still dazukam.
+#[test]
+fn the_reader_key_escrow_vector_families_are_frozen_and_nothing_was_added() {
+    for (root, family, frozen) in [
+        (
+            READER_KEY_ESCROW_VECTOR_ROOT,
+            "reader-key-escrow",
+            DRK_318_READER_KEY_ESCROW_ENTRIES.as_slice(),
+        ),
+        (
+            READER_KEY_ESCROW_APPROVAL_VECTOR_ROOT,
+            "reader-key-escrow-approval",
+            DRK_318_READER_KEY_ESCROW_APPROVAL_ENTRIES.as_slice(),
+        ),
+        (
+            READER_KEY_ESCROW_RECOVERY_VECTOR_ROOT,
+            "reader-key-escrow-recovery",
+            DRK_318_READER_KEY_ESCROW_RECOVERY_ENTRIES.as_slice(),
+        ),
+    ] {
+        let (_, manifest) = reader_key_escrow_family(root, family);
+        let present = manifest
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.file_sha256()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            present.len(),
+            manifest.entries.len(),
+            "{root}: unique names"
+        );
+        assert!(!frozen.is_empty(), "{root}: the frozen table is filled");
+        for (name, digest) in frozen {
+            let recorded = present
+                .get(name)
+                .unwrap_or_else(|| panic!("{root}: the frozen vector {name} is missing"));
+            assert_eq!(
+                recorded, digest,
+                "{root}: the frozen vector {name} changed its bytes"
+            );
+        }
+        let frozen_names = frozen
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<BTreeSet<_>>();
+        let added = present
+            .keys()
+            .copied()
+            .filter(|name| !frozen_names.contains(name))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            added,
+            LATER_READER_KEY_ESCROW_ADDITIONS.into_iter().collect(),
+            "{root}: beyond its frozen entries the family carries nothing"
+        );
+    }
+}
+
+/// Ein Objektvektor gegen den ECHTEN Codec: angenommen mit Subtyp,
+/// Signaturzahl und nachgerechnetem Trust-Digest, abgelehnt mit genau seinem
+/// Code. Gibt die dekodierte Nutzlast der angenommenen Vektoren zurück.
+fn check_reader_key_escrow_object(
+    vector: &VectorEntry,
+    subtype: TrustSubtypeV1,
+    signatures: usize,
+) -> Option<DecodedTrustPayloadV1> {
+    assert_eq!(vector.schema_id, "etb-v1", "{}", vector.name);
+    match &vector.expected_outcome {
+        ExpectedOutcome::Accepted => {
+            let ParsedArchiveObject::Trust(parsed) = decode_exact_object(&vector.object_bytes)
+                .unwrap_or_else(|error| panic!("{} must parse: {}", vector.name, error.code()))
+            else {
+                panic!("{} is a trust object", vector.name)
+            };
+            let object = parsed.value();
+            assert_eq!(object.subtype(), subtype, "{}", vector.name);
+            assert_eq!(object.signatures().len(), signatures, "{}", vector.name);
+            assert_eq!(
+                intermediate(vector, "trust-digest"),
+                hex::encode(trust_digest(object.exact_digest_input()).as_bytes()),
+                "{} must record the trust digest it actually binds",
+                vector.name
+            );
+            Some(object.decoded_payload().unwrap())
+        }
+        ExpectedOutcome::Rejected { error_code } => {
+            let measured = decode_exact_object(&vector.object_bytes)
+                .err()
+                .unwrap_or_else(|| panic!("{} must be rejected", vector.name))
+                .code();
+            assert_eq!(measured, error_code, "{}", vector.name);
+            None
+        }
+    }
+}
+
+/// Öffnet eine eingefrorene Kapselung unter einem Kontext in der Hausform.
+fn open_under(
+    recipient_seed: [u8; 32],
+    sealed: &[u8],
+    context: &[u8],
+) -> Result<SecretBytes<32>, ea_crypto::CryptoError> {
+    let recipient = HpkeRecipientPrivateKey::from_bytes(SecretBytes::new(recipient_seed))
+        .expect("a declared X25519 seed loads");
+    hpke_open(
+        &recipient,
+        &hpke_sealed(sealed),
+        &hpke_info(context),
+        &hpke_aad(context),
+    )
+}
+
+/// Führt jeden Vektor der drei Familien gegen Codec, Wurzelprüfung und HPKE
+/// aus und prüft die Bindungen ZWISCHEN den Familien.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn reader_key_escrow_vectors_execute_against_the_real_codec_and_bind_each_other() {
+    let (_, escrow_manifest) =
+        reader_key_escrow_family(READER_KEY_ESCROW_VECTOR_ROOT, "reader-key-escrow");
+    let (_, approval_manifest) = reader_key_escrow_family(
+        READER_KEY_ESCROW_APPROVAL_VECTOR_ROOT,
+        "reader-key-escrow-approval",
+    );
+    let (_, recovery_manifest) = reader_key_escrow_family(
+        READER_KEY_ESCROW_RECOVERY_VECTOR_ROOT,
+        "reader-key-escrow-recovery",
+    );
+
+    // Die Freigabefamilie: nur Objekte.
+    let mut approval = None;
+    for vector in &approval_manifest.entries {
+        let decoded =
+            check_reader_key_escrow_object(vector, TrustSubtypeV1::ReaderKeyEscrowApproval, 1);
+        if vector.name == "object/accepted-approval" {
+            approval = decoded;
+        }
+    }
+    let Some(DecodedTrustPayloadV1::ReaderKeyEscrowApproval(approval)) = approval else {
+        panic!("the accepted approval decodes into its own variant")
+    };
+    let approval_bytes =
+        &entry(&approval_manifest.entries, "object/accepted-approval").object_bytes;
+
+    // Die Escrow-Familie.
+    let accepted_escrow = entry(&escrow_manifest.entries, "object/accepted-escrow");
+    let Some(DecodedTrustPayloadV1::ReaderKeyEscrow(escrow)) =
+        check_reader_key_escrow_object(accepted_escrow, TrustSubtypeV1::ReaderKeyEscrow, 1)
+    else {
+        panic!("the accepted escrow decodes into its own variant")
+    };
+    let ParsedArchiveObject::Trust(escrow_object) =
+        decode_exact_object(&accepted_escrow.object_bytes).unwrap()
+    else {
+        panic!("the escrow is a trust object")
+    };
+    let escrow_object = escrow_object.value();
+    // Die EINE Wurzelsignatur, kryptografisch gegen die Testwurzel.
+    let root = CanonicalPublicCoseKey::ed25519(
+        SigningKey::from_bytes(&ea_testkit::TEST_ENTROPY_ROOT_ED25519_SEED)
+            .verifying_key()
+            .to_bytes(),
+    )
+    .unwrap();
+    let signature = &escrow_object.signatures()[0];
+    let certificate_hash = parse_cose_sign1(signature, &[])
+        .unwrap()
+        .certificate_hash()
+        .unwrap();
+    verify_reader_key_escrow_trust_signature(
+        signature,
+        &root,
+        certificate_hash,
+        escrow_object.exact_digest_input(),
+    )
+    .expect("the accepted escrow carries a valid root signature");
+    let escrow_core_hash = reader_key_escrow_core_hash(escrow.exact_core());
+    assert_eq!(
+        intermediate(accepted_escrow, "escrow-core-hash"),
+        hex::encode(escrow_core_hash.as_bytes())
+    );
+    let hpke_context = ReaderKeyEscrowHpkeContextV1::from_escrow_core(escrow.core()).encode();
+    let mut sealed = escrow.core().encapsulated_key.to_vec();
+    sealed.extend_from_slice(&escrow.core().encrypted_reader_kem_key);
+
+    for vector in &escrow_manifest.entries {
+        match vector.schema_id.as_str() {
+            "etb-v1" => {
+                check_reader_key_escrow_object(vector, TrustSubtypeV1::ReaderKeyEscrow, 1);
+            }
+            "reader-key-escrow-hpke-context-v1" => {
+                expect_accepted(vector);
+                assert_eq!(vector.input_bytes, hpke_context, "{}", vector.name);
+                let expected = match vector.name.as_str() {
+                    "context/hpke-info" => hpke_info(&hpke_context),
+                    "context/hpke-aad" => hpke_aad(&hpke_context),
+                    other => panic!("unknown context vector {other}"),
+                };
+                assert_eq!(vector.object_bytes, expected, "{}", vector.name);
+            }
+            "reader-key-escrow-suite-id-v1" => {
+                expect_accepted(vector);
+                let expected = match vector.name.as_str() {
+                    "suite/escrow-suite-identifier" => READER_KEY_ESCROW_SUITE_ID,
+                    "suite/restore-suite-identifier" => READER_KEY_ESCROW_RESTORE_SUITE_ID,
+                    other => panic!("unknown suite vector {other}"),
+                };
+                assert_eq!(vector.object_bytes, expected.as_bytes(), "{}", vector.name);
+            }
+            "reader-key-escrow-hpke-sealed-v1" => {
+                assert_eq!(
+                    vector.source,
+                    VectorSource::FrozenOnce {
+                        verified_via: "hpke_open".to_owned(),
+                    }
+                );
+                assert_eq!(vector.object_bytes, sealed, "{}", vector.name);
+                match &vector.expected_outcome {
+                    ExpectedOutcome::Accepted => {
+                        let opened = open_under(
+                            TEST_ENTROPY_RECIPIENT_X25519_SEED,
+                            &vector.object_bytes,
+                            &hpke_context,
+                        )
+                        .expect("the frozen escrow opens under its derived context");
+                        assert!(opened.matches(&array32(&vector.input_bytes, "reader KEM key")));
+                        assert_eq!(
+                            intermediate(vector, "recipientPublicKeyThumbprint"),
+                            hex::encode(escrow.core().recovery_kem_key_thumbprint.as_bytes())
+                        );
+                    }
+                    ExpectedOutcome::Rejected { error_code } => {
+                        assert_ne!(vector.input_bytes, hpke_context);
+                        let error = open_under(
+                            TEST_ENTROPY_RECIPIENT_X25519_SEED,
+                            &vector.object_bytes,
+                            &vector.input_bytes,
+                        )
+                        .err()
+                        .unwrap_or_else(|| panic!("{} must not open", vector.name));
+                        assert_eq!(error.code(), error_code, "{}", vector.name);
+                    }
+                }
+            }
+            other => panic!("{}: unknown schema {other}", vector.name),
+        }
+    }
+
+    // Die Öffnungsfamilie.
+    let accepted_recovery = entry(
+        &recovery_manifest.entries,
+        "object/accepted-recovery-authorization",
+    );
+    let Some(DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(recovery)) =
+        check_reader_key_escrow_object(
+            accepted_recovery,
+            TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization,
+            2,
+        )
+    else {
+        panic!("the accepted recovery authorization decodes into its own variant")
+    };
+    let restore_context = ReaderKeyEscrowRestoreContextV1::from_recovery_authorization(
+        &recovery,
+        object_hash(&accepted_recovery.object_bytes),
+    )
+    .encode();
+    let restore_sealed =
+        &entry(&recovery_manifest.entries, "hpke/accepted-restore-opens").object_bytes;
+    for vector in &recovery_manifest.entries {
+        match vector.schema_id.as_str() {
+            "etb-v1" => {
+                check_reader_key_escrow_object(
+                    vector,
+                    TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization,
+                    2,
+                );
+            }
+            "reader-key-escrow-restore-context-v1" => {
+                expect_accepted(vector);
+                assert_eq!(vector.input_bytes, restore_context, "{}", vector.name);
+                let expected = match vector.name.as_str() {
+                    "context/restore-hpke-info" => hpke_info(&restore_context),
+                    "context/restore-hpke-aad" => hpke_aad(&restore_context),
+                    other => panic!("unknown context vector {other}"),
+                };
+                assert_eq!(vector.object_bytes, expected, "{}", vector.name);
+            }
+            "reader-key-escrow-hpke-sealed-v1" => {
+                assert_eq!(&vector.object_bytes, restore_sealed, "{}", vector.name);
+                match &vector.expected_outcome {
+                    ExpectedOutcome::Accepted => {
+                        let opened = open_under(
+                            ea_testkit::READER_KEY_ESCROW_TRANSPORT_X25519_SEED,
+                            &vector.object_bytes,
+                            &restore_context,
+                        )
+                        .expect("the frozen restore answer opens under its derived context");
+                        assert!(opened.matches(&array32(&vector.input_bytes, "reader KEM key")));
+                        assert_eq!(
+                            intermediate(vector, "recipientPublicKeyThumbprint"),
+                            hex::encode(recovery.target_transport_key_thumbprint.as_bytes())
+                        );
+                    }
+                    ExpectedOutcome::Rejected { error_code } => {
+                        assert_ne!(vector.input_bytes, restore_context);
+                        let error = open_under(
+                            ea_testkit::READER_KEY_ESCROW_TRANSPORT_X25519_SEED,
+                            &vector.object_bytes,
+                            &vector.input_bytes,
+                        )
+                        .err()
+                        .unwrap_or_else(|| panic!("{} must not open", vector.name));
+                        assert_eq!(error.code(), error_code, "{}", vector.name);
+                    }
+                }
+            }
+            other => panic!("{}: unknown schema {other}", vector.name),
+        }
+    }
+
+    // Jedes Suite-Literal steht im CBOR seines Kontexts (Profil §4).
+    for (suite, context) in [
+        (READER_KEY_ESCROW_SUITE_ID, &hpke_context),
+        (READER_KEY_ESCROW_RESTORE_SUITE_ID, &restore_context),
+    ] {
+        assert!(
+            context
+                .windows(suite.len())
+                .any(|window| window == suite.as_bytes()),
+            "the suite literal {suite} lives in the CBOR of its context"
+        );
+    }
+
+    // Die Bindungen zwischen den Familien, in Bauordnung.
+    assert!(
+        approval.escrow_core_hash == escrow_core_hash,
+        "the approval binds the hash of the exact escrow core"
+    );
+    assert!(
+        escrow.approval_object_hash() == object_hash(approval_bytes),
+        "the escrow binds the object hash of the approval"
+    );
+    assert!(
+        recovery.escrow_object_hash == object_hash(&accepted_escrow.object_bytes),
+        "the recovery authorization binds the object hash of the escrow"
+    );
+    for (label, equal) in [
+        (
+            "organization",
+            approval.organization_id == escrow.core().organization_id
+                && recovery.organization_id == escrow.core().organization_id,
+        ),
+        (
+            "reader certificate",
+            approval.reader_certificate_object_hash == escrow.core().reader_certificate_object_hash
+                && recovery.reader_certificate_object_hash
+                    == escrow.core().reader_certificate_object_hash,
+        ),
+        (
+            "reader subject",
+            approval.reader_subject_id == escrow.core().reader_subject_id
+                && recovery.reader_subject_id == escrow.core().reader_subject_id,
+        ),
+        (
+            "enrollment registry",
+            recovery.enrollment_registry_version == escrow.core().enrollment_registry_version
+                && recovery.enrollment_registry_head_hash
+                    == escrow.core().enrollment_registry_head_hash,
+        ),
+    ] {
+        assert!(equal, "the three families agree on the {label}");
+    }
 }

@@ -109,6 +109,18 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+mod reader_key_escrow;
+
+pub use reader_key_escrow::{
+    READER_KEY_ESCROW_APPROVAL_FAMILY, READER_KEY_ESCROW_APPROVAL_V1_ROOT,
+    READER_KEY_ESCROW_FAMILY, READER_KEY_ESCROW_FIRST_APPROVER_ED25519_SEED,
+    READER_KEY_ESCROW_READER_KEM_X25519_SEED, READER_KEY_ESCROW_RECOVERY_FAMILY,
+    READER_KEY_ESCROW_RECOVERY_V1_ROOT, READER_KEY_ESCROW_SECOND_APPROVER_ED25519_SEED,
+    READER_KEY_ESCROW_TRANSPORT_X25519_SEED, READER_KEY_ESCROW_V1_ROOT,
+    READER_KEY_ESCROW_V1_VERSION, reader_key_escrow_approval_v1_manifest,
+    reader_key_escrow_recovery_v1_manifest, reader_key_escrow_v1_manifest,
+};
+
 // ---------------------------------------------------------------------------
 // Schluesselmaterial
 // ---------------------------------------------------------------------------
