@@ -789,3 +789,71 @@ async fn a_writer_cannot_acknowledge_reading() {
 
     database.cleanup().await;
 }
+
+/// Profil §11 „Replikation“: jede Escrow-Familie wird über
+/// `GET /v1/objects/{objectHash}` byte-gleich ausgeliefert, steht aber NICHT
+/// auf der Registry-Linie — dort steht nur, was eine Registry-Version trägt.
+#[tokio::test]
+async fn the_escrow_families_replicate_byte_exact_but_stay_off_the_registry_line() {
+    let database = common::fresh_database().await;
+    let ready = common::stand_up_escrow_server(&database).await;
+    let family = common::publish_escrow_family(&database, &ready).await;
+
+    for (index, (name, bytes)) in family.iter().enumerate() {
+        let hash = ea_crypto::object_hash(bytes);
+        let target = object_path(hash);
+        let response = common::call(&common::ApiCall {
+            ready: &ready,
+            signer_seed: trust_closure::READER_SIGNING_SEED,
+            endpoint: EndpointV1::Objects,
+            target: &target,
+            body: None,
+            request_id: [0x71 + u8::try_from(index).expect("three objects"); 16],
+        })
+        .await;
+        assert_eq!(
+            response.status,
+            200,
+            "{name} must be delivered; the server answered {:?}",
+            common::error_code(&response.body)
+        );
+        assert_eq!(response.header("content-type"), Some(OBJECT_MEDIA_TYPE_V1));
+        assert_eq!(&response.body, bytes, "{name} leaves the server byte-exact");
+    }
+
+    let target = format!(
+        "{}?afterVersion=0",
+        EndpointV1::TrustRegistry.path_template()
+    );
+    let response = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::READER_SIGNING_SEED,
+        endpoint: EndpointV1::TrustRegistry,
+        target: &target,
+        body: None,
+        request_id: [0x7a; 16],
+    })
+    .await;
+    assert_eq!(
+        response.status,
+        200,
+        "{:?}",
+        common::error_code(&response.body)
+    );
+    let line = ea_sync_protocol::TrustRegistryResponseV1::decode(&response.body)
+        .expect("the registry line decodes");
+    assert!(
+        !line.events().is_empty(),
+        "the line carries the registry heads"
+    );
+    for (name, bytes) in &family {
+        assert!(
+            line.events()
+                .iter()
+                .all(|event| event.exact_etb_bytes() != bytes.as_slice()),
+            "{name} carries no registry version and stays off the registry line"
+        );
+    }
+
+    database.cleanup().await;
+}

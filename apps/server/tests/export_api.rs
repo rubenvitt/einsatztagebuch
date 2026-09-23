@@ -333,3 +333,59 @@ async fn an_authentic_export_cursor_resumes_where_it_points() {
 
     database.cleanup().await;
 }
+
+/// Profil §11 „Export“: der Archivexport trägt alle drei Escrow-Familien —
+/// im Manifest und im Strom, byte-gleich.
+#[tokio::test]
+async fn the_export_carries_the_escrow_families_byte_exact() {
+    let database = common::fresh_database().await;
+    let ready = common::stand_up_escrow_server(&database).await;
+    let family = common::publish_escrow_family(&database, &ready).await;
+
+    let inventory = server_inventory(database.pool(), ready.closure.organization_id).await;
+    let response = common::call(&common::ApiCall {
+        ready: &ready,
+        signer_seed: trust_closure::READER_SIGNING_SEED,
+        endpoint: EndpointV1::ArchiveExports,
+        target: EndpointV1::ArchiveExports.path_template(),
+        body: None,
+        request_id: [0xa7; 16],
+    })
+    .await;
+    assert_eq!(
+        response.status,
+        200,
+        "the export must be delivered; the server answered {:?}",
+        common::error_code(&response.body)
+    );
+    let total_object_bytes: usize = inventory
+        .iter()
+        .map(|(_, _, size)| usize::try_from(*size).expect("a stored size fits"))
+        .sum();
+    let (objects, manifest) = split_export(&response.body, total_object_bytes);
+
+    for (name, bytes) in &family {
+        let wanted = ea_crypto::object_hash(bytes);
+        let mut offset = 0_usize;
+        let mut found = false;
+        for record in manifest.sorted_objects() {
+            let length = usize::try_from(record.byte_length()).expect("an exported size fits");
+            if record.object_hash() == wanted {
+                assert!(
+                    record.object_type() == ObjectTypeV1::Trust,
+                    "{name} is a trust object"
+                );
+                assert_eq!(
+                    &objects[offset..offset + length],
+                    bytes.as_slice(),
+                    "{name} is exported byte-exact"
+                );
+                found = true;
+            }
+            offset += length;
+        }
+        assert!(found, "{name} is listed in the export manifest");
+    }
+
+    database.cleanup().await;
+}
