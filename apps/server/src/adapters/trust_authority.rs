@@ -62,10 +62,12 @@ use ea_sync_server::{
     trust::{TrustEventValidator, TrustPublishError, TrustServiceError},
 };
 use ea_trust::{
-    RegistryError, RegistrySelectionOutcome, SelectedRegistryHead, StateStoreError, TrustAnchorV1,
-    TrustError, TrustObjectSource, TrustSourceError, TrustStateKey, TrustStateStore, VerifiedTrust,
-    bootstrap_active_certificates, decode_trust_anchor, load_trust_state, prepare_local_time,
-    select_registry_head, verify_catalogue_admission, verify_registry_candidate, verify_trust,
+    ReaderKeyEscrowAdmission, RegistryError, RegistrySelectionOutcome, SelectedRegistryHead,
+    StateStoreError, TrustAnchorV1, TrustError, TrustObjectSource, TrustSourceError, TrustStateKey,
+    TrustStateStore, VerifiedTrust, bootstrap_active_certificates, decode_trust_anchor,
+    is_reader_key_escrow_family, load_trust_state, prepare_local_time,
+    reader_key_escrow_cutover_release, select_registry_head, verify_catalogue_admission,
+    verify_reader_key_escrow_family_admission, verify_registry_candidate, verify_trust,
 };
 use ea_types::{
     ChainSequence, DeviceId, KeyThumbprint, ObjectHash, OrganizationId, RegistryVersion, UnixMillis,
@@ -575,7 +577,16 @@ impl TrustEventValidator for PostgresTrustAuthority {
     ///    `prepare_local_time`, das `notBefore`/`notAfter`-Fenster. Wird ein
     ///    anderer Kopf gewaehlt, braucht der Aufrufer erst den — und der
     ///    Fehlerkoerper nennt ihn.
-    /// 2. Jedes andere `.etb` laeuft durch
+    /// 2. Die drei Reader-Key-Escrow-Familien laufen durch IHREN Einstieg,
+    ///    [`ea_trust::verify_reader_key_escrow_family_admission`] (Ruling U1):
+    ///    der Registrierungsabschluss bleibt fuer sie zu. Danach gilt die
+    ///    Cutover-Vorbedingung (v1.1-Profil §5) — siehe
+    ///    [`escrow_cutover_gate`]. Die Reihenfolge ist fest: erst die Freigabe,
+    ///    einzeln, dann das Escrow, das sie nennt, dann jede Oeffnung. Ein
+    ///    Escrow ohne angenommene Freigabe ist ungueltig. Die Freigabe muss
+    ///    innerhalb ihrer 300-s-Frist gegen die SERVERUHR hochgeladen werden;
+    ///    das Escrow selbst ist nicht an `now` gebunden.
+    /// 3. Jedes andere `.etb` laeuft durch
     ///    [`ea_trust::verify_catalogue_admission`]: Organisationsbindung,
     ///    die Signiererregel SEINER Objektart im aktuellen Abschluss, und sein
     ///    Zeitfenster. Aufnahme ist keine Autoritaet — sie legt das Objekt in
@@ -621,6 +632,18 @@ impl TrustEventValidator for PostgresTrustAuthority {
                 )),
                 None => Err(TrustServiceError::EventNotApplicable.into()),
             };
+        }
+
+        if subtype_of(exact_etb_bytes).is_some_and(is_reader_key_escrow_family) {
+            let admission = verify_reader_key_escrow_family_admission(
+                &trust,
+                head.as_ref(),
+                exact_etb_bytes,
+                now,
+            )
+            .map_err(|error| TrustPublishError::from(map_escrow_admission_error(error)))?;
+            return escrow_cutover_gate(&prepared, exact_etb_bytes, &admission)
+                .map_err(TrustPublishError::from);
         }
 
         verify_catalogue_admission(
@@ -907,6 +930,102 @@ const fn map_admission_error(error: TrustError) -> TrustServiceError {
     }
 }
 
+/// Die Befunde des Escrow-Einstiegs in der Sprache des Protokolls.
+///
+/// Jeder Arm ausdruecklich, damit ein spaeter ergaenzter Befund nicht still
+/// bei `EventInvalid` landet. Keine neuen Leitungscodes: die
+/// `EA-TRUST-ESCROW-*`-Codes des Kerns erscheinen nicht auf der Leitung.
+///
+/// - Konflikt zweier gueltiger Escrows: 409, wie jeder Bytekonflikt.
+/// - Traegt, gilt aber jetzt nicht (Reader widerrufen, Signierer nicht mehr
+///   aktiv, Frist): 422 NOT-VALID-NOW.
+/// - Kein Kopf oder fremde Organisation im Kern: 422 UNVERIFIABLE, wie beim
+///   Registrierungsabschluss.
+const fn map_escrow_admission_error(error: TrustError) -> TrustServiceError {
+    match error {
+        TrustError::EscrowConflict => TrustServiceError::Conflict,
+        TrustError::EscrowInactive
+        | TrustError::SignerInactive
+        | TrustError::AuthNotYetValid
+        | TrustError::AuthExpired => TrustServiceError::EventNotYetOrNoLongerValid,
+        TrustError::ActionMismatch => TrustServiceError::EventUnverifiable,
+        TrustError::StateConflict => TrustServiceError::StateConflict,
+        TrustError::StateUnavailable => TrustServiceError::DependencyUnavailable,
+        TrustError::Source
+        | TrustError::SourceCountLimit
+        | TrustError::SourceByteLimit
+        | TrustError::AnchorShape
+        | TrustError::AnchorHash
+        | TrustError::AnchorPin
+        | TrustError::BootstrapPair
+        | TrustError::Signature
+        | TrustError::SubjectMismatch
+        | TrustError::SelfAuthorization
+        | TrustError::AuthReplay
+        | TrustError::TimeSourceUnsupported
+        | TrustError::TimeOverflow
+        | TrustError::ClockReleaseReplay
+        | TrustError::StateMonotonicity
+        | TrustError::EscrowEnrollmentMismatch
+        | TrustError::ApproversInsufficient => TrustServiceError::EventInvalid,
+    }
+}
+
+/// Die Cutover-Vorbedingung des Reader-Key-Escrows (v1.1-Profil §5, §9).
+///
+/// Freigabe und Escrow werden nur angenommen, wenn der Katalog eine aktive,
+/// wurzelsignierte `webBundleRelease` einer v1.1-faehigen Fassung traegt, die
+/// zur Registry-Version der PUBLIKATION wirkt — der Version, an die die
+/// Publikationsfreigabe gebunden ist. Das Urteil faellt in
+/// [`ea_trust::reader_key_escrow_cutover_release`], derselben Funktion, die
+/// die native Zeremonie ruft; einen Serverschalter gibt es nicht. Eine
+/// Oeffnung braucht kein eigenes Tor: sie verlangt ein gueltiges Escrow im
+/// Katalog, und das kam nur durch diese Sperre hinein.
+///
+/// Solange keine Freigabe den Katalog erreicht — bis Scheibe (f) gibt es
+/// keinen Annahmeweg fuer `webBundleRelease` —, bleibt die Annahme zu:
+/// 422 NOT-VALID-NOW. `UNVERIFIABLE` hiesse, die geteilte Pruefung koenne
+/// ueber das Objekt nichts sagen; sie hat es aber geprueft.
+fn escrow_cutover_gate(
+    prepared: &PreparedClosure,
+    exact_etb_bytes: &[u8],
+    admission: &ReaderKeyEscrowAdmission,
+) -> Result<(), TrustServiceError> {
+    let approval_bytes: &[u8] = match admission {
+        ReaderKeyEscrowAdmission::Approval => exact_etb_bytes,
+        ReaderKeyEscrowAdmission::Escrow(_) => {
+            let Some(DecodedTrustPayloadV1::ReaderKeyEscrow(payload)) =
+                decoded_payload(exact_etb_bytes)
+            else {
+                return Err(TrustServiceError::EventInvalid);
+            };
+            prepared
+                .source
+                .0
+                .get(&payload.approval_object_hash())
+                .map(AsRef::as_ref)
+                .ok_or(TrustServiceError::EventInvalid)?
+        }
+        ReaderKeyEscrowAdmission::RecoveryAuthorization { .. } => return Ok(()),
+    };
+    let Some(DecodedTrustPayloadV1::ReaderKeyEscrowApproval(approval)) =
+        decoded_payload(approval_bytes)
+    else {
+        return Err(TrustServiceError::EventInvalid);
+    };
+    let catalog: Vec<&[u8]> = prepared.source.0.values().map(AsRef::as_ref).collect();
+    reader_key_escrow_cutover_release(&prepared.anchor, &catalog, approval.registry_version)
+        .map(|_| ())
+        .map_err(|_| TrustServiceError::EventNotYetOrNoLongerValid)
+}
+
+fn decoded_payload(exact_etb_bytes: &[u8]) -> Option<DecodedTrustPayloadV1> {
+    match ea_format::decode_exact_object(exact_etb_bytes) {
+        Ok(ParsedArchiveObject::Trust(parsed)) => parsed.value().decoded_payload().ok(),
+        _ => None,
+    }
+}
+
 const fn map_walk_error(error: HeadWalkError) -> TrustServiceError {
     match error {
         HeadWalkError::Unavailable => TrustServiceError::DependencyUnavailable,
@@ -971,5 +1090,90 @@ impl TrustObjectSource for CatalogSource {
         object_hash: ObjectHash,
     ) -> Result<Option<Arc<[u8]>>, TrustSourceError> {
         Ok(self.0.get(&object_hash).map(Arc::clone))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ea_sync_server::trust::TrustServiceError;
+    use ea_trust::TrustError;
+
+    use super::map_escrow_admission_error;
+
+    /// Jeder Befund des Escrow-Einstiegs mit seinem Leitungscode und Status.
+    /// Neue Leitungscodes gibt es nicht; die Tabelle legt die Abbildung fest.
+    #[test]
+    fn every_escrow_admission_finding_has_its_wire_code() {
+        let table: [(TrustError, &str, u16); 25] = [
+            (TrustError::EscrowConflict, "EA-TRUST-EVENT-CONFLICT", 409),
+            (
+                TrustError::EscrowInactive,
+                "EA-TRUST-EVENT-NOT-VALID-NOW",
+                422,
+            ),
+            (
+                TrustError::SignerInactive,
+                "EA-TRUST-EVENT-NOT-VALID-NOW",
+                422,
+            ),
+            (
+                TrustError::AuthNotYetValid,
+                "EA-TRUST-EVENT-NOT-VALID-NOW",
+                422,
+            ),
+            (TrustError::AuthExpired, "EA-TRUST-EVENT-NOT-VALID-NOW", 422),
+            (
+                TrustError::ActionMismatch,
+                "EA-TRUST-EVENT-UNVERIFIABLE",
+                422,
+            ),
+            (TrustError::StateConflict, "EA-TRUST-STATE-CONFLICT", 503),
+            (
+                TrustError::StateUnavailable,
+                "EA-TRUST-EVENT-DEPENDENCY-UNAVAILABLE",
+                503,
+            ),
+            (TrustError::Source, "EA-TRUST-EVENT-INVALID", 422),
+            (TrustError::SourceCountLimit, "EA-TRUST-EVENT-INVALID", 422),
+            (TrustError::SourceByteLimit, "EA-TRUST-EVENT-INVALID", 422),
+            (TrustError::AnchorShape, "EA-TRUST-EVENT-INVALID", 422),
+            (TrustError::AnchorHash, "EA-TRUST-EVENT-INVALID", 422),
+            (TrustError::AnchorPin, "EA-TRUST-EVENT-INVALID", 422),
+            (TrustError::BootstrapPair, "EA-TRUST-EVENT-INVALID", 422),
+            (TrustError::Signature, "EA-TRUST-EVENT-INVALID", 422),
+            (TrustError::SubjectMismatch, "EA-TRUST-EVENT-INVALID", 422),
+            (TrustError::SelfAuthorization, "EA-TRUST-EVENT-INVALID", 422),
+            (TrustError::AuthReplay, "EA-TRUST-EVENT-INVALID", 422),
+            (
+                TrustError::TimeSourceUnsupported,
+                "EA-TRUST-EVENT-INVALID",
+                422,
+            ),
+            (TrustError::TimeOverflow, "EA-TRUST-EVENT-INVALID", 422),
+            (
+                TrustError::ClockReleaseReplay,
+                "EA-TRUST-EVENT-INVALID",
+                422,
+            ),
+            (TrustError::StateMonotonicity, "EA-TRUST-EVENT-INVALID", 422),
+            (
+                TrustError::EscrowEnrollmentMismatch,
+                "EA-TRUST-EVENT-INVALID",
+                422,
+            ),
+            (
+                TrustError::ApproversInsufficient,
+                "EA-TRUST-EVENT-INVALID",
+                422,
+            ),
+        ];
+        for (finding, code, status) in table {
+            let mapped: TrustServiceError = map_escrow_admission_error(finding);
+            assert_eq!(
+                (mapped.code(), mapped.http_status()),
+                (code, status),
+                "{finding}"
+            );
+        }
     }
 }
