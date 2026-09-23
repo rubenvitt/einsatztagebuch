@@ -2486,3 +2486,274 @@ fn rfc9679_published_p256_and_local_suite_okp_thumbprints_are_exact() {
         x25519.to_deterministic_cbor()
     );
 }
+
+/// Der Kern der Escrow-Publikationsfreigabe (16 Positionen) für einen
+/// Administrator mit gegebenem Zertifikatshash und Schlüsselabdruck.
+fn reader_key_escrow_approval_core(
+    admin_certificate_hash: CertificateHash,
+    issued_at: i64,
+    expires_at: i64,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(16)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&[0x41; 16]))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.u8(3))
+        .and_then(|encoder| encoder.bytes(&[0x44; 32]))
+        .and_then(|encoder| encoder.u8(5))
+        .and_then(|encoder| encoder.bytes(fixture_public_key().thumbprint().as_bytes()))
+        .and_then(|encoder| encoder.bytes(admin_certificate_hash.as_bytes()))
+        .and_then(|encoder| encoder.bytes(&[0x48; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x49; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x32; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x33; 16]))
+        .and_then(|encoder| encoder.i64(issued_at))
+        .and_then(|encoder| encoder.i64(expires_at))
+        .and_then(|encoder| encoder.bytes(&[0x4a; 32]))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+/// Der Kern der Escrow-Öffnungsautorisierung (17 Positionen).
+fn reader_key_escrow_recovery_core(purpose: u8, issued_at: i64, expires_at: i64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    Encoder::new(&mut bytes)
+        .array(17)
+        .and_then(|encoder| encoder.u8(1))
+        .and_then(|encoder| encoder.bytes(&[0x51; 16]))
+        .and_then(|encoder| encoder.bytes(fixture_organization().as_bytes()))
+        .and_then(|encoder| encoder.u8(3))
+        .and_then(|encoder| encoder.bytes(&[0x54; 32]))
+        .and_then(|encoder| encoder.u8(5))
+        .and_then(|encoder| encoder.bytes(&[0x56; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x32; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x33; 16]))
+        .and_then(|encoder| encoder.u8(4))
+        .and_then(|encoder| encoder.bytes(&[0x35; 32]))
+        .and_then(|encoder| encoder.bytes(&[0x5b; 32]))
+        .and_then(|encoder| encoder.u8(purpose))
+        .and_then(|encoder| encoder.i64(issued_at))
+        .and_then(|encoder| encoder.i64(expires_at))
+        .and_then(|encoder| encoder.bytes(&[0x5c; 32]))
+        .and_then(|encoder| encoder.array(0))
+        .unwrap();
+    bytes
+}
+
+/// Eine Normalprofil-Signatur des Fixture-Schlüssels über den Trust-Digest.
+///
+/// Von Hand, weil es für die Escrow-Familien bewusst keine
+/// `CoseSigner`-Methode gibt (keine Emission vor Scheibe f).
+fn escrow_signed_normal(certificate_hash: CertificateHash, exact_digest_input: &[u8]) -> Vec<u8> {
+    let seed: [u8; 32] = std::array::from_fn(|index| index as u8);
+    let signing_key = SigningKey::from_bytes(&seed);
+    assert!(
+        CanonicalPublicCoseKey::ed25519(signing_key.verifying_key().to_bytes()).unwrap()
+            == fixture_public_key(),
+        "the fixture key is the key of the index seed"
+    );
+    let digest = ea_crypto::trust_digest(exact_digest_input);
+    let protected = ea_crypto::ProtectedHeader::normal(
+        ContentType::TrustDigest,
+        fixture_public_key().thumbprint(),
+        certificate_hash,
+    );
+    let signature = signing_key
+        .sign(&protected.sig_structure_bytes(digest.as_bytes()))
+        .to_bytes();
+    let mut encoded = Vec::new();
+    Encoder::new(&mut encoded)
+        .tag(minicbor::data::Tag::new(18))
+        .and_then(|encoder| encoder.array(4))
+        .and_then(|encoder| encoder.bytes(&protected.to_deterministic_cbor()))
+        .and_then(|encoder| encoder.map(0))
+        .and_then(|encoder| encoder.bytes(digest.as_bytes()))
+        .and_then(|encoder| encoder.bytes(&signature))
+        .unwrap();
+    encoded
+}
+
+/// Ruling R3: die Publikationsfreigabe verlangt genau das benannte
+/// `OrganizationAdmin`-Zertifikat mit `organizationAdminApprove`, wirksam zur
+/// `authorization-sequence` des Kerns. Ein `KeyApprover` ersetzt es nicht.
+#[test]
+fn the_escrow_approval_context_admits_only_the_named_organization_admin() {
+    let admin_subject = fixture_authority_subject(0xa2);
+    let admin_certificate = device_certificate_bytes_with_profile_and_authority(
+        &fixture_public_key(),
+        2,
+        &["organizationAdminApprove"],
+        Some(admin_subject),
+    );
+    let admin_certificate_hash = CertificateHash::from(object_hash(&admin_certificate));
+    let input = trust_digest_input(
+        "readerKeyEscrowApproval",
+        &reader_key_escrow_approval_core(admin_certificate_hash, 1_000, 301_000),
+    );
+    let context = VerificationContext::reader_key_escrow_approval_trust_digest(&input).unwrap();
+    let verified = verify_cose_sign1(
+        &escrow_signed_normal(admin_certificate_hash, &input),
+        &resolver_for_certificate(admin_certificate),
+        &context,
+    )
+    .unwrap();
+    assert_eq!(verified.role(), SignerRole::OrganizationAdmin);
+    assert!(verified.authority_subject_id() == Some(admin_subject));
+
+    // Dasselbe Objekt, aber das benannte Zertifikat ist ein KeyApprover.
+    let approver_certificate = device_certificate_bytes_with_profile_and_authority(
+        &fixture_public_key(),
+        3,
+        &["historicalGrantApprove"],
+        Some(fixture_authority_subject(0xa3)),
+    );
+    let approver_certificate_hash = CertificateHash::from(object_hash(&approver_certificate));
+    let input = trust_digest_input(
+        "readerKeyEscrowApproval",
+        &reader_key_escrow_approval_core(approver_certificate_hash, 1_000, 301_000),
+    );
+    assert!(
+        verify_cose_sign1(
+            &escrow_signed_normal(approver_certificate_hash, &input),
+            &resolver_for_certificate(approver_certificate),
+            &VerificationContext::reader_key_escrow_approval_trust_digest(&input).unwrap(),
+        )
+        .is_err()
+    );
+}
+
+/// Ruling R3: die Öffnungsautorisierung verlangt `KeyApprover` mit
+/// `historicalGrantApprove` (Entscheidung 8). Ein Administrator ersetzt ihn
+/// nicht.
+#[test]
+fn the_escrow_recovery_context_admits_only_a_historical_grant_approver() {
+    let input = trust_digest_input(
+        "readerKeyEscrowRecoveryAuthorization",
+        &reader_key_escrow_recovery_core(0, 1_000, 901_000),
+    );
+    let approver_subject = fixture_authority_subject(0xa3);
+    let approver_certificate = device_certificate_bytes_with_profile_and_authority(
+        &fixture_public_key(),
+        3,
+        &["historicalGrantApprove"],
+        Some(approver_subject),
+    );
+    let approver_certificate_hash = CertificateHash::from(object_hash(&approver_certificate));
+    let verified = verify_cose_sign1(
+        &escrow_signed_normal(approver_certificate_hash, &input),
+        &resolver_for_certificate(approver_certificate),
+        &VerificationContext::reader_key_escrow_recovery_approval_trust_digest(
+            &input,
+            approver_certificate_hash,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(verified.role(), SignerRole::KeyApprover);
+    assert!(verified.authority_subject_id() == Some(approver_subject));
+
+    let admin_certificate = device_certificate_bytes_with_profile_and_authority(
+        &fixture_public_key(),
+        2,
+        &["organizationAdminApprove"],
+        Some(fixture_authority_subject(0xa2)),
+    );
+    let admin_certificate_hash = CertificateHash::from(object_hash(&admin_certificate));
+    assert!(
+        verify_cose_sign1(
+            &escrow_signed_normal(admin_certificate_hash, &input),
+            &resolver_for_certificate(admin_certificate),
+            &VerificationContext::reader_key_escrow_recovery_approval_trust_digest(
+                &input,
+                admin_certificate_hash,
+            )
+            .unwrap(),
+        )
+        .is_err()
+    );
+}
+
+/// Die beiden Kernparser prüfen Literal, Arität, Höchstdauer und `purpose`
+/// selbst, ohne `ea-format`: ein fremdes Literal, ein vertauschter Kern, eine
+/// Position zu viel, eine überlange Frist und `purpose: 1` fallen mit
+/// `InvalidProtocolCore`.
+#[test]
+fn both_escrow_authorization_contexts_parse_their_core_fail_closed() {
+    let admin = fixture_certificate_hash();
+    let approval_core = reader_key_escrow_approval_core(admin, 1_000, 301_000);
+    let recovery_core = reader_key_escrow_recovery_core(0, 1_000, 901_000);
+    let mut longer_approval = approval_core.clone();
+    longer_approval[0] += 1;
+    longer_approval.insert(longer_approval.len() - 1, 0x00);
+    for (label, input) in [
+        (
+            "grant literal",
+            trust_digest_input("grantAuthorization", &approval_core),
+        ),
+        (
+            "recovery core under the approval literal",
+            trust_digest_input("readerKeyEscrowApproval", &recovery_core),
+        ),
+        (
+            "seventeen positions",
+            trust_digest_input("readerKeyEscrowApproval", &longer_approval),
+        ),
+        (
+            "lifetime over the limit",
+            trust_digest_input(
+                "readerKeyEscrowApproval",
+                &reader_key_escrow_approval_core(admin, 1_000, 301_001),
+            ),
+        ),
+        (
+            "expires before issued",
+            trust_digest_input(
+                "readerKeyEscrowApproval",
+                &reader_key_escrow_approval_core(admin, 1_000, 999),
+            ),
+        ),
+    ] {
+        assert_eq!(
+            VerificationContext::reader_key_escrow_approval_trust_digest(&input)
+                .err()
+                .unwrap(),
+            CryptoError::InvalidProtocolCore,
+            "{label}"
+        );
+    }
+    for (label, input) in [
+        (
+            "approval core under the recovery literal",
+            trust_digest_input("readerKeyEscrowRecoveryAuthorization", &approval_core),
+        ),
+        (
+            "purpose one",
+            trust_digest_input(
+                "readerKeyEscrowRecoveryAuthorization",
+                &reader_key_escrow_recovery_core(1, 1_000, 901_000),
+            ),
+        ),
+        (
+            "lifetime over the limit",
+            trust_digest_input(
+                "readerKeyEscrowRecoveryAuthorization",
+                &reader_key_escrow_recovery_core(0, 1_000, 901_001),
+            ),
+        ),
+        (
+            "escrow literal",
+            trust_digest_input("readerKeyEscrow", &recovery_core),
+        ),
+    ] {
+        assert_eq!(
+            VerificationContext::reader_key_escrow_recovery_approval_trust_digest(&input, admin)
+                .err()
+                .unwrap(),
+            CryptoError::InvalidProtocolCore,
+            "{label}"
+        );
+    }
+}

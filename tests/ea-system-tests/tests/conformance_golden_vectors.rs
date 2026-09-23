@@ -42,9 +42,9 @@ use ea_crypto::{
     bootstrap_anchor_hash, ciphertext_digest, cose_sign1_ctt_imprint, entry_hash,
     finalization_preview_digest, grant_digest, grant_plan_digest, hpke_aad, hpke_info, hpke_open,
     linux_os_account_binding_hash, native_archive_component_namespace, object_hash,
-    operator_profile_digest, parse_cose_sign1, payload_aad, receipt_digest, record_digest,
-    recovery_test_digest, renewal_input_digest, trust_anchor_hash, trust_digest,
-    validate_unsigned_protocol_core, verification_report_hash,
+    operator_profile_digest, parse_cose_sign1, payload_aad, reader_key_escrow_core_hash,
+    receipt_digest, record_digest, recovery_test_digest, renewal_input_digest, trust_anchor_hash,
+    trust_digest, validate_unsigned_protocol_core, verification_report_hash,
 };
 use ea_format::{
     DecodedEvidencePayloadV1, DecodedTrustPayloadV1, GrantKindV1, GrantPlanItemV1, GrantPlanV1,
@@ -83,7 +83,7 @@ const MANIFEST_PATH: &str = "vectors/crypto/suite-1/manifest.json";
 
 /// Die Zahl der Eintraege. Ein truncatiertes Manifest darf nicht still
 /// durchlaufen: ohne diese Schranke waere ein leeres Manifest trivial gruen.
-const EXPECTED_ENTRY_COUNT: usize = 77;
+const EXPECTED_ENTRY_COUNT: usize = 79;
 
 /// Die Zahl der VERSCHIEDENEN `EINSATZARCHIV-`-Zeichenketten im Quelltext von
 /// `crates/ea-crypto`. Ohne diese Schranke koennte ein Scanner, der nichts
@@ -94,7 +94,11 @@ const EXPECTED_ENTRY_COUNT: usize = 77;
 /// `EINSATZARCHIV-NATIVE-ARCHIVE-COMPONENT-v1`. Alle drei sind eingefroren;
 /// die dritte pinnt die heutigen Bytes, und eine Aenderung unter DRK-320
 /// erzeugt ihren Vektor ausdruecklich neu.
-const EA_CRYPTO_DOMAIN_STRING_COUNT: usize = 28;
+///
+/// DRK-318 (Reader-Key-Escrow v1.1, Profil §4) hat eine vierte gebracht:
+/// `EINSATZARCHIV-READER-KEY-ESCROW-CORE-v1`, die Domäne von
+/// `escrow-core-hash`. Eingefroren als Zeichenkette UND als Domain-Digest.
+const EA_CRYPTO_DOMAIN_STRING_COUNT: usize = 29;
 
 /// Das feste Urbild der Domain-Digest-Vektoren.
 const PROBE: &[u8] = b"suite-1 digest probe";
@@ -109,7 +113,7 @@ type DigestFn = fn(&[u8]) -> Hash32;
 /// Eine Tabelle, kein Fliesstext: Erzeuger und Test leiten ihre Eintraege aus
 /// derselben Aufzaehlung ab, und eine neue Domain faellt sofort als fehlender
 /// Eintrag auf.
-const DOMAIN_DIGESTS: [(&str, &str, DigestFn); 15] = [
+const DOMAIN_DIGESTS: [(&str, &str, DigestFn); 16] = [
     (
         "domain-digest/ciphertext-digest",
         "EINSATZARCHIV-CIPHERTEXT-v1",
@@ -185,6 +189,11 @@ const DOMAIN_DIGESTS: [(&str, &str, DigestFn); 15] = [
         "EINSATZARCHIV-FINALIZATION-PREVIEW-v1",
         finalization_preview_digest,
     ),
+    (
+        "domain-digest/reader-key-escrow-core-hash",
+        "EINSATZARCHIV-READER-KEY-ESCROW-CORE-v1",
+        reader_key_escrow_core_hash,
+    ),
 ];
 
 type ContextFn = fn(&[u8]) -> Vec<u8>;
@@ -208,8 +217,8 @@ const DOMAIN_CONTEXTS: [(&str, &str, ContextFn); 3] = [
     ),
 ];
 
-/// Die 27 Domain-Trennungszeichenketten als eigene Eintraege.
-const DOMAIN_STRINGS: [&str; 27] = [
+/// Die 28 Domain-Trennungszeichenketten als eigene Einträge.
+const DOMAIN_STRINGS: [&str; 28] = [
     "EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1",
     "EINSATZARCHIV-AAD-v1",
     "EINSATZARCHIV-CHECKPOINT-v1",
@@ -237,6 +246,7 @@ const DOMAIN_STRINGS: [&str; 27] = [
     "EINSATZARCHIV-DESTRUCTION-PREFLIGHT-v1",
     "EINSATZARCHIV-GOLIVE-POSTURE-v1",
     "EINSATZARCHIV-NATIVE-ARCHIVE-COMPONENT-v1",
+    "EINSATZARCHIV-READER-KEY-ESCROW-CORE-v1",
 ];
 
 /// Der Schluessel des RFC-8439-Vektors: 0x80 bis 0x9f.
@@ -627,8 +637,22 @@ const STAGE_FIVE_SUITE_ONE_ADDITIONS: [&str; 3] = [
     "domain-string/einsatzarchiv-native-archive-component-v1",
 ];
 
+/// Die zwei Einträge, die DRK-318 (Reader-Key-Escrow v1.1) additiv
+/// hinzugefügt hat — Ruling R1 nach dem Vorbild `c96045c`.
+///
+/// Die Domäne von `escrow-core-hash` aus
+/// `docs/superpowers/specs/2026-09-08-einsatzarchiv-reader-key-escrow-profile.md`
+/// §4: einmal die Zeichenkette, einmal der Domain-Digest über die Probe. Eine
+/// eigene Zulassungsliste, damit der Zugang nicht in der Stufe-5-Liste
+/// untertaucht.
+const DRK_318_SUITE_ONE_ADDITIONS: [&str; 2] = [
+    "domain-digest/reader-key-escrow-core-hash",
+    "domain-string/einsatzarchiv-reader-key-escrow-core-v1",
+];
+
 /// Haelt fest, dass die 66 Stufe-1-Vektoren dieser Familie UNVERAENDERT sind
-/// und Stufe 2 genau acht, Stufe 5 genau drei Eintraege HINZUGEFUEGT hat.
+/// und Stufe 2 genau acht, Stufe 5 genau drei und DRK-318 genau zwei Einträge
+/// HINZUGEFÜGT hat.
 ///
 /// Zwei Richtungen, und beide sind noetig:
 ///
@@ -638,7 +662,8 @@ const STAGE_FIVE_SUITE_ONE_ADDITIONS: [&str; 3] = [
 ///    Manifest im selben Zug „mitgepflegt" wird.
 /// 2. Die Restmenge des Manifests ist GENAU
 ///    [`STAGE_TWO_SUITE_ONE_ADDITIONS`] plus
-///    [`STAGE_FIVE_SUITE_ONE_ADDITIONS`]. Faengt: einen weiteren Zugang, der
+///    [`STAGE_FIVE_SUITE_ONE_ADDITIONS`] plus [`DRK_318_SUITE_ONE_ADDITIONS`].
+///    Faengt: einen weiteren Zugang, der
 ///    sich hinter der Summe versteckt, und ein Umsortieren der Familien.
 ///
 /// Was dieser Zeuge NICHT ist: eine zweite Pruefung der Digestrechnung. Die
@@ -654,14 +679,16 @@ fn the_sixty_six_stage_one_vectors_are_unchanged_and_stage_two_only_added_eight(
     let manifest = VectorManifest::from_json(&text)
         .unwrap_or_else(|error| panic!("failed to parse {MANIFEST_PATH}: {error}"));
 
-    // Die Arithmetik der Erweiterung, ausgeschrieben statt gerechnet: 66 + 8 + 3
-    // MUSS die Summe sein, die EXPECTED_ENTRY_COUNT pinnt.
+    // Die Arithmetik der Erweiterung, ausgeschrieben statt gerechnet:
+    // 66 + 8 + 3 + 2 MUSS die Summe sein, die EXPECTED_ENTRY_COUNT pinnt.
     assert_eq!(
         STAGE_ONE_SUITE_ONE_ENTRIES.len()
             + STAGE_TWO_SUITE_ONE_ADDITIONS.len()
-            + STAGE_FIVE_SUITE_ONE_ADDITIONS.len(),
+            + STAGE_FIVE_SUITE_ONE_ADDITIONS.len()
+            + DRK_318_SUITE_ONE_ADDITIONS.len(),
         EXPECTED_ENTRY_COUNT,
-        "66 eingefrorene plus 8 in Stufe 2 und 3 in Stufe 5 hinzugefuegte Eintraege sind die Summe"
+        "66 eingefrorene plus 8 in Stufe 2, 3 in Stufe 5 und 2 unter DRK-318 hinzugefügte \
+         Einträge sind die Summe"
     );
 
     let present = manifest
@@ -702,9 +729,10 @@ fn the_sixty_six_stage_one_vectors_are_unchanged_and_stage_two_only_added_eight(
         STAGE_TWO_SUITE_ONE_ADDITIONS
             .into_iter()
             .chain(STAGE_FIVE_SUITE_ONE_ADDITIONS)
+            .chain(DRK_318_SUITE_ONE_ADDITIONS)
             .collect(),
-        "ueber die 66 eingefrorenen Eintraege hinaus traegt die Familie GENAU die acht \
-         in Stufe 2 und die drei in Stufe 5 hinzugefuegten Eintraege"
+        "über die 66 eingefrorenen Einträge hinaus trägt die Familie GENAU die acht \
+         in Stufe 2, die drei in Stufe 5 und die zwei unter DRK-318 hinzugefügten Einträge"
     );
 }
 
