@@ -229,8 +229,8 @@ pub fn verify_catalogue_admission(
         // Die Bundle-Freigabe und ihr Widerruf stehen aus demselben Grund
         // hier: sie tragen die DIREKTE, wurzelsignierte Gestalt, sind kein
         // zulaessiges Ziel einer Admin-Autorisierung und deshalb auch kein
-        // Gegenstand des Registrierungsabschlusses. Einen Stufe-3-Endpunkt
-        // haben sie nicht.
+        // Gegenstand des Registrierungsabschlusses. Ihr eigener Einstieg ist
+        // `verify_web_bundle_family_admission` (v1.1-Profil §1.3 U4).
         //
         // Die drei Escrow-Familien (v1.1-Profil §3.1) sind aus demselben Grund
         // vom Registrierungsabschluss ausgenommen: sie tragen keine
