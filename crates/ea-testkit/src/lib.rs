@@ -767,10 +767,15 @@ const CRYPTO_DEVICE_ID: [u8; 16] = [0x11; 16];
 /// (`domain || 0x00 || anker || profil`); sie pinnt die heutigen Bytes, und
 /// eine Aenderung unter DRK-320 erzeugt diesen Eintrag ausdruecklich neu.
 ///
+/// Unter DRK-318 (Reader-Key-Escrow v1.1, Profil §4, Ruling R1) ADDITIV
+/// erweitert um die Domäne von `escrow-core-hash`. Sie hat die Form
+/// `domain || urbild` und steht deshalb zusätzlich in
+/// [`CRYPTO_DOMAIN_DIGESTS`].
+///
 /// Kein bestehender Eintrag wurde umbenannt, entfernt oder umsortiert; das
 /// Manifest sortiert seine Eintraege ohnehin nach Namen
 /// ([`VectorManifest::to_json`]).
-const CRYPTO_DOMAIN_STRINGS: [&str; 27] = [
+const CRYPTO_DOMAIN_STRINGS: [&str; 28] = [
     "EINSATZARCHIV-ADMIN-AUTHORIZED-TRUST-v1",
     "EINSATZARCHIV-AAD-v1",
     "EINSATZARCHIV-CHECKPOINT-v1",
@@ -798,10 +803,11 @@ const CRYPTO_DOMAIN_STRINGS: [&str; 27] = [
     "EINSATZARCHIV-DESTRUCTION-PREFLIGHT-v1",
     "EINSATZARCHIV-GOLIVE-POSTURE-v1",
     "EINSATZARCHIV-NATIVE-ARCHIVE-COMPONENT-v1",
+    "EINSATZARCHIV-READER-KEY-ESCROW-CORE-v1",
 ];
 
 /// Die domaingetrennten Digestfunktionen mit ihrer Domaene.
-const CRYPTO_DOMAIN_DIGESTS: [(&str, &str); 16] = [
+const CRYPTO_DOMAIN_DIGESTS: [(&str, &str); 17] = [
     (
         "domain-digest/ciphertext-digest",
         "EINSATZARCHIV-CIPHERTEXT-v1",
@@ -853,6 +859,10 @@ const CRYPTO_DOMAIN_DIGESTS: [(&str, &str); 16] = [
     (
         "domain-digest/finalization-preview-digest",
         "EINSATZARCHIV-FINALIZATION-PREVIEW-v1",
+    ),
+    (
+        "domain-digest/reader-key-escrow-core-hash",
+        "EINSATZARCHIV-READER-KEY-ESCROW-CORE-v1",
     ),
 ];
 
@@ -7372,12 +7382,12 @@ mod tests {
         assert!(report.is_clean(), "{:?}", report.mismatches);
     }
 
-    /// Der Erzeuger liefert 77 verschiedene Eintraege, und jeder Dateipfad
+    /// Der Erzeuger liefert 79 verschiedene Einträge, und jeder Dateipfad
     /// liegt unter der Familienwurzel.
     #[test]
     fn the_crypto_generator_names_every_entry_and_file_exactly_once() {
         let manifest = crypto_suite_one_manifest();
-        assert_eq!(manifest.entries.len(), 77);
+        assert_eq!(manifest.entries.len(), 79);
         let names = manifest
             .entries
             .iter()

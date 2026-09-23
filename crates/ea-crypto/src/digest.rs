@@ -33,6 +33,9 @@ const ARCHIVE_PROFILE_DOMAIN: &[u8] = b"EINSATZARCHIV-ARCHIVE-PROFILE-v1";
 const ARCHIVE_INVENTORY_DOMAIN: &[u8] = b"EINSATZARCHIV-ARCHIVE-INVENTORY-v1";
 const ACTIVE_PROFILE_POINTER_DOMAIN: &[u8] = b"EINSATZARCHIV-ACTIVE-PROFILE-POINTER-v1";
 const FINALIZATION_PREVIEW_DOMAIN: &[u8] = b"EINSATZARCHIV-FINALIZATION-PREVIEW-v1";
+/// Die Domäne von `escrow-core-hash` (Reader-Key-Escrow-Profil §4). Eingefroren
+/// als Zugang in `vectors/crypto/suite-1/` (Ruling R1).
+const READER_KEY_ESCROW_CORE_DOMAIN: &[u8] = b"EINSATZARCHIV-READER-KEY-ESCROW-CORE-v1";
 
 pub(crate) fn sha256_parts(parts: &[&[u8]]) -> Hash32 {
     let mut hasher = Sha256::new();
@@ -63,6 +66,19 @@ digest_fn!(renewal_input_digest, RENEWAL_INPUT_DOMAIN);
 digest_fn!(bootstrap_anchor_hash, ANCHOR_PRE_DOMAIN);
 digest_fn!(trust_anchor_hash, ANCHOR_DOMAIN);
 digest_fn!(operator_profile_digest, OPERATOR_PROFILE_DOMAIN);
+
+/// `escrow-core-hash`: SHA-256 über die Escrow-Core-Domäne gefolgt vom EXAKTEN
+/// deterministischen CBOR des `reader-key-escrow-core-v1`.
+///
+/// Der Eingang ist der Core-Slice, wie er in der Escrow-Nutzlast steht
+/// (`ReaderKeyEscrowPayloadV1::exact_core` in `ea-format`); bei der Prüfung
+/// wird nie reserialisiert. Die Publikationsfreigabe bindet diesen Hash über
+/// den Core und nicht über die Nutzlast, die ihrerseits den Objekthash der
+/// Freigabe trägt — so entsteht keine Zirkularität.
+#[must_use]
+pub fn reader_key_escrow_core_hash(exact_core: &[u8]) -> Hash32 {
+    sha256_parts(&[READER_KEY_ESCROW_CORE_DOMAIN, exact_core])
+}
 
 /// Commits to the five operator-profile fields from design section 6.8.
 ///

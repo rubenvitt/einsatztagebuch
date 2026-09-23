@@ -366,6 +366,25 @@
       "expectedOutcome": {
         "kind": "accepted"
       },
+      "file": "domain-digest/reader-key-escrow-core-hash.bin",
+      "fileSha256": "e5ebf08c14dd61234830d6024d477b12d60ed6aff3940dd189567f72867557ff",
+      "inputBytes": "73756974652d31206469676573742070726f6265",
+      "intermediateDigests": {
+        "domainString": "edbd3d02a8c5891df9754ef9bf28b1f789f7c5deb76a63f0d15805284d4b53c8"
+      },
+      "name": "domain-digest/reader-key-escrow-core-hash",
+      "objectBytes": "1ee90fb174e4ba36076cf6a575b909dcb05c5b9b82333fbff6f1eb94825a39d5",
+      "schemaId": "ea.crypto.domain-digest/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
       "file": "domain-digest/receipt-digest.bin",
       "fileSha256": "91d92132fae4234319b15cbd0d40bdc0a0e9f3aef42a8a7c39422f3d754b61cd",
       "inputBytes": "73756974652d31206469676573742070726f6265",
@@ -826,6 +845,23 @@
       "intermediateDigests": {},
       "name": "domain-string/einsatzarchiv-package-v1",
       "objectBytes": "45494e5341545a4152434849562d5041434b4147452d7631",
+      "schemaId": "ea.crypto.domain-separation-string/v1",
+      "source": {
+        "commit": "ea-testkit::crypto_suite_one_manifest",
+        "kind": "generatorCommit"
+      },
+      "suiteId": "EINSATZARCHIV-SUITE-1"
+    },
+    {
+      "expectedOutcome": {
+        "kind": "accepted"
+      },
+      "file": "domain-string/einsatzarchiv-reader-key-escrow-core-v1.bin",
+      "fileSha256": "edbd3d02a8c5891df9754ef9bf28b1f789f7c5deb76a63f0d15805284d4b53c8",
+      "inputBytes": "",
+      "intermediateDigests": {},
+      "name": "domain-string/einsatzarchiv-reader-key-escrow-core-v1",
+      "objectBytes": "45494e5341545a4152434849562d5245414445522d4b45592d455343524f572d434f52452d7631",
       "schemaId": "ea.crypto.domain-separation-string/v1",
       "source": {
         "commit": "ea-testkit::crypto_suite_one_manifest",

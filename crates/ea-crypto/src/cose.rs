@@ -12,6 +12,11 @@ use minicbor::{Decoder, Encoder, data::Type};
 use x509_tsp::TstInfo;
 
 use crate::digest::{recovery_test_digest_ref, sha256_parts};
+use crate::reader_key_escrow::{
+    READER_KEY_ESCROW_APPROVAL_MAX_LIFETIME_MS,
+    READER_KEY_ESCROW_RECOVERY_AUTHORIZATION_MAX_LIFETIME_MS,
+    reader_key_escrow_lifetime_is_admissible,
+};
 use crate::{
     CanonicalPublicCoseKey, CryptoError, SecretBytes, grant_digest, object_hash, receipt_digest,
     record_digest, recovery_test_digest, trust_digest,
@@ -1167,6 +1172,69 @@ impl VerificationContext {
         ))
     }
 
+    /// Der Prüfkontext der Escrow-Publikationsfreigabe
+    /// (`readerKeyEscrowApproval`, v1.1-Profil §3.1).
+    ///
+    /// Ein Baustein, keine Aufnahme: er legt fest, WER signieren darf — genau
+    /// das im Kern benannte `OrganizationAdmin`-Zertifikat mit
+    /// `organizationAdminApprove` und dem im Kern benannten Schlüsselabdruck,
+    /// wirksam zur `authorization-sequence` des Kerns. Ob Organisation, Kopf
+    /// und Sequenz zur gewählten Registry passen, entscheidet der Trust-Kern.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::InvalidProtocolCore`] für einen Digest-Eingang, der kein
+    /// wohlgeformter Freigabekern ist (Literal, Arität, Längen, Höchstdauer).
+    pub fn reader_key_escrow_approval_trust_digest(
+        exact_trust_digest_input: &[u8],
+    ) -> Result<Self, CryptoError> {
+        let bindings = reader_key_escrow_approval_bindings(exact_trust_digest_input)?;
+        Ok(Self::digest(
+            ContentType::TrustDigest,
+            bindings.digest,
+            bindings.certificate_hash,
+            Some(bindings.key_thumbprint),
+            bindings.organization_id,
+            bindings.sequence,
+            SignerRole::OrganizationAdmin,
+            Some(CertificateCapability::OrganizationAdminApprove),
+            false,
+            bindings.registry,
+        ))
+    }
+
+    /// Der Prüfkontext EINER Signatur der Escrow-Öffnungsautorisierung
+    /// (`readerKeyEscrowRecoveryAuthorization`, v1.1-Profil §3.1).
+    ///
+    /// Verlangt ein `KeyApprover`-Zertifikat mit `historicalGrantApprove`
+    /// (Entscheidung 8: keine achte Capability), wirksam zur
+    /// `authorization-sequence`. Die Schwelle von zwei verschiedenen
+    /// Autoritätssubjekten zählt der Trust-Kern, nicht dieser Baustein.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::InvalidProtocolCore`] für einen Digest-Eingang, der kein
+    /// wohlgeformter Öffnungskern ist (Literal, Arität, Längen, `purpose`,
+    /// Höchstdauer).
+    pub fn reader_key_escrow_recovery_approval_trust_digest(
+        exact_trust_digest_input: &[u8],
+        certificate_hash: CertificateHash,
+    ) -> Result<Self, CryptoError> {
+        let bindings = reader_key_escrow_recovery_bindings(exact_trust_digest_input)?;
+        Ok(Self::digest(
+            ContentType::TrustDigest,
+            bindings.digest,
+            certificate_hash,
+            None,
+            bindings.organization_id,
+            bindings.sequence,
+            SignerRole::KeyApprover,
+            Some(CertificateCapability::HistoricalGrantApprove),
+            false,
+            bindings.registry,
+        ))
+    }
+
     pub fn destruction_approval_trust_digest(
         exact_trust_digest_input: &[u8],
         certificate_hash: CertificateHash,
@@ -1652,6 +1720,53 @@ pub fn verify_web_bundle_trust_signature(
     }
     if parsed.protected.certificate_hash != Some(expected_certificate_hash)
         || parsed.protected.key_thumbprint != root_public_key.thumbprint()
+    {
+        return Err(CryptoError::SignerMismatch);
+    }
+    parsed.verify_with_key(root_public_key)
+}
+
+/// Prüft die EINE Wurzelsignatur eines Reader-Key-Escrows gegen den
+/// gepinnten Anker (v1.1-Profil §3.1).
+///
+/// Nach dem Vorbild von [`verify_web_bundle_trust_signature`]: eine Signatur,
+/// ein gepinnter Schlüssel, keine Kettenauflösung, kein [`VerificationContext`],
+/// kein Katalog. `root_trust_bindings` bleibt unberührt (Profil §1.2); dieser
+/// Weg ist der einzige, auf dem eine Wurzelsignatur ein Escrow trägt.
+///
+/// Anders als das Vorbild prüft diese Funktion den Digest-Eingang SELBST: er
+/// muss `["readerKeyEscrow", [core, bstr .size 32]]` mit einem vollständigen
+/// 14-Positionen-Core sein, und der `root-key-thumbprint` des Cores muss der
+/// Abdruck des gepinnten Ankers sein. Ob die Freigabe, das Reader- und das
+/// Recovery-Zertifikat tragen, entscheidet der Trust-Kern.
+///
+/// # Errors
+///
+/// [`CryptoError::InvalidCose`] für ein fehlerhaftes Profil oder einen
+/// falschen Inhaltstyp, [`CryptoError::InvalidProtocolCore`] für einen
+/// Digest-Eingang, der kein Escrow ist, [`CryptoError::SignerMismatch`] für
+/// einen fremden Nutzinhaltsdigest, Zertifikatshash, Schlüsselabdruck oder
+/// Core-Wurzelabdruck, und [`CryptoError::SignatureInvalid`], wenn die Signatur
+/// selbst nicht trägt.
+pub fn verify_reader_key_escrow_trust_signature(
+    bytes: &[u8],
+    root_public_key: &CanonicalPublicCoseKey,
+    expected_certificate_hash: CertificateHash,
+    exact_trust_digest_input: &[u8],
+) -> Result<(), CryptoError> {
+    let parsed = parse_cose_sign1(bytes, &[])?;
+    if parsed.protected.profile != ProtectedProfile::Normal
+        || parsed.protected.content_type != ContentType::TrustDigest
+    {
+        return Err(CryptoError::InvalidCose);
+    }
+    let core_root_key_thumbprint = reader_key_escrow_root_thumbprint(exact_trust_digest_input)?;
+    if parsed.payload != trust_digest(exact_trust_digest_input).as_bytes() {
+        return Err(CryptoError::SignerMismatch);
+    }
+    if parsed.protected.certificate_hash != Some(expected_certificate_hash)
+        || parsed.protected.key_thumbprint != root_public_key.thumbprint()
+        || core_root_key_thumbprint != root_public_key.thumbprint()
     {
         return Err(CryptoError::SignerMismatch);
     }
@@ -3139,6 +3254,171 @@ fn grant_authorization_bindings(
         sequence,
         registry,
     })
+}
+
+/// Zerlegt `["readerKeyEscrow", [core, bstr .size 32]]` und gibt den
+/// `root-key-thumbprint` des Cores zurück.
+fn reader_key_escrow_root_thumbprint(
+    exact_trust_digest_input: &[u8],
+) -> Result<KeyThumbprint, CryptoError> {
+    validate(exact_trust_digest_input, ParserLimits::V1)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_trust_digest_input);
+    if protocol_array_length(&mut decoder)? != 2
+        || decoder
+            .str()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?
+            != "readerKeyEscrow"
+        || protocol_array_length(&mut decoder)? != 2
+        || protocol_array_length(&mut decoder)? != 14
+        || decoder.u64().ok() != Some(1)
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_organization(&mut decoder)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 16)?;
+    protocol_uint(&mut decoder)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_uint(&mut decoder)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 48)?;
+    protocol_int(&mut decoder)?;
+    let root_key_thumbprint = KeyThumbprint::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    if protocol_array_length(&mut decoder)? != 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 32)?;
+    if decoder.position() != exact_trust_digest_input.len() {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(root_key_thumbprint)
+}
+
+struct ReaderKeyEscrowApprovalBindings {
+    digest: Hash32,
+    certificate_hash: CertificateHash,
+    key_thumbprint: KeyThumbprint,
+    organization_id: OrganizationId,
+    sequence: ChainSequence,
+    registry: RegistryVersion,
+}
+
+/// Zerlegt `["readerKeyEscrowApproval", reader-key-escrow-approval-core-v1]`.
+fn reader_key_escrow_approval_bindings(
+    exact_trust_digest_input: &[u8],
+) -> Result<ReaderKeyEscrowApprovalBindings, CryptoError> {
+    validate(exact_trust_digest_input, ParserLimits::V1)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_trust_digest_input);
+    if protocol_array_length(&mut decoder)? != 2
+        || decoder
+            .str()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?
+            != "readerKeyEscrowApproval"
+        || protocol_array_length(&mut decoder)? != 16
+        || decoder.u64().ok() != Some(1)
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 16)?;
+    let organization_id = protocol_organization(&mut decoder)?;
+    let registry = RegistryVersion::new(protocol_uint(&mut decoder)?);
+    protocol_bstr(&mut decoder, 32)?;
+    let sequence = ChainSequence::new(protocol_uint(&mut decoder)?);
+    let key_thumbprint = KeyThumbprint::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let certificate_hash = CertificateHash::try_from(protocol_bstr(&mut decoder, 32)?)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 16)?;
+    let issued_at = protocol_int(&mut decoder)?;
+    let expires_at = protocol_int(&mut decoder)?;
+    if !reader_key_escrow_lifetime_is_admissible(
+        issued_at,
+        expires_at,
+        READER_KEY_ESCROW_APPROVAL_MAX_LIFETIME_MS,
+    ) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 32)?;
+    if protocol_array_length(&mut decoder)? != 0
+        || decoder.position() != exact_trust_digest_input.len()
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(ReaderKeyEscrowApprovalBindings {
+        digest: trust_digest(exact_trust_digest_input),
+        certificate_hash,
+        key_thumbprint,
+        organization_id,
+        sequence,
+        registry,
+    })
+}
+
+/// Zerlegt `["readerKeyEscrowRecoveryAuthorization",
+/// reader-key-escrow-recovery-authorization-core-v1]`.
+fn reader_key_escrow_recovery_bindings(
+    exact_trust_digest_input: &[u8],
+) -> Result<TrustOperationBindings, CryptoError> {
+    validate(exact_trust_digest_input, ParserLimits::V1)
+        .map_err(|_| CryptoError::InvalidProtocolCore)?;
+    let mut decoder = Decoder::new(exact_trust_digest_input);
+    if protocol_array_length(&mut decoder)? != 2
+        || decoder
+            .str()
+            .map_err(|_| CryptoError::InvalidProtocolCore)?
+            != "readerKeyEscrowRecoveryAuthorization"
+        || protocol_array_length(&mut decoder)? != 17
+        || decoder.u64().ok() != Some(1)
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 16)?;
+    let organization_id = protocol_organization(&mut decoder)?;
+    let registry = RegistryVersion::new(protocol_uint(&mut decoder)?);
+    protocol_bstr(&mut decoder, 32)?;
+    let sequence = ChainSequence::new(protocol_uint(&mut decoder)?);
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 16)?;
+    protocol_uint(&mut decoder)?;
+    protocol_bstr(&mut decoder, 32)?;
+    protocol_bstr(&mut decoder, 32)?;
+    if protocol_uint(&mut decoder)? != 0 {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    let issued_at = protocol_int(&mut decoder)?;
+    let expires_at = protocol_int(&mut decoder)?;
+    if !reader_key_escrow_lifetime_is_admissible(
+        issued_at,
+        expires_at,
+        READER_KEY_ESCROW_RECOVERY_AUTHORIZATION_MAX_LIFETIME_MS,
+    ) {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    protocol_bstr(&mut decoder, 32)?;
+    if protocol_array_length(&mut decoder)? != 0
+        || decoder.position() != exact_trust_digest_input.len()
+    {
+        return Err(CryptoError::InvalidProtocolCore);
+    }
+    Ok(TrustOperationBindings {
+        digest: trust_digest(exact_trust_digest_input),
+        organization_id,
+        sequence,
+        registry,
+    })
+}
+
+fn protocol_uint(decoder: &mut Decoder<'_>) -> Result<u64, CryptoError> {
+    decoder.u64().map_err(|_| CryptoError::InvalidProtocolCore)
 }
 
 struct DestructionAuthorizationBindings {
