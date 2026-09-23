@@ -37,6 +37,7 @@ use escrow_support::{
     approval_core, escrow_bytes, escrow_core, escrow_line, publish_escrow, push_reader,
     recovery_core, root, signed_approval, signed_recovery, subject,
 };
+use support::{ActionSpec, HeadOptions};
 
 const APPROVAL_WINDOW: (u64, u64) = (1_000, 1_300);
 const ESCROW_ISSUED_AT: u64 = 1_200;
@@ -333,10 +334,49 @@ fn historical_registry_head_refuses_a_defective_escrow_set() {
     assert!(!lookup(&escrow.line));
 }
 
-/// Kontrolle: ohne jedes Escrow-Familienobjekt trägt Gate `trust` wie zuvor
-/// — auch der Datei-Modus spielt dafür keine Linie nach (F1).
+/// Hängt an die Linie einen Kopf, dessen Registry-Version eine Lücke lässt:
+/// die Katalog-Linie ist offline nicht mehr bis zur Spitze nachspielbar.
+/// `verify_trust` selbst bleibt dabei grün (derselbe Bau wie im
+/// F1-Zeugen von `ea-trust`).
+fn with_line_gap(line: &mut support::RegistryLineBuilder) {
+    let skipped = line.heads().last().unwrap().version.get() + 2;
+    line.add_branch(
+        ActionSpec::Policy {
+            policy_version: None,
+            previous_policy_hash: None,
+            effective_from: None,
+        },
+        HeadOptions {
+            registry_version: Some(skipped),
+            ..HeadOptions::default()
+        },
+    );
+}
+
+/// Kontrolle F1: ohne jedes Escrow-Familienobjekt trägt Gate `trust` auch
+/// über einer Katalog-Linie, die offline NICHT bis zur Spitze nachspielbar
+/// ist — der Datei-Modus spielt ohne Familienobjekt keine Linie nach. Ohne
+/// F1 würde genau dieser Bestand an `trust` versiegelt.
 #[test]
 fn a_catalog_without_escrow_objects_carries_the_trust_gate() {
-    let escrow = escrow_line(EscrowLineOptions::default());
-    assert!(trust_carried(&escrow.line));
+    let mut escrow = escrow_line(EscrowLineOptions::default());
+    assert!(trust_carried(&escrow.line), "Kontrolle ohne Lücke");
+    with_line_gap(&mut escrow.line);
+    assert!(
+        trust_carried(&escrow.line),
+        "ohne Familienobjekt trägt auch die nicht nachspielbare Linie"
+    );
+}
+
+/// Gegenprobe zur Kontrolle F1 und benannte Grenze des Gates: dieselbe
+/// Lücke mit einem GÜLTIGEN Escrow im Katalog versiegelt den Bestand an
+/// `trust` — die Menge verlangt die Linie bis zur Spitze.
+#[test]
+fn a_valid_escrow_over_a_line_that_is_not_replayable_offline_seals_the_report_at_trust() {
+    let mut escrow = escrow_line(EscrowLineOptions::default());
+    let core = reader_core(&escrow);
+    publish(&mut escrow, &core, 0xba);
+    assert!(trust_carried(&escrow.line), "Kontrolle ohne Lücke");
+    with_line_gap(&mut escrow.line);
+    assert_sealed_at_trust(&escrow.line);
 }
