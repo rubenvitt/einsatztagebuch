@@ -46,6 +46,7 @@ use crate::{
     AdminAuthorizationReplayKey, RegistryError, RegistryHeadPin, SelectedRegistryHead, TrustError,
     TrustStateStore, VerifiedTrust,
     admin_authorization::{AdminSignerClaim, consume_replay_keys, verify_admin_signer_claim},
+    reader_key_escrow_recovery::{recovery_signers_rule, recovery_target_rule},
     registry::{replay_to_exact_pin, replay_to_line_tip},
     resolver::PreviousHeadState,
 };
@@ -522,14 +523,6 @@ pub fn verify_reader_key_escrows(
     };
     let mut pins = PinStates::new(trust);
     let catalog = &trust.inner.catalog;
-    // Die Öffnungsautorisierung hat hier noch keine historische Regel: bis
-    // sie steht, scheitert der Bestand an ihr, statt sie zu überspringen.
-    if !catalog
-        .hashes_for_subtype(TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization)
-        .is_empty()
-    {
-        return Err(TrustError::ActionMismatch);
-    }
     // Jede Freigabe wird geprüft, auch eine, die kein Escrow nennt: kein
     // Familienobjekt wird übersprungen (Profil §9). Ohne signierten
     // Nutzungszeitpunkt gilt nur die Höchstdauer des Codecs; das Fenster
@@ -565,7 +558,39 @@ pub fn verify_reader_key_escrows(
         escrows.insert(*object_hash, escrow);
     }
     require_unique(escrows.values())?;
-    Ok(VerifiedReaderKeyEscrowSet { escrows })
+    let set = VerifiedReaderKeyEscrowSet { escrows };
+    // Jede Öffnungsautorisierung im Katalog wird historisch geprüft:
+    // Signaturen und Personen in ihrem Pin-Zustand, Bindung an ein Escrow
+    // des Bestands BELIEBIGEN Stands — nach einer Wiederherstellung ist das
+    // alte Escrow widerrufen, und das ist normale Historie.
+    for object_hash in
+        catalog.hashes_for_subtype(TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization)
+    {
+        let record = catalog.get(object_hash).ok_or(TrustError::Source)?;
+        let DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(fields) = record
+            .value()
+            .decoded_payload()
+            .map_err(|_| TrustError::Source)?
+        else {
+            return Err(TrustError::Source);
+        };
+        if fields.organization_id != trust.organization_id() {
+            return Err(TrustError::ActionMismatch);
+        }
+        let recovery_state = pins
+            .state(fields.registry_version, fields.registry_head_hash)
+            .map_err(|error| pin_error(error, TrustError::ActionMismatch))?;
+        recovery_signers_rule(
+            trust,
+            &recovery_state,
+            record.value(),
+            &fields,
+            SequenceRule::Lease,
+            WindowRule::CodecOnly,
+        )?;
+        recovery_target_rule(&fields, &set, false)?;
+    }
+    Ok(set)
 }
 
 /// Entscheidungen 3a und 5: unter den GÜLTIGEN Escrows ist jedes

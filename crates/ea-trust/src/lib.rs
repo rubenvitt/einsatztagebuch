@@ -509,6 +509,7 @@ pub use registry::verify_historical_registry_authority;
 mod operator_binding;
 mod policy;
 mod reader_key_escrow;
+mod reader_key_escrow_recovery;
 mod registry;
 mod writer_registry;
 pub use registry::select_stale_writer_registry_head;
@@ -543,6 +544,11 @@ pub use reader_key_escrow::{
     VerifiedReaderKeyEscrowSet, consume_reader_key_escrow_approval,
     verify_intended_reader_key_escrow, verify_reader_key_escrow_approval,
     verify_reader_key_escrows, verify_signed_reader_key_escrow,
+};
+pub use reader_key_escrow_recovery::{
+    AuthorizedEscrowTransportKey, REQUIRED_DISTINCT_ESCROW_RECOVERY_APPROVERS_V1,
+    VerifiedReaderKeyEscrowRecoveryAuthorization, consume_reader_key_escrow_recovery_authorization,
+    verify_reader_key_escrow_recovery_authorization,
 };
 pub use registry::{
     AdvancedRegistryHead, PendingFutureSuccessor, PreexistingEffectiveNow,

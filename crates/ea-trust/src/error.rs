@@ -32,6 +32,9 @@ pub enum TrustError {
     /// Zwei gültige Escrows teilen Reader-Zertifikat oder
     /// `(organizationId, readerSubjectId)` (Entscheidungen 3a und 5).
     EscrowConflict,
+    /// Weniger UNTERSCHIEDLICHE Personen als verlangt; zwei Zertifikate
+    /// eines Autoritätssubjekts sind eine Person.
+    ApproversInsufficient,
 }
 
 impl TrustError {
@@ -62,6 +65,7 @@ impl TrustError {
             Self::EscrowEnrollmentMismatch => "EA-TRUST-ESCROW-ENROLLMENT-MISMATCH",
             Self::EscrowInactive => "EA-TRUST-ESCROW-INACTIVE",
             Self::EscrowConflict => "EA-TRUST-ESCROW-CONFLICT",
+            Self::ApproversInsufficient => "EA-TRUST-APPROVERS-INSUFFICIENT",
         }
     }
 }

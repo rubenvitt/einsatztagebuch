@@ -2,6 +2,7 @@ use core::fmt;
 
 use ea_format::{
     ClockReleaseAuditV1, OrganizationAdminAuthorizationFieldsV1, ReaderKeyEscrowApprovalCoreV1,
+    ReaderKeyEscrowRecoveryAuthorizationCoreV1,
 };
 use ea_time::TrustedTimeState;
 use ea_types::{AuthorizationId, DeviceId, ObjectHash, OrganizationId, RegistryVersion};
@@ -203,6 +204,18 @@ impl AdminAuthorizationReplayKey {
     /// Reader-Key-Escrows — dieselbe Reihenfolge, derselbe Namensraum.
     pub(crate) const fn pair_from_verified_escrow_approval(
         fields: &ReaderKeyEscrowApprovalCoreV1,
+    ) -> [Self; 2] {
+        Self::pair_of(
+            fields.organization_id,
+            fields.authorization_id,
+            fields.nonce,
+        )
+    }
+
+    /// Die beiden Sperrzeilen einer geprüften Öffnungsautorisierung des
+    /// Reader-Key-Escrows — dieselbe Reihenfolge, derselbe Namensraum.
+    pub(crate) const fn pair_from_verified_escrow_recovery(
+        fields: &ReaderKeyEscrowRecoveryAuthorizationCoreV1,
     ) -> [Self; 2] {
         Self::pair_of(
             fields.organization_id,
