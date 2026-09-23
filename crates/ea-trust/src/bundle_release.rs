@@ -429,3 +429,136 @@ pub fn reader_key_escrow_cutover_release(
     }
     Ok(object_hash)
 }
+
+/// Was die Annahme eines Objekts der Bundle-Familie ergab.
+#[derive(Clone, Copy)]
+pub enum WebBundleAdmission {
+    /// Eine wurzelsignierte Freigabe dieser Organisation.
+    Release {
+        object_hash: ObjectHash,
+        /// Ob die Fassung die drei Escrow-Familien trägt
+        /// ([`bundle_version_carries_reader_key_escrow`]). Eine ältere
+        /// Fassung ist ein legitimer Rückzug und wird ebenso angenommen.
+        carries_reader_key_escrow: bool,
+    },
+    /// Ein wurzelsignierter Widerruf einer Freigabe, die im Katalog liegt.
+    Revocation {
+        object_hash: ObjectHash,
+        release_object_hash: ObjectHash,
+    },
+}
+
+/// Warum ein Objekt der Bundle-Familie nicht angenommen wird.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebBundleAdmissionError {
+    /// Das Objekt ist weder `webBundleRelease` noch `webBundleRevocation`.
+    NotBundleFamily,
+    /// Die Familie trägt nicht — derselbe Code wie beim Reader-Pin.
+    Bundle(BundleRejectionCodeV1),
+    /// Der Widerruf nennt keine Freigabe des Katalogs. Ein hängender Widerruf
+    /// würde später eine Freigabe entziehen, die es bei seiner Annahme nicht
+    /// gab; die Reihenfolge ist deshalb Freigabe vor Widerruf.
+    UnknownRelease,
+}
+
+impl core::fmt::Display for WebBundleAdmissionError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotBundleFamily => formatter.write_str("not a web bundle family object"),
+            Self::Bundle(code) => {
+                core::fmt::Display::fmt(&ReaderBundleError { code: *code }, formatter)
+            }
+            Self::UnknownRelease => {
+                formatter.write_str("web bundle revocation of a release outside the catalog")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WebBundleAdmissionError {}
+
+/// Der eigene Einstieg der Bundle-Familie (v1.1-Profil §1.3 U4): nimmt eine
+/// `webBundleRelease` oder einen `webBundleRevocation` in einen Katalog auf.
+///
+/// Die Regel ist die des Reader-Pins ([`ReaderBundlePin::from_trust_objects`])
+/// über den Katalog samt Kandidat — Wurzelsignatur gegen den Anker,
+/// Organisation, und die ganze Familie fail-closed. Dazu:
+///
+/// - `root-key-thumbprint` im Core ist der Abdruck der Ankerwurzel;
+/// - ein Widerruf nennt eine `webBundleRelease`, die schon im Katalog liegt.
+///
+/// Die Annahme hängt an keinem Registry-Stand: ob eine Freigabe wirkt und
+/// die Escrow-Sperre öffnet, entscheidet [`reader_key_escrow_cutover_release`]
+/// zu dessen Stand. Eine Fähigkeitsprüfung gibt es hier deshalb nicht.
+///
+/// `exact_trust_objects` darf den Kandidaten schon enthalten; er zählt genau
+/// einmal.
+///
+/// # Errors
+///
+/// [`WebBundleAdmissionError::NotBundleFamily`] für einen fremden Subtyp;
+/// [`WebBundleAdmissionError::Bundle`] für jeden Befund der Familienregel (ein
+/// undekodierbarer Kandidat gilt wie beim Pin als `Unsigned`);
+/// [`WebBundleAdmissionError::UnknownRelease`] für einen Widerruf ohne seine
+/// Freigabe im Katalog.
+pub fn verify_web_bundle_family_admission(
+    anchor: &TrustAnchorV1,
+    exact_trust_objects: &[&[u8]],
+    candidate: &[u8],
+) -> Result<WebBundleAdmission, WebBundleAdmissionError> {
+    let unsigned = WebBundleAdmissionError::Bundle(BundleRejectionCodeV1::Unsigned);
+    let Ok(ParsedArchiveObject::Trust(parsed)) = decode_exact_object(candidate) else {
+        return Err(unsigned);
+    };
+    if !matches!(
+        parsed.value().subtype(),
+        TrustSubtypeV1::WebBundleRelease | TrustSubtypeV1::WebBundleRevocation
+    ) {
+        return Err(WebBundleAdmissionError::NotBundleFamily);
+    }
+    let candidate_hash = object_hash(candidate);
+    let mut objects: Vec<&[u8]> = exact_trust_objects
+        .iter()
+        .copied()
+        .filter(|bytes| object_hash(bytes) != candidate_hash)
+        .collect();
+    let catalog_len = objects.len();
+    objects.push(candidate);
+    ReaderBundlePin::from_trust_objects(anchor, &objects, RegistryVersion::new(0))
+        .map_err(|error| WebBundleAdmissionError::Bundle(error.code()))?;
+    let wrong_root = WebBundleAdmissionError::Bundle(BundleRejectionCodeV1::WrongRoot);
+    match parsed.value().decoded_payload().map_err(|_| unsigned)? {
+        DecodedTrustPayloadV1::WebBundleRelease(core) => {
+            if core.root_key_thumbprint != anchor.root_key_thumbprint() {
+                return Err(wrong_root);
+            }
+            Ok(WebBundleAdmission::Release {
+                object_hash: candidate_hash,
+                carries_reader_key_escrow: bundle_version_carries_reader_key_escrow(
+                    &core.bundle_version,
+                ),
+            })
+        }
+        DecodedTrustPayloadV1::WebBundleRevocation(core) => {
+            if core.root_key_thumbprint != anchor.root_key_thumbprint() {
+                return Err(wrong_root);
+            }
+            let names_a_release = objects[..catalog_len].iter().any(|bytes| {
+                object_hash(bytes) == core.release_object_hash
+                    && matches!(
+                        decode_exact_object(bytes),
+                        Ok(ParsedArchiveObject::Trust(release))
+                            if release.value().subtype() == TrustSubtypeV1::WebBundleRelease
+                    )
+            });
+            if !names_a_release {
+                return Err(WebBundleAdmissionError::UnknownRelease);
+            }
+            Ok(WebBundleAdmission::Revocation {
+                object_hash: candidate_hash,
+                release_object_hash: core.release_object_hash,
+            })
+        }
+        _ => Err(WebBundleAdmissionError::NotBundleFamily),
+    }
+}
