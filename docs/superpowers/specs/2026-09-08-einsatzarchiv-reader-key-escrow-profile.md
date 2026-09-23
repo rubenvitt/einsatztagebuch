@@ -508,7 +508,10 @@ Mindest- und Höchstversionsfälle bleiben Stufe 7.
 
 `WR-075` (`docs/traceability/v0.1-requirements.csv:158`) bewegt sich erst, wenn die
 Fingerprint-Bindung aus Abschnitt 6 mit Zeugen steht; bis dahin bleibt die Zeile `planned` und
-wird im Stufe-5-Gate als dokumentierte Grenze geführt (`docs/traceability/stage-5-gate.md:341-348`,
-Pin-Tabelle `tools/xtask/tests/stage_gate.rs:554`, `:736-745`). Die Transport-Fingerprint-Anteile
-von `AK-47` und `AK-53` hängen an derselben Zusage. Jeder Statuswechsel zieht durch
-`tools/xtask/src/main.rs:1988`, `:2485-2506`, `:3408`, `:4148`.
+wird im Stufe-5-Gate als dokumentierte Grenze geführt. Die Transport-Fingerprint-Anteile
+von `AK-47` und `AK-53` hängen an derselben Zusage.
+
+**Stand nach der Umsetzung (DRK-456 … DRK-461):** `WR-075` ist `integrated`; die dokumentierte
+Grenze ist entfallen, der Grenzmechanismus des Stufe-5-Gates ist weiter synthetisch bezeugt.
+`AK-47` und `AK-53` bleiben `implemented`. Belege und verbliebene benannte Grenzen stehen in
+`docs/traceability/stage-5-gate.md`, Abschnitt „Geschlossen mit DRK-318“.
