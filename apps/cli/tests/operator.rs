@@ -963,6 +963,56 @@ mod process_native {
         }
     }
 
+    /// Wie lange eine Escrow-Laufzeit mit `escrow-expires-after-consumption`
+    /// nach dem Öffnen noch gilt: genug für Prüfung, Transportdatei und
+    /// Reauthentifizierung, danach läuft sie echt ab.
+    const ESCROW_SESSION_BUDGET_MS: i64 = 15_000;
+
+    /// Die Haltung einer Escrow-Laufzeit, die ZWISCHEN der ersten
+    /// Sitzungsprüfung und der privaten Operation abläuft.
+    ///
+    /// Die Haltung selbst ist immer erfüllt. Sobald aber eine Verbrauchszeile
+    /// steht, wartet die Abfrage, bis die Laufzeit über die Uhr abgelaufen ist;
+    /// die Frischeprüfung direkt danach (`measured_posture`) meldet dann den
+    /// Ablauf. Vor dem Verbrauch verzögert sie nichts. Gelesen wird über eine
+    /// eigene Verbindung (WAL, nur lesend, ohne Migration einer neuen Datei).
+    struct ExpiresAfterEscrowConsumption {
+        database: PathBuf,
+        expires_at: i64,
+    }
+
+    impl ea_key_provider::DevicePostureProvider for ExpiresAfterEscrowConsumption {
+        fn report(
+            &self,
+        ) -> Result<ea_key_provider::DevicePostureReport, ea_key_provider::KeyError> {
+            let (provider, key) = database_provider_for(true);
+            let consumed = EncryptedDatabase::open_existing(&self.database, &provider, &key)
+                .ok()
+                .and_then(|database| {
+                    database
+                        .query_row("SELECT count(*) FROM reader_key_escrow_opening", &[])
+                        .ok()
+                        .flatten()
+                        .and_then(|row| row.integer(0).ok())
+                })
+                .is_some_and(|count| count > 0);
+            if consumed {
+                loop {
+                    let now = support::live_clock().get();
+                    if now > self.expires_at {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        u64::try_from(self.expires_at - now + 1).unwrap(),
+                    ));
+                }
+            }
+            ea_key_provider::DevicePostureProvider::report(
+                &ea_key_provider::DevicePostureProviderFake::all_passing(),
+            )
+        }
+    }
+
     #[test]
     #[ignore = "separate cfg(test) CLI fixture executable; never selected by production main"]
     fn fixture_cli() {
@@ -1010,12 +1060,26 @@ mod process_native {
         // Reader-Key-Escrow (DRK-458). Nur der Laufzeitöffner ist die
         // Fixture; der Cutover-Port der Publikation bleibt der produktive.
         // `escrow-stale-runtime` öffnet eine Laufzeit, die während der
-        // Zeremonie VOR dem Verbrauch abläuft.
+        // Zeremonie VOR dem Verbrauch abläuft. `escrow-expires-after-consumption`
+        // öffnet eine, die erst NACH dem Verbrauch abläuft (siehe
+        // [`ExpiresAfterEscrowConsumption`]).
         let escrow_opener = |config, anchor: &Path, now: UnixMillis| {
             let native = NativeOperatorProvider::open_test_fixture(
                 directory.join("ea-native-operator"),
                 false,
             )?;
+            if directory.join("escrow-expires-after-consumption").exists() {
+                let opened_at = UnixMillis::new(
+                    now.get() - (ea_operator::MAX_INACTIVITY_MS - ESCROW_SESSION_BUDGET_MS),
+                );
+                let posture = Arc::new(ExpiresAfterEscrowConsumption {
+                    database: directory.join("operator.sqlite"),
+                    expires_at: opened_at.get() + ea_operator::MAX_INACTIVITY_MS,
+                });
+                return OperatorRuntime::open_with_test_native_and_posture(
+                    config, anchor, opened_at, false, native, posture,
+                );
+            }
             let stale = directory.join("escrow-stale-runtime").exists();
             let opened_at = if stale {
                 UnixMillis::new(now.get() - (ea_operator::MAX_INACTIVITY_MS - 3_000))
