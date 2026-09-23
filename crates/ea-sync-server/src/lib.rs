@@ -42,8 +42,8 @@ pub use models::{
     PendingDeviceRequestV1, PendingRegistrationOutcome, ReaderAckCommandV1, ReaderVaultBlobV1,
     RegistryAdmissionFenceV1, RegistryLineEntryV1, RepositoryError, SecurityEventKindV1,
     SecurityEventV1, StagedObject, StoreError, StoredObject, StoredWebauthnCredentialV1,
-    TrustEventCommandV1, TrustIndexOutcome, VaultBlobOutcome, WebauthnCredentialV1, object_key,
-    object_type_segment,
+    TrustCatalogFenceV1, TrustEventCommandV1, TrustIndexOutcome, ValidatedTrustEventV1,
+    VaultBlobOutcome, WebauthnCredentialV1, object_key, object_type_segment,
 };
 pub use ports::{
     ActiveRegistryHeadV1, ArchiveExportDirectory, AuthorityError, ChainHeadReader,

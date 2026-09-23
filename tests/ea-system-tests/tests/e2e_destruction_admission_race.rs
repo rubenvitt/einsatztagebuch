@@ -264,6 +264,7 @@ async fn publish_catalog_ports(
                 registry_version,
                 effective_from,
                 received_at: now,
+                catalog_fence: None,
             })
             .await
             .unwrap();
@@ -427,6 +428,7 @@ async fn same_object_indexing_and_reservation_serialize_without_reverse_lock_dea
         registry_version: None,
         effective_from: UnixMillis::new(0),
         received_at: live.clock.now(),
+        catalog_fence: None,
     };
     let repository = live.repository.clone();
     let indexing = tokio::spawn(async move { repository.index_event(event).await });

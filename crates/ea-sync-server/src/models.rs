@@ -628,6 +628,11 @@ pub enum VaultBlobOutcome {
 /// Registry-Linie von `GET /v1/trust/registry`: die Antwort verlangt streng
 /// aufsteigende, duplikatfreie Versionen (`trust-registry-response-v1`), also
 /// kann dort kein zweites Objekt unter derselben Version stehen.
+///
+/// `catalog_fence` ist `Some` genau dann, wenn die Prüfung ein Urteil über die
+/// GANZE Objektmenge gefällt hat — heute die drei Reader-Key-Escrow-Familien
+/// (Eindeutigkeit, v1.1-Profil §3.1). Der Index nimmt ein solches Objekt nur
+/// an, solange der Katalog noch auf genau dieser Revision steht.
 #[derive(Clone, Eq, PartialEq)]
 pub struct TrustEventCommandV1 {
     pub organization_id: OrganizationId,
@@ -637,6 +642,27 @@ pub struct TrustEventCommandV1 {
     pub registry_version: Option<RegistryVersion>,
     pub effective_from: UnixMillis,
     pub received_at: UnixMillis,
+    pub catalog_fence: Option<TrustCatalogFenceV1>,
+}
+
+/// Der technische Katalogstand, gegen den eine Trust-Prüfung lief.
+///
+/// Er gewährt keine Autorität; er ist ein Vergleichswert. Jede Indexierung
+/// eines Trust-Ereignisses hebt die Revision in derselben Transaktion
+/// (`migrations/0002_trust_authority_cache.sql`). Steht sie beim Indexieren
+/// nicht mehr auf diesem Wert, hat ein anderes Objekt die geprüfte Menge
+/// verändert, und das Urteil gilt nicht mehr.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TrustCatalogFenceV1 {
+    pub catalog_revision: i64,
+}
+
+/// Was eine bestandene Trust-Prüfung an den Index weitergibt.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ValidatedTrustEventV1 {
+    /// `Some` für ein Urteil über die ganze Objektmenge; siehe
+    /// [`TrustEventCommandV1`].
+    pub catalog_fence: Option<TrustCatalogFenceV1>,
 }
 
 impl fmt::Debug for TrustEventCommandV1 {
@@ -657,6 +683,9 @@ pub enum TrustIndexOutcome {
     AlreadyIndexed,
     /// Dieselbe Registry-Version traegt bereits ein ANDERES Objekt.
     Conflict,
+    /// Der Katalog ist zwischen Prüfung und Indexierung gewandert; das Urteil
+    /// über die ganze Objektmenge gilt nicht mehr. Wiederholbar.
+    CatalogMoved,
 }
 
 /// Ein Satz der Registry-Linie.

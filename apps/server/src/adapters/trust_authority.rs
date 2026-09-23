@@ -58,7 +58,8 @@ use ea_crypto::{CanonicalPublicCoseKey, CertificateCapability};
 use ea_format::{DecodedTrustPayloadV1, ParsedArchiveObject, TrustSubtypeV1};
 use ea_sync_protocol::RegisteredDevice;
 use ea_sync_server::{
-    AuthorityError, ObjectStore, RegistryHeadSelectionV1, RepositoryError,
+    AuthorityError, ObjectStore, RegistryHeadSelectionV1, RepositoryError, TrustCatalogFenceV1,
+    ValidatedTrustEventV1,
     trust::{TrustEventValidator, TrustPublishError, TrustServiceError},
 };
 use ea_trust::{
@@ -297,6 +298,20 @@ impl PostgresTrustAuthority {
             },
             pinned_head,
         }))
+    }
+
+    /// Anker und Katalogrevision — der Stand, gegen den ein Urteil über die
+    /// ganze Objektmenge läuft.
+    async fn catalog_identity(
+        &self,
+        organization_id: OrganizationId,
+    ) -> Result<CatalogIdentity, TrustServiceError> {
+        match self.authority_snapshot(organization_id).await {
+            Ok(Some(snapshot)) => Ok(snapshot.catalog),
+            Ok(None) => Err(TrustServiceError::AnchorMissing),
+            Err(AuthorityError::Unavailable) => Err(TrustServiceError::DependencyUnavailable),
+            Err(AuthorityError::StateConflict) => Err(TrustServiceError::StateConflict),
+        }
     }
 
     /// Alle indizierten `.etb` dieser Organisation, mit ihren EXAKTEN Bytes.
@@ -602,7 +617,16 @@ impl TrustEventValidator for PostgresTrustAuthority {
         object_hash: ObjectHash,
         exact_etb_bytes: &[u8],
         now: UnixMillis,
-    ) -> Result<(), TrustPublishError> {
+    ) -> Result<ValidatedTrustEventV1, TrustPublishError> {
+        let escrow_family = subtype_of(exact_etb_bytes).is_some_and(is_reader_key_escrow_family);
+        // Das Urteil über ein Escrow-Familienobjekt gilt der GANZEN Menge
+        // (Eindeutigkeit). Der Katalogstand wird deshalb VOR dem Lesen
+        // festgehalten und an den Index weitergereicht.
+        let before = if escrow_family {
+            Some(self.catalog_identity(organization_id).await?)
+        } else {
+            None
+        };
         let prepared = self
             .prepare(organization_id, Some(exact_etb_bytes))
             .await?
@@ -623,7 +647,9 @@ impl TrustEventValidator for PostgresTrustAuthority {
 
         if subtype_of(exact_etb_bytes) == Some(TrustSubtypeV1::RegistryEvent) {
             return match head {
-                Some(head) if head.registry_head_hash() == object_hash => Ok(()),
+                Some(head) if head.registry_head_hash() == object_hash => {
+                    Ok(ValidatedTrustEventV1::default())
+                }
                 // „erforderlicher neuerer Registry-Head“ — 409 mit genau der
                 // Version und dem Hash, die der Aufrufer zuerst holen muss.
                 Some(head) => Err(TrustPublishError::requiring_head(
@@ -634,7 +660,7 @@ impl TrustEventValidator for PostgresTrustAuthority {
             };
         }
 
-        if subtype_of(exact_etb_bytes).is_some_and(is_reader_key_escrow_family) {
+        if let Some(before) = before {
             let admission = verify_reader_key_escrow_family_admission(
                 &trust,
                 head.as_ref(),
@@ -642,8 +668,18 @@ impl TrustEventValidator for PostgresTrustAuthority {
                 now,
             )
             .map_err(|error| TrustPublishError::from(map_escrow_admission_error(error)))?;
-            return escrow_cutover_gate(&prepared, exact_etb_bytes, &admission)
-                .map_err(TrustPublishError::from);
+            escrow_cutover_gate(&prepared, exact_etb_bytes, &admission)?;
+            // Die Object-Store-Lesungen liegen ausserhalb des SQL-Snapshots.
+            // Nur ein Lauf, den DERSELBE Katalogstand einrahmt, zaehlt; der
+            // Index vergleicht ihn noch einmal unter der Organisationssperre.
+            if self.catalog_identity(organization_id).await? != before {
+                return Err(TrustServiceError::StateConflict.into());
+            }
+            return Ok(ValidatedTrustEventV1 {
+                catalog_fence: Some(TrustCatalogFenceV1 {
+                    catalog_revision: before.revision,
+                }),
+            });
         }
 
         verify_catalogue_admission(
@@ -653,7 +689,7 @@ impl TrustEventValidator for PostgresTrustAuthority {
             now,
             prepared.proposed_sequence,
         )
-        .map(|_| ())
+        .map(|_| ValidatedTrustEventV1::default())
         .map_err(|error| TrustPublishError::from(map_admission_error(error)))
     }
 

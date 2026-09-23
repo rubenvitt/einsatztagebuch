@@ -1600,3 +1600,139 @@ async fn the_escrow_family_negatives_leave_no_row() {
 
     database.cleanup().await;
 }
+
+/// Die echten Adapter hinter dem Endpunkt: Prüfung und Index.
+async fn escrow_adapters(
+    database: &common::TestDatabase,
+    organization_id: OrganizationId,
+) -> (
+    einsatzarchiv_server::adapters::trust_authority::PostgresTrustAuthority,
+    einsatzarchiv_server::adapters::postgres::PostgresRepository,
+) {
+    use std::sync::Arc;
+
+    use einsatzarchiv_server::adapters::{
+        clock::FixedClock, postgres::PostgresRepository, s3::S3ObjectStore,
+        trust_authority::PostgresTrustAuthority,
+    };
+    let repository = Arc::new(PostgresRepository::new(database.pool().clone()));
+    let client = common::object_store_client().await;
+    let objects: Arc<dyn ea_sync_server::ObjectStore> = Arc::new(S3ObjectStore::new(
+        client,
+        common::INTEGRATION_BUCKET.to_owned(),
+        organization_id,
+        repository.clone(),
+        repository,
+        Arc::new(FixedClock(UnixMillis::new(common::READ_SERVER_NOW_MILLIS))),
+    ));
+    (
+        PostgresTrustAuthority::new(database.pool().clone(), objects),
+        PostgresRepository::new(database.pool().clone()),
+    )
+}
+
+/// Ein Escrow zum selben Reader-Zertifikat mit eigener, bereits
+/// angenommener Freigabe: `(freigabe, escrow)`.
+fn rival_escrow(
+    closure: &trust_closure::ExtendedClosure,
+    id: u8,
+    subject: [u8; 16],
+) -> (Vec<u8>, Vec<u8>) {
+    let core = trust_closure::escrow_core(closure, subject, ESCROW_ISSUED_AT);
+    let approval = trust_closure::escrow_approval_core(closure, id, ESCROW_APPROVAL_WINDOW);
+    trust_closure::escrow_objects(&core, &approval)
+}
+
+/// Der Katalogzaun (F7): zwei Escrows zum selben Reader-Zertifikat, beide
+/// gegen DENSELBEN Katalogstand geprüft und einzeln gültig. Das erste wird
+/// indiziert; das zweite darf danach nicht mehr auf dem alten Stand hinein,
+/// sonst stünden zwei gültige Escrows im Katalog und jede weitere
+/// Escrow-Annahme der Organisation scheiterte an `EscrowConflict`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_escrow_checked_against_a_moved_catalog_is_not_indexed() {
+    use ea_sync_server::{
+        TrustEventCommandV1, TrustEventStore, TrustIndexOutcome, trust::TrustEventValidator,
+    };
+
+    let database = common::fresh_database().await;
+    let ready = escrow_server(&database).await;
+    seed_capable_release(&ready, &database).await;
+    let organization_id = ready.closure.organization_id;
+    let (approval_a, escrow_a) =
+        rival_escrow(&ready.closure, 0xc1, trust_closure::ESCROW_READER_SUBJECT);
+    let (approval_b, escrow_b) =
+        rival_escrow(&ready.closure, 0xc2, trust_closure::ESCROW_READER_SUBJECT);
+    for (marker, approval) in [(0, &approval_a), (1, &approval_b)] {
+        let response = post_escrow_object(&ready, approval, marker).await;
+        assert_eq!(status_and_code(&response), (201, None), "approval {marker}");
+    }
+
+    let (validator, index) = escrow_adapters(&database, organization_id).await;
+    let now = UnixMillis::new(common::READ_SERVER_NOW_MILLIS);
+    let validate = |bytes: Vec<u8>| {
+        let validator = &validator;
+        async move {
+            validator
+                .validate_exact_etb(organization_id, ea_crypto::object_hash(&bytes), &bytes, now)
+                .await
+                .expect("each escrow is valid on its own")
+                .catalog_fence
+                .expect("an escrow verdict is fenced on the catalog")
+        }
+    };
+    let fence_a = validate(escrow_a.clone()).await;
+    let fence_b = validate(escrow_b.clone()).await;
+    assert_eq!(
+        fence_a, fence_b,
+        "both were checked against the same catalog"
+    );
+
+    let command = |bytes: &[u8], fence| TrustEventCommandV1 {
+        organization_id,
+        object_hash: ea_crypto::object_hash(bytes),
+        size_bytes: u64::try_from(bytes.len()).expect("small"),
+        subtype_code: "readerKeyEscrow".to_owned(),
+        registry_version: None,
+        effective_from: now,
+        received_at: now,
+        catalog_fence: Some(fence),
+    };
+    common::seed_trust_object_bytes(&escrow_a).await;
+    common::seed_trust_object_bytes(&escrow_b).await;
+    assert_eq!(
+        index
+            .index_event(command(&escrow_a, fence_a))
+            .await
+            .expect("index"),
+        TrustIndexOutcome::Indexed
+    );
+    assert_eq!(
+        index
+            .index_event(command(&escrow_b, fence_b))
+            .await
+            .expect("index"),
+        TrustIndexOutcome::CatalogMoved,
+        "the second verdict was reached against a catalog that no longer exists"
+    );
+    assert!(!indexed(database.pool(), &escrow_b).await);
+    // Eine byte-gleiche Wiederholung bleibt idempotent, auch mit altem Zaun.
+    assert_eq!(
+        index
+            .index_event(command(&escrow_a, fence_a))
+            .await
+            .expect("index"),
+        TrustIndexOutcome::AlreadyIndexed
+    );
+
+    // Über den Endpunkt prüft die Wiederholung gegen die neue Menge und
+    // endet mit dem eigentlichen Befund: zwei Escrows zu einem Zertifikat.
+    let retry = post_escrow_object(&ready, &escrow_b, 2).await;
+    assert_eq!(
+        status_and_code(&retry),
+        (409, Some("EA-TRUST-EVENT-CONFLICT".to_owned())),
+        "the retry meets the admitted escrow"
+    );
+    assert!(!indexed(database.pool(), &escrow_b).await);
+
+    database.cleanup().await;
+}
