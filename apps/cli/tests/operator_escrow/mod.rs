@@ -237,6 +237,16 @@ impl EscrowInstallation {
     }
 
     fn open(&self, recovery_key: &str, authorization: &Path) -> std::process::Output {
+        self.open_marked(recovery_key, authorization, None)
+    }
+
+    /// Eine Öffnung mit einem Fixture-Marker für den Laufzeitöffner.
+    fn open_marked(
+        &self,
+        recovery_key: &str,
+        authorization: &Path,
+        marker: Option<&str>,
+    ) -> std::process::Output {
         self.run(
             &[
                 "reader-key-escrow",
@@ -252,7 +262,7 @@ impl EscrowInstallation {
                 "--escrow-outbox",
                 self.outbox.to_str().unwrap(),
             ],
-            None,
+            marker,
         )
     }
 
@@ -730,4 +740,49 @@ fn reader_key_escrow_pickup_refuses_another_transport_key() {
         ]
     );
     installation.assert_no_canaries(&[&broken, &refused, &picked]);
+}
+
+/// Pflichtzeuge für die ECHTE Sitzungsprüfung der Zeremonie B: die Laufzeit
+/// besteht Prüfung, Transportdatei, Reauthentifizierung und die erste
+/// Sitzungsprüfung, läuft aber zwischen dem Verbrauch und der privaten
+/// Operation über die Uhr ab. Dann wird nichts entkapselt und nichts
+/// gespeichert oder ausgeliefert; der Verbrauch steht mit 14/`failed` im
+/// Audit, und die Autorisierung ist verbrannt.
+#[test]
+fn reader_key_escrow_open_refuses_a_session_expiring_after_consumption() {
+    let installation = EscrowInstallation::new("escrow-expiring", "reader-key-escrow-recovery");
+    installation.transport(TRANSPORT_SEED);
+    let authorization = installation.authorization(0xf4, TRANSPORT_SEED);
+    let recovery = installation.software_recovery_key();
+
+    let expired = installation.open_marked(
+        &recovery,
+        &authorization,
+        Some("escrow-expires-after-consumption"),
+    );
+    assert_eq!(
+        expired.status.code(),
+        Some(12),
+        "{}",
+        String::from_utf8_lossy(&expired.stderr)
+    );
+    assert!(String::from_utf8_lossy(&expired.stderr).contains("EA-ESCROW-OPERATOR-UNAUTHORIZED"));
+    assert_eq!(installation.count("reader_key_escrow_opening"), 1);
+    assert_eq!(installation.count("operator_admin_replay"), 2);
+    assert_eq!(
+        installation.escrow_outcomes(),
+        [LocalAuditOutcomeV1::Accepted, LocalAuditOutcomeV1::Failed]
+    );
+    assert_eq!(installation.count("reader_key_escrow_result"), 0);
+    assert_eq!(installation.count("reader_key_escrow_result_closure"), 0);
+    assert_eq!(fs::read_dir(&installation.outbox).unwrap().count(), 0);
+
+    // Verbrannt: dieselbe Autorisierung läuft nie wieder, auch nicht mit
+    // gültiger Laufzeit.
+    let again = installation.open(&recovery, &authorization);
+    assert_eq!(again.status.code(), Some(12));
+    assert!(String::from_utf8_lossy(&again.stderr).contains("EA-TRUST-AUTH-REPLAY"));
+    assert_eq!(installation.count("reader_key_escrow_result"), 0);
+    assert_eq!(fs::read_dir(&installation.outbox).unwrap().count(), 0);
+    installation.assert_no_canaries(&[&expired, &again]);
 }
