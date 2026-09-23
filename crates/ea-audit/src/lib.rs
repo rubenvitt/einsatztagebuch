@@ -2,7 +2,7 @@
 //!
 //! Drei Zusagen tragen diese Crate:
 //!
-//! 1. **Kein zweiter Typsatz.** Die dreizehn Aktionen und ihre Kontexte kommen
+//! 1. **Kein zweiter Typsatz.** Die fünfzehn Aktionen und ihre Kontexte kommen
 //!    unveraendert aus `ea_format`; diese Crate deklariert weder eine zweite
 //!    Aktionsaufzaehlung noch einen zweiten Kontexttyp. Ein zweiter Typsatz ist
 //!    genau der Weg, auf dem falsche Bytes entstehen.

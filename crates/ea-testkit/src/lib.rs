@@ -93,10 +93,10 @@ use ea_format::{
     IndependentTimeKindV1, IndependentTimeReferenceV1, KeyProtectionProfileV1, LocalAuditActionV1,
     LocalAuditEventCoreFieldsV1, LocalAuditOutcomeV1, ManifestCoreFieldsV1, ManifestCoreV1,
     OperatorBindingFieldsV1, OperatorRoleV1, OrganizationAdminAuthorizationFieldsV1,
-    PolicyFieldsV1, ReceiptCoreFieldsV1, ReceiptCoreV1, ReceiptV1, RegistryChangeV1,
-    RegistryEventFieldsV1, RenewalCoreFieldsV1, RenewalCoreV1, RetentionPolicyFieldsV1,
-    Rfc3161EvidenceFieldsV1, RootCertificateFieldsV1, SignedManifestV1, StaleRegistryContextV1,
-    TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, WebBundleReleaseCoreV1,
+    PolicyFieldsV1, ReaderKeyEscrowContextV1, ReceiptCoreFieldsV1, ReceiptCoreV1, ReceiptV1,
+    RegistryChangeV1, RegistryEventFieldsV1, RenewalCoreFieldsV1, RenewalCoreV1,
+    RetentionPolicyFieldsV1, Rfc3161EvidenceFieldsV1, RootCertificateFieldsV1, SignedManifestV1,
+    StaleRegistryContextV1, TrustObjectV1, TrustPayloadV1, TrustSubtypeV1, WebBundleReleaseCoreV1,
     WebBundleRevocationCoreV1, encode_destroyed_entry_stub, encode_entry_package, encode_evidence,
     encode_grant, encode_local_audit_core, encode_local_audit_event, encode_receipt, encode_trust,
 };
@@ -6352,6 +6352,22 @@ const LOCAL_AUDIT_MIGRATION_ACTIVE_POINTER_FILL: u8 = 0x88;
 /// Der Gegenstand des `sessionExpired`-Ereignisses (Code 12, DRK-282).
 const LOCAL_AUDIT_SESSION_EXPIRED_SUBJECT_FILL: u8 = 0x89;
 
+/// Das publizierte Escrow der Aktion 13 (DRK-458).
+const LOCAL_AUDIT_ESCROW_PUBLICATION_ESCROW_FILL: u8 = 0x8a;
+
+/// Die Freigabe, die die Publikation verbraucht.
+const LOCAL_AUDIT_ESCROW_PUBLICATION_APPROVAL_FILL: u8 = 0x8b;
+
+/// Die aktive `webBundleRelease` der Cutover-Vorbedingung.
+const LOCAL_AUDIT_ESCROW_PUBLICATION_BUNDLE_RELEASE_FILL: u8 = 0x8c;
+
+/// Die Öffnungsautorisierung der Aktion 14 (DRK-458); das Escrow ist
+/// dasselbe wie bei der Publikation.
+const LOCAL_AUDIT_ESCROW_OPENING_AUTHORIZATION_FILL: u8 = 0x8d;
+
+/// Der Abdruck des Ziel-Transport-Schlüssels.
+const LOCAL_AUDIT_ESCROW_OPENING_TRANSPORT_FILL: u8 = 0x8e;
+
 /// Die Sequenz, ab der die neue Bindung wirkt.
 const LOCAL_AUDIT_BINDING_CHANGE_SEQUENCE: u64 = 41;
 
@@ -6439,12 +6455,13 @@ fn local_audit_event(
     }
 }
 
-/// Die dreizehn Ereignisse, eines je Aktion, mit ihrem Vektornamen.
+/// Die fünfzehn Ereignisse, eines je Aktion, mit ihrem Vektornamen.
 ///
 /// Das dreizehnte (`sessionExpired`, DRK-282) steht additiv am Ende; die zwölf
-/// älteren Vektoren bleiben Byte für Byte unverändert.
+/// älteren Vektoren bleiben Byte für Byte unverändert. Ebenso additiv folgen
+/// Publikation (13) und Öffnung (14) eines Reader-Key-Escrows (DRK-458).
 ///
-/// Alle neun Kontextmarken kommen vor, und beide nullbaren Stellen stehen
+/// Alle zehn Kontextmarken kommen vor, und beide nullbaren Stellen stehen
 /// mindestens einmal als `null`: die Bedienerbindung im `login`-Ereignis, der
 /// Vorgaenger und der Nachfolger im Bindungslebenslauf.
 fn local_audit_accepted_events() -> Vec<(&'static str, LocalAuditEventCoreFieldsV1)> {
@@ -6613,6 +6630,35 @@ fn local_audit_accepted_events() -> Vec<(&'static str, LocalAuditEventCoreFields
                     local_audit_object_hash(LOCAL_AUDIT_SESSION_EXPIRED_SUBJECT_FILL),
                 ))),
                 LocalAuditOutcomeV1::Failed,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-reader-key-escrow-publication",
+            local_audit_event(
+                LocalAuditActionV1::ReaderKeyEscrowPublication(
+                    ReaderKeyEscrowContextV1::publication(
+                        local_audit_object_hash(LOCAL_AUDIT_ESCROW_PUBLICATION_ESCROW_FILL),
+                        local_audit_object_hash(LOCAL_AUDIT_ESCROW_PUBLICATION_APPROVAL_FILL),
+                        local_audit_object_hash(LOCAL_AUDIT_ESCROW_PUBLICATION_BUNDLE_RELEASE_FILL),
+                    ),
+                ),
+                LocalAuditOutcomeV1::Completed,
+                binding,
+            ),
+        ),
+        (
+            "event/accepted-reader-key-escrow-opening",
+            local_audit_event(
+                LocalAuditActionV1::ReaderKeyEscrowOpening(ReaderKeyEscrowContextV1::opening(
+                    local_audit_object_hash(LOCAL_AUDIT_ESCROW_PUBLICATION_ESCROW_FILL),
+                    local_audit_object_hash(LOCAL_AUDIT_ESCROW_OPENING_AUTHORIZATION_FILL),
+                    KeyThumbprint::try_from(
+                        [LOCAL_AUDIT_ESCROW_OPENING_TRANSPORT_FILL; 32].as_slice(),
+                    )
+                    .expect("32 bytes"),
+                )),
+                LocalAuditOutcomeV1::Accepted,
                 binding,
             ),
         ),
@@ -7939,13 +7985,13 @@ mod tests {
     }
 
     /// Der Erzeuger benennt jeden Eintrag und jede Datei genau einmal, deckt
-    /// alle dreizehn Aktionen ab und ist deterministisch.
+    /// alle fünfzehn Aktionen ab und ist deterministisch.
     #[test]
     fn the_local_audit_generator_is_deterministic() {
         let manifest = local_audit_v1_manifest();
         assert_eq!(manifest.family, LOCAL_AUDIT_FAMILY);
         assert_eq!(manifest.version, LOCAL_AUDIT_V1_VERSION);
-        assert_eq!(manifest.entries.len(), 18);
+        assert_eq!(manifest.entries.len(), 20);
         let names = manifest
             .entries
             .iter()
@@ -7958,7 +8004,7 @@ mod tests {
             .filter(|entry| entry.expected_outcome == ExpectedOutcome::Accepted)
             .count();
         assert_eq!(
-            accepted, 13,
+            accepted, 15,
             "one accepted vector per action of local-audit-action-v1"
         );
         assert_eq!(manifest.entries.len() - accepted, 5);

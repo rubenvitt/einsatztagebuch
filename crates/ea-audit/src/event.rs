@@ -3,11 +3,14 @@
 use core::fmt;
 
 use ea_crypto::CryptoError;
-use ea_format::{FormatError, GenericAuditContextV1, LocalAuditActionV1, LocalAuditOutcomeV1};
+use ea_format::{
+    FormatError, GenericAuditContextV1, LocalAuditActionV1, LocalAuditOutcomeV1,
+    ReaderKeyEscrowContextV1,
+};
 use ea_key_provider::KeyError;
 use ea_local_store::StoreError;
 use ea_operator::OperatorSessionProof;
-use ea_types::{DeviceId, EventId, ObjectHash, OrganizationId};
+use ea_types::{DeviceId, EventId, KeyThumbprint, ObjectHash, OrganizationId};
 
 /// Ein Fehlschlag an der Auditgrenze.
 ///
@@ -202,6 +205,95 @@ impl TypedLocalAuditEvent {
                 known_binding_object_hash,
             )),
             outcome: LocalAuditOutcomeV1::Failed,
+        }
+    }
+
+    /// Die Publikation eines Reader-Key-Escrows (DRK-458, Aktion 13).
+    ///
+    /// Immer `completed`: die Zeile entsteht atomar mit dem Verbrauch der
+    /// Freigabe und der Publikationszeile, eine gescheiterte Publikation
+    /// hinterlässt keinen Verbrauch. Der Kontext trägt den Objekthash der
+    /// `webBundleRelease`, die die Cutover-Vorbedingung erfüllt, und keinen
+    /// Transport-Abdruck.
+    #[must_use]
+    pub const fn reader_key_escrow_published(
+        escrow_object_hash: ObjectHash,
+        approval_object_hash: ObjectHash,
+        bundle_release_object_hash: ObjectHash,
+    ) -> Self {
+        Self {
+            action: LocalAuditActionV1::ReaderKeyEscrowPublication(
+                ReaderKeyEscrowContextV1::publication(
+                    escrow_object_hash,
+                    approval_object_hash,
+                    bundle_release_object_hash,
+                ),
+            ),
+            outcome: LocalAuditOutcomeV1::Completed,
+        }
+    }
+
+    /// Der Verbrauch einer Öffnungsautorisierung (Aktion 14, `accepted`) —
+    /// gebucht VOR jedem Zugriff auf den privaten Recovery-Schlüssel.
+    #[must_use]
+    pub const fn reader_key_escrow_consumed(
+        escrow_object_hash: ObjectHash,
+        authorization_object_hash: ObjectHash,
+        target_transport_key_thumbprint: KeyThumbprint,
+    ) -> Self {
+        Self::reader_key_escrow_opening(
+            escrow_object_hash,
+            authorization_object_hash,
+            target_transport_key_thumbprint,
+            LocalAuditOutcomeV1::Accepted,
+        )
+    }
+
+    /// Die erste erfolgreiche Abholung des versiegelten Umschlags (Aktion 14,
+    /// `completed`); das dauerhafte Ergebnis ist damit gelöscht.
+    #[must_use]
+    pub const fn reader_key_escrow_delivered(
+        escrow_object_hash: ObjectHash,
+        authorization_object_hash: ObjectHash,
+        target_transport_key_thumbprint: KeyThumbprint,
+    ) -> Self {
+        Self::reader_key_escrow_opening(
+            escrow_object_hash,
+            authorization_object_hash,
+            target_transport_key_thumbprint,
+            LocalAuditOutcomeV1::Completed,
+        )
+    }
+
+    /// Eine Öffnung, die nach dem Verbrauch scheiterte oder deren Ergebnis
+    /// verfiel (Aktion 14, `failed`). Die Autorisierung ist verbrannt.
+    #[must_use]
+    pub const fn reader_key_escrow_failed(
+        escrow_object_hash: ObjectHash,
+        authorization_object_hash: ObjectHash,
+        target_transport_key_thumbprint: KeyThumbprint,
+    ) -> Self {
+        Self::reader_key_escrow_opening(
+            escrow_object_hash,
+            authorization_object_hash,
+            target_transport_key_thumbprint,
+            LocalAuditOutcomeV1::Failed,
+        )
+    }
+
+    const fn reader_key_escrow_opening(
+        escrow_object_hash: ObjectHash,
+        authorization_object_hash: ObjectHash,
+        target_transport_key_thumbprint: KeyThumbprint,
+        outcome: LocalAuditOutcomeV1,
+    ) -> Self {
+        Self {
+            action: LocalAuditActionV1::ReaderKeyEscrowOpening(ReaderKeyEscrowContextV1::opening(
+                escrow_object_hash,
+                authorization_object_hash,
+                target_transport_key_thumbprint,
+            )),
+            outcome,
         }
     }
 }

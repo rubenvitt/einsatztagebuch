@@ -1,4 +1,4 @@
-//! Der allgemeine Kodierer der dreizehn `local-audit-event-v1`-Ereignisse.
+//! Der allgemeine Kodierer der fünfzehn `local-audit-event-v1`-Ereignisse.
 //!
 //! Der eingefrorene Stufe-1-Test `local_audit.rs` steht daneben und bleibt
 //! unberuehrt: er prueft den SPEZIELLEN Dekodierer der Taktfreigabe gegen
@@ -11,8 +11,9 @@ use ea_format::{
     ClockReleaseContextV1, ClockReleaseJustificationV1, DestructionContextV1, ExportContextV1,
     FormatError, GenericAuditContextV1, HistoricalRegrantContextV1, IndependentTimeKindV1,
     IndependentTimeReferenceV1, LocalAuditActionV1, LocalAuditEventCoreFieldsV1,
-    LocalAuditOutcomeV1, StaleRegistryContextV1, decode_clock_release_audit,
-    decode_local_audit_event, encode_local_audit_core, encode_local_audit_event,
+    LocalAuditOutcomeV1, ReaderKeyEscrowContextV1, StaleRegistryContextV1,
+    decode_clock_release_audit, decode_local_audit_event, encode_local_audit_core,
+    encode_local_audit_event,
 };
 
 #[test]
@@ -164,19 +165,82 @@ fn every_context_position_carries_the_field_the_grammar_names() {
     }
 }
 
+/// DRK-458: der Kontextarm 9 folgt seiner Nullregel je Aktion. Ein
+/// Publikationskontext unter der Öffnungsaktion — und umgekehrt — wird nie
+/// kodiert, weil die Signaturgrenze ihn abweist.
+#[test]
+fn a_reader_key_escrow_context_under_the_other_action_is_never_encoded() {
+    let publication = fixtures::reader_key_escrow_publication_context();
+    let opening = fixtures::reader_key_escrow_opening_context();
+    for action in [
+        LocalAuditActionV1::ReaderKeyEscrowPublication(opening),
+        LocalAuditActionV1::ReaderKeyEscrowOpening(publication),
+    ] {
+        let event = fixtures::event_for(action, LocalAuditOutcomeV1::Accepted);
+        assert_eq!(
+            encode_local_audit_core(&event).unwrap_err(),
+            FormatError::Shape
+        );
+    }
+    assert!(publication.target_transport_key_thumbprint().is_none());
+    assert!(publication.bundle_release_object_hash().is_some());
+    assert!(opening.target_transport_key_thumbprint().is_some());
+    assert!(opening.bundle_release_object_hash().is_none());
+}
+
+/// Die Rundreise 13/14 über den allgemeinen Dekodierer liefert dieselben
+/// vier Positionen zurück, und die Aktion bleibt ihre eigene.
+#[test]
+fn reader_key_escrow_rows_round_trip_through_the_general_decoder() {
+    for (action, outcome, code) in [
+        (
+            LocalAuditActionV1::ReaderKeyEscrowPublication(
+                fixtures::reader_key_escrow_publication_context(),
+            ),
+            LocalAuditOutcomeV1::Completed,
+            13,
+        ),
+        (
+            LocalAuditActionV1::ReaderKeyEscrowOpening(
+                fixtures::reader_key_escrow_opening_context(),
+            ),
+            LocalAuditOutcomeV1::Accepted,
+            14,
+        ),
+    ] {
+        let event = fixtures::event_for(action, outcome);
+        let core = encode_local_audit_core(&event).unwrap();
+        let signed = encode_local_audit_event(&core, &fixtures::sign(&core)).unwrap();
+        let decoded = decode_local_audit_event(&signed).unwrap();
+        assert_eq!(decoded.action().code(), code);
+        assert_eq!(decoded.action().context_tag(), 9);
+        assert_eq!(decoded.outcome(), outcome);
+        let (LocalAuditActionV1::ReaderKeyEscrowPublication(context)
+        | LocalAuditActionV1::ReaderKeyEscrowOpening(context)) = decoded.action()
+        else {
+            panic!("a reader key escrow row decodes as one");
+        };
+        let expected = match code {
+            13 => fixtures::reader_key_escrow_publication_context(),
+            _ => fixtures::reader_key_escrow_opening_context(),
+        };
+        assert!(*context == expected);
+    }
+}
+
 mod fixtures {
     use super::{
         AdminRootContextV1, ArchiveProfileMigrationContextV1, BindingLifecycleContextV1,
         ClockReleaseContextV1, ClockReleaseJustificationV1, DestructionContextV1, ExportContextV1,
         GenericAuditContextV1, HistoricalRegrantContextV1, IndependentTimeKindV1,
         IndependentTimeReferenceV1, LocalAuditActionV1, LocalAuditEventCoreFieldsV1,
-        LocalAuditOutcomeV1, StaleRegistryContextV1, encode_local_audit_core,
-        encode_local_audit_event,
+        LocalAuditOutcomeV1, ReaderKeyEscrowContextV1, StaleRegistryContextV1,
+        encode_local_audit_core, encode_local_audit_event,
     };
     use ea_crypto::{CoseSigner, SecretBytes};
     use ea_types::{
-        ChainSequence, DeviceId, EntryHash, EventId, Hash32, ObjectHash, OrganizationId,
-        RegistryVersion, UnixMillis,
+        ChainSequence, DeviceId, EntryHash, EventId, Hash32, KeyThumbprint, ObjectHash,
+        OrganizationId, RegistryVersion, UnixMillis,
     };
 
     /// Die Kopfbytes, aus denen die drei Versaetze folgen. Sie sind hier
@@ -240,6 +304,12 @@ mod fixtures {
     const MIGRATION_TARGET_FILL: u8 = 0x46;
     const MIGRATION_INVENTORY_FILL: u8 = 0x47;
     const MIGRATION_ACTIVE_POINTER_FILL: u8 = 0x48;
+    const ESCROW_PUBLICATION_ESCROW_FILL: u8 = 0x49;
+    const ESCROW_PUBLICATION_APPROVAL_FILL: u8 = 0x4a;
+    const ESCROW_PUBLICATION_BUNDLE_RELEASE_FILL: u8 = 0x4b;
+    const ESCROW_OPENING_ESCROW_FILL: u8 = 0x4c;
+    const ESCROW_OPENING_AUTHORIZATION_FILL: u8 = 0x4d;
+    const ESCROW_OPENING_TRANSPORT_FILL: u8 = 0x4e;
 
     const BINDING_CHANGE_SEQUENCE: u64 = 12;
     const REVOCATION_SEQUENCE: u64 = 13;
@@ -271,6 +341,32 @@ mod fixtures {
 
     fn hash32(fill: u8) -> Hash32 {
         Hash32::try_from([fill; 32].as_slice()).expect("32 bytes")
+    }
+
+    /// Der Publikationskontext (Aktion 13) mit eigenen Füllbytes.
+    pub fn reader_key_escrow_publication_context() -> ReaderKeyEscrowContextV1 {
+        ReaderKeyEscrowContextV1::publication(
+            object_hash(ESCROW_PUBLICATION_ESCROW_FILL),
+            object_hash(ESCROW_PUBLICATION_APPROVAL_FILL),
+            object_hash(ESCROW_PUBLICATION_BUNDLE_RELEASE_FILL),
+        )
+    }
+
+    /// Der Öffnungskontext (Aktion 14) mit eigenen Füllbytes.
+    pub fn reader_key_escrow_opening_context() -> ReaderKeyEscrowContextV1 {
+        ReaderKeyEscrowContextV1::opening(
+            object_hash(ESCROW_OPENING_ESCROW_FILL),
+            object_hash(ESCROW_OPENING_AUTHORIZATION_FILL),
+            KeyThumbprint::try_from([ESCROW_OPENING_TRANSPORT_FILL; 32].as_slice())
+                .expect("32 bytes"),
+        )
+    }
+
+    pub fn event_for(
+        action: LocalAuditActionV1,
+        outcome: LocalAuditOutcomeV1,
+    ) -> LocalAuditEventCoreFieldsV1 {
+        event(action, outcome)
     }
 
     /// Ein Ereignis mit gebundener Bindung, festem Ausgang und fester Zeit.
@@ -375,7 +471,7 @@ mod fixtures {
         )
     }
 
-    /// Alle dreizehn Aktionen mit ihrem eigenen Kontext.
+    /// Alle fünfzehn Aktionen mit ihrem eigenen Kontext.
     ///
     /// `login` traegt KEINE Bindung: die nullbare sechste Position muss
     /// mindestens einmal als `null` durch den Kodierer laufen.
@@ -447,10 +543,22 @@ mod fixtures {
                 LocalAuditActionV1::SessionExpired(GenericAuditContextV1::new(None)),
                 LocalAuditOutcomeV1::Failed,
             ),
+            // DRK-458: Publikation und Öffnung eines Reader-Key-Escrows,
+            // additiv als Codes 13 und 14 am Ende.
+            event(
+                LocalAuditActionV1::ReaderKeyEscrowPublication(
+                    reader_key_escrow_publication_context(),
+                ),
+                LocalAuditOutcomeV1::Completed,
+            ),
+            event(
+                LocalAuditActionV1::ReaderKeyEscrowOpening(reader_key_escrow_opening_context()),
+                LocalAuditOutcomeV1::Accepted,
+            ),
         ]
     }
 
-    /// Dieselben dreizehn Aktionen mit den beiden eingefrorenen Zahlen.
+    /// Dieselben fünfzehn Aktionen mit den beiden eingefrorenen Zahlen.
     ///
     /// Anders als `one_event_per_action` traegt hier JEDES Ereignis eine
     /// Bindung und dieselbe Zeit, weil die beiden Versaetze sonst wandern.
@@ -459,7 +567,7 @@ mod fixtures {
         for (index, event) in one_event_per_action().into_iter().enumerate() {
             let mut event = event;
             event.operator_binding_object_hash = Some(object_hash(0x20));
-            let action_code = u8::try_from(index).expect("thirteen actions");
+            let action_code = u8::try_from(index).expect("fifteen actions");
             let context_tag = match action_code {
                 0 | 1 | 8 | 12 => 0,
                 2 | 3 => 4,
@@ -470,7 +578,8 @@ mod fixtures {
                 9 => 6,
                 10 => 7,
                 11 => 8,
-                _ => unreachable!("the thirteen actions are closed"),
+                13 | 14 => 9,
+                _ => unreachable!("the fifteen actions are closed"),
             };
             expectations.push((event, action_code, context_tag));
         }
@@ -615,6 +724,18 @@ mod fixtures {
                 hash_position(MIGRATION_INVENTORY_FILL),
                 hash_position(MIGRATION_ACTIVE_POINTER_FILL),
             ],
+            LocalAuditActionV1::ReaderKeyEscrowPublication(_) => vec![
+                hash_position(ESCROW_PUBLICATION_ESCROW_FILL),
+                hash_position(ESCROW_PUBLICATION_APPROVAL_FILL),
+                ContextPosition::OptionalHash(None),
+                ContextPosition::OptionalHash(Some([ESCROW_PUBLICATION_BUNDLE_RELEASE_FILL; 32])),
+            ],
+            LocalAuditActionV1::ReaderKeyEscrowOpening(_) => vec![
+                hash_position(ESCROW_OPENING_ESCROW_FILL),
+                hash_position(ESCROW_OPENING_AUTHORIZATION_FILL),
+                ContextPosition::OptionalHash(Some([ESCROW_OPENING_TRANSPORT_FILL; 32])),
+                ContextPosition::OptionalHash(None),
+            ],
         }
     }
 
@@ -701,6 +822,14 @@ mod fixtures {
                     read.push(read_hash(decoder));
                 }
             }
+            LocalAuditActionV1::ReaderKeyEscrowPublication(_)
+            | LocalAuditActionV1::ReaderKeyEscrowOpening(_) => {
+                assert_eq!(decoder.array().unwrap(), Some(4));
+                read.push(read_hash(decoder));
+                read.push(read_hash(decoder));
+                read.push(read_optional_hash(decoder));
+                read.push(read_optional_hash(decoder));
+            }
         }
         assert_eq!(
             read.len(),
@@ -782,6 +911,21 @@ mod fixtures {
                 ContextPosition::Hash(*context.target_profile_hash().as_bytes()),
                 ContextPosition::Hash(*context.inventory_hash().as_bytes()),
                 ContextPosition::Hash(*context.active_pointer_hash().as_bytes()),
+            ],
+            LocalAuditActionV1::ReaderKeyEscrowPublication(context)
+            | LocalAuditActionV1::ReaderKeyEscrowOpening(context) => vec![
+                ContextPosition::Hash(*context.escrow_object_hash().as_bytes()),
+                ContextPosition::Hash(*context.authorization_object_hash().as_bytes()),
+                ContextPosition::OptionalHash(
+                    context
+                        .target_transport_key_thumbprint()
+                        .map(|thumbprint| *thumbprint.as_bytes()),
+                ),
+                ContextPosition::OptionalHash(
+                    context
+                        .bundle_release_object_hash()
+                        .map(|hash| *hash.as_bytes()),
+                ),
             ],
         }
     }

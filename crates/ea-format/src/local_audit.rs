@@ -3,7 +3,7 @@ use core::fmt;
 use ea_cbor::{ParserLimits, validate};
 use ea_crypto::{ContentType, parse_cose_sign1, validate_unsigned_protocol_core};
 use ea_types::{
-    ChainSequence, DeviceId, EntryHash, EventId, Hash32, ObjectHash, OrganizationId,
+    ChainSequence, DeviceId, EntryHash, EventId, Hash32, KeyThumbprint, ObjectHash, OrganizationId,
     RegistryVersion, UnixMillis,
 };
 use minicbor::{Decoder, Encoder};
@@ -700,6 +700,93 @@ impl ArchiveProfileMigrationContextV1 {
     }
 }
 
+/// Kontextarm 9, `reader-key-escrow-context-v1` (Reader-Key-Escrow-Profil §8).
+///
+/// Vier Positionen, ausschliesslich Hashes: Escrow-Objekthash,
+/// Autorisierungs-Objekthash (bei der Publikation die Freigabe, bei der
+/// Oeffnung die Oeffnungsautorisierung), Transport-Abdruck und
+/// Bundle-Release-Objekthash. Die Nullregel je Aktion ist STRENGER als die
+/// CDDL, die beide letzten Stellen `/ null` laesst: es gibt deshalb keinen
+/// freien Konstruktor, sondern genau einen je Aktion. Die Signaturgrenze in
+/// `ea-crypto` und der Dekodierer erzwingen dieselbe Regel.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ReaderKeyEscrowContextV1 {
+    escrow_object_hash: ObjectHash,
+    authorization_object_hash: ObjectHash,
+    target_transport_key_thumbprint: Option<KeyThumbprint>,
+    bundle_release_object_hash: Option<ObjectHash>,
+}
+
+impl ReaderKeyEscrowContextV1 {
+    /// Der Kontext der Publikation (Aktion 13): die Freigabe als
+    /// Autorisierung, kein Transport-Abdruck, der Objekthash der aktiven
+    /// `webBundleRelease`, die die Cutover-Vorbedingung erfuellt.
+    #[must_use]
+    pub const fn publication(
+        escrow_object_hash: ObjectHash,
+        approval_object_hash: ObjectHash,
+        bundle_release_object_hash: ObjectHash,
+    ) -> Self {
+        Self {
+            escrow_object_hash,
+            authorization_object_hash: approval_object_hash,
+            target_transport_key_thumbprint: None,
+            bundle_release_object_hash: Some(bundle_release_object_hash),
+        }
+    }
+
+    /// Der Kontext der Oeffnung (Aktion 14): die Oeffnungsautorisierung, der
+    /// Abdruck des Ziel-Transport-Schluessels, kein Bundle-Release-Hash.
+    #[must_use]
+    pub const fn opening(
+        escrow_object_hash: ObjectHash,
+        authorization_object_hash: ObjectHash,
+        target_transport_key_thumbprint: KeyThumbprint,
+    ) -> Self {
+        Self {
+            escrow_object_hash,
+            authorization_object_hash,
+            target_transport_key_thumbprint: Some(target_transport_key_thumbprint),
+            bundle_release_object_hash: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn escrow_object_hash(&self) -> ObjectHash {
+        self.escrow_object_hash
+    }
+
+    #[must_use]
+    pub const fn authorization_object_hash(&self) -> ObjectHash {
+        self.authorization_object_hash
+    }
+
+    #[must_use]
+    pub const fn target_transport_key_thumbprint(&self) -> Option<KeyThumbprint> {
+        self.target_transport_key_thumbprint
+    }
+
+    #[must_use]
+    pub const fn bundle_release_object_hash(&self) -> Option<ObjectHash> {
+        self.bundle_release_object_hash
+    }
+
+    /// Traegt der Kontext genau die Belegung, die die Aktion `code` verlangt?
+    const fn fits_action(&self, code: u8) -> bool {
+        match code {
+            13 => {
+                self.target_transport_key_thumbprint.is_none()
+                    && self.bundle_release_object_hash.is_some()
+            }
+            14 => {
+                self.target_transport_key_thumbprint.is_some()
+                    && self.bundle_release_object_hash.is_none()
+            }
+            _ => false,
+        }
+    }
+}
+
 impl IndependentTimeReferenceV1 {
     /// Der Konstruktor der eingefrorenen Zeitreferenz.
     ///
@@ -763,12 +850,13 @@ impl ClockReleaseContextV1 {
     }
 }
 
-/// Die dreizehn Aktionen von `schemas/reports/v1/local-audit.cddl`, jede
+/// Die fünfzehn Aktionen von `schemas/reports/v1/local-audit.cddl`, jede
 /// mit dem Kontext, an den die Grammatik sie bindet.
 ///
 /// `SessionExpired` (Code 12, DRK-282) ist ADDITIV am Ende angehängt: die
 /// Codes 0..11 und ihre Kodierung sind unverändert, und ein älterer Leser
 /// weist die 12 als unbekannten Aktionscode ab, statt sie falsch zu deuten.
+/// Ebenso additiv folgen 13 und 14 (Reader-Key-Escrow, DRK-458).
 pub enum LocalAuditActionV1 {
     Login(GenericAuditContextV1),
     ReauthFailure(GenericAuditContextV1),
@@ -785,10 +873,17 @@ pub enum LocalAuditActionV1 {
     /// Eine abgelaufene Bedienersitzung wurde abgewiesen (AK 53). Der
     /// generische Kontext nennt höchstens die bekannte Bindung als Hash.
     SessionExpired(GenericAuditContextV1),
+    /// Die Publikation eines Reader-Key-Escrows (Zeremonie A). Der Kontext
+    /// kommt aus [`ReaderKeyEscrowContextV1::publication`].
+    ReaderKeyEscrowPublication(ReaderKeyEscrowContextV1),
+    /// Die Oeffnung eines Reader-Key-Escrows (Zeremonie B): Verbrauch,
+    /// Abholung, Scheitern und Verfall. Der Kontext kommt aus
+    /// [`ReaderKeyEscrowContextV1::opening`].
+    ReaderKeyEscrowOpening(ReaderKeyEscrowContextV1),
 }
 
 impl LocalAuditActionV1 {
-    /// Der eingefrorene Aktionscode, `0..12` in der Reihenfolge von
+    /// Der eingefrorene Aktionscode, `0..14` in der Reihenfolge von
     /// `schemas/reports/v1/local-audit.cddl`.
     #[must_use]
     pub const fn code(&self) -> u8 {
@@ -806,6 +901,8 @@ impl LocalAuditActionV1 {
             Self::Destruction(_) => 10,
             Self::ArchiveProfileMigration(_) => 11,
             Self::SessionExpired(_) => 12,
+            Self::ReaderKeyEscrowPublication(_) => 13,
+            Self::ReaderKeyEscrowOpening(_) => 14,
         }
     }
 
@@ -829,6 +926,7 @@ impl LocalAuditActionV1 {
             Self::HistoricalRegrant(_) => 6,
             Self::Destruction(_) => 7,
             Self::ArchiveProfileMigration(_) => 8,
+            Self::ReaderKeyEscrowPublication(_) | Self::ReaderKeyEscrowOpening(_) => 9,
         }
     }
 }
@@ -1013,7 +1111,7 @@ pub fn encode_local_audit_event(core: &[u8], cose_sign1: &[u8]) -> Result<Vec<u8
     Ok(exact)
 }
 
-/// Dekodiert ein signiertes Ereignis jeder der dreizehn Aktionen.
+/// Dekodiert ein signiertes Ereignis jeder der fünfzehn Aktionen.
 ///
 /// Das allgemeine Gegenstueck zu [`decode_clock_release_audit`], das unberuehrt
 /// daneben stehen bleibt. Beide lesen denselben Kern und pruefen dieselben drei
@@ -1180,6 +1278,22 @@ fn encode_local_audit_context(
             // Zwei Koerper koennten auseinanderlaufen; einer kann es nicht.
             write_archive_profile_migration_context(encoder, context)?;
         }
+        LocalAuditActionV1::ReaderKeyEscrowPublication(context)
+        | LocalAuditActionV1::ReaderKeyEscrowOpening(context) => {
+            encoder
+                .array(4)
+                .and_then(|encoder| encoder.bytes(context.escrow_object_hash.as_bytes()))
+                .and_then(|encoder| encoder.bytes(context.authorization_object_hash.as_bytes()))
+                .map_err(|_| FormatError::Shape)?;
+            if let Some(thumbprint) = context.target_transport_key_thumbprint {
+                encoder
+                    .bytes(thumbprint.as_bytes())
+                    .map_err(|_| FormatError::Shape)?;
+            } else {
+                encoder.null().map_err(|_| FormatError::Shape)?;
+            }
+            encode_optional_hash(encoder, context.bundle_release_object_hash)?;
+        }
     }
     Ok(())
 }
@@ -1302,6 +1416,14 @@ fn decode_local_audit_action(
             decode_archive_profile_migration_context(decoder)?,
         ),
         12 => LocalAuditActionV1::SessionExpired(decode_generic_context(decoder)?),
+        13 => LocalAuditActionV1::ReaderKeyEscrowPublication(decode_reader_key_escrow_context(
+            decoder,
+            action_code,
+        )?),
+        14 => LocalAuditActionV1::ReaderKeyEscrowOpening(decode_reader_key_escrow_context(
+            decoder,
+            action_code,
+        )?),
         _ => return Err(FormatError::TagMismatch),
     };
     if action.code() != action_code || u64::from(action.context_tag()) != context_tag {
@@ -1391,6 +1513,26 @@ fn decode_archive_profile_migration_context(
         typed_bytes(decoder, 32)?,
         typed_bytes(decoder, 32)?,
     ))
+}
+
+/// Kontextarm 9 mit der Nullregel der Aktion: dieselbe Regel, die die
+/// Signaturgrenze schon angewandt hat, hier noch einmal gegen die Tabelle
+/// DIESER Crate — laufen die beiden auseinander, faellt es hier auf.
+fn decode_reader_key_escrow_context(
+    decoder: &mut Decoder<'_>,
+    action_code: u8,
+) -> Result<ReaderKeyEscrowContextV1, FormatError> {
+    expect_array_length(decoder, 4)?;
+    let context = ReaderKeyEscrowContextV1 {
+        escrow_object_hash: typed_bytes(decoder, 32)?,
+        authorization_object_hash: typed_bytes(decoder, 32)?,
+        target_transport_key_thumbprint: optional_typed_bytes(decoder, 32)?,
+        bundle_release_object_hash: optional_typed_bytes(decoder, 32)?,
+    };
+    if !context.fits_action(action_code) {
+        return Err(FormatError::Shape);
+    }
+    Ok(context)
 }
 
 fn optional_typed_bytes<'a, T>(
