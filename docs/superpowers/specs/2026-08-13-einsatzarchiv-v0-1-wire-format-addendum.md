@@ -472,15 +472,20 @@ COSE-Signatur. Deren Payload sind exakt die Bytes von
 `local-audit-event-core-v1`; geschützte Header lösen den Signer zum genannten
 aktiven Geräte- oder Admin-Zertifikat auf. Es gibt kein Freitext-Detailfeld.
 
-Action 0..12 bedeutet login, reauthFailure, bindingChange, revocation,
+Action 0..14 bedeutet login, reauthFailure, bindingChange, revocation,
 registryStaleWarnAcceptance, plaintextExport, clockSkewRelease,
 adminRootCeremony, recoveryTest, historicalRegrant, destruction,
-archiveProfileMigration und sessionExpired. `sessionExpired` (12) ist additiv
+archiveProfileMigration, sessionExpired, readerKeyEscrowPublication und
+readerKeyEscrowOpening. `sessionExpired` (12) ist additiv
 am Ende angehängt (DRK-282, AK 53): die Codes 0..11 und ihre Bytes bleiben
-unverändert, ein älterer Leser weist die 12 als unbekannte Action ab. Outcome 0..2 bedeutet failed, accepted und completed.
-Die Kontext-Tags 0..8 bedeuten generic, staleRegistry, clockRelease, export,
-bindingLifecycle, adminRoot, historicalRegrant, destruction und
-archiveProfileMigration.
+unverändert, ein älterer Leser weist die 12 als unbekannte Action ab. Ebenso
+additiv sind 13 und 14 (DRK-458, Reader-Key-Escrow-Profil §8). Outcome 0..2 bedeutet failed, accepted und completed.
+Die Kontext-Tags 0..9 bedeuten generic, staleRegistry, clockRelease, export,
+bindingLifecycle, adminRoot, historicalRegrant, destruction,
+archiveProfileMigration und readerKeyEscrow. Der Kontext readerKeyEscrow trägt
+Escrow- und Autorisierungs-Objekthash, den Transport-Abdruck (nur Action 14,
+sonst `null`) und den Objekthash der `webBundleRelease` (nur Action 13, sonst
+`null`).
 
 Die Action-zu-Kontext-Zuordnung ist geschlossen: login, reauthFailure,
 recoveryTest und sessionExpired verwenden generic; bindingChange und revocation verwenden
@@ -534,7 +539,9 @@ local-audit-event-core-v1 =
   local-audit-event-core-for-v1<9, historical-regrant-audit-context-v1> /
   local-audit-event-core-for-v1<10, destruction-audit-context-v1> /
   local-audit-event-core-for-v1<11, archive-profile-migration-audit-context-v1> /
-  local-audit-event-core-for-v1<12, generic-audit-context-v1>
+  local-audit-event-core-for-v1<12, generic-audit-context-v1> /
+  local-audit-event-core-for-v1<13, reader-key-escrow-audit-context-v1> /
+  local-audit-event-core-for-v1<14, reader-key-escrow-audit-context-v1>
 ```
 
 ## JSON-Berichte
