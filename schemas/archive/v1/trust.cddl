@@ -2,7 +2,8 @@ trust-subtype-v1 = "rootCertificate" / "deviceCertificate" / "operatorBinding" /
   "organizationAdminAuthorization" / "registryEvent" / "policy" /
   "writerTransition" / "grantAuthorization" / "destructionAuthorization" /
   "destructionTransition" / "deletionAttestation" / "webBundleRelease" /
-  "webBundleRevocation"
+  "webBundleRevocation" / "readerKeyEscrow" / "readerKeyEscrowApproval" /
+  "readerKeyEscrowRecoveryAuthorization"
 
 cose-sign1-v1 = #6.18(COSE-Sign1)
 
@@ -32,7 +33,12 @@ etb-body-v1 =
   ["destructionTransition", destruction-transition-core-v1, [+ cose-sign1-v1]] /
   ["deletionAttestation", deletion-attestation-core-v1, [+ cose-sign1-v1]] /
   ["webBundleRelease", web-bundle-release-core-v1, [cose-sign1-v1]] /
-  ["webBundleRevocation", web-bundle-revocation-core-v1, [cose-sign1-v1]]
+  ["webBundleRevocation", web-bundle-revocation-core-v1, [cose-sign1-v1]] /
+  ["readerKeyEscrow", reader-key-escrow-payload-v1, [cose-sign1-v1]] /
+  ["readerKeyEscrowApproval", reader-key-escrow-approval-core-v1,
+   [cose-sign1-v1]] /
+  ["readerKeyEscrowRecoveryAuthorization",
+   reader-key-escrow-recovery-authorization-core-v1, [2* cose-sign1-v1]]
 
 ; 0 writer, 1 reader, 2 organizationAdmin, 3 keyApprover,
 ; 4 recoveryRecipient, 5 historicalGrantAuthority, 6 serverReceipt,
@@ -211,6 +217,96 @@ web-bundle-revocation-core-v1 = [
   release-object-hash: bstr .size 32,
   effective-from-registry-version: uint,
   issued-at: int, root-key-thumbprint: bstr .size 32, []
+]
+
+; Reader-Key-Escrow v1.1
+; (docs/superpowers/specs/2026-09-08-einsatzarchiv-reader-key-escrow-profile.md
+; §3 und §4). Alle drei Familien sind DIREKTE Familien nach dem Vorbild der
+; Bundle-Freigabe: keines der drei Literale ist ein zulässiges
+; target-trust-subtype, keines trägt einen Arm in registry-change-v1, und keines
+; ist Gegenstand des Registrierungsabschlusses. Die Arität ist Vertrag:
+; 14, 16 und 17 Positionen.
+;
+; Die Nutzlast des Escrows ist zweielementig, aber NICHT
+; authorized-trust-payload-v1<T>: das zweite Element nennt die
+; Publikationsfreigabe dieses Profils, nicht eine
+; organizationAdminAuthorization. Die Trennung ist beabsichtigt, sie hält
+; root_trust_bindings und die eingefrorene Aktionstabelle unberührt.
+reader-key-escrow-payload-v1 = [
+  reader-key-escrow-core-v1,
+  reader-key-escrow-approval-object-hash: bstr .size 32
+]
+
+; encrypted-reader-kem-key ist 32 Byte Schlüssel plus 16 Byte AEAD-Tag.
+reader-key-escrow-core-v1 = [
+  1, organization-id: bstr .size 16,
+  reader-certificate-object-hash: bstr .size 32,
+  reader-subject-id: bstr .size 16,
+  enrollment-registry-version: uint,
+  enrollment-registry-head-hash: bstr .size 32,
+  enrollment-sequence: uint,
+  recovery-certificate-object-hash: bstr .size 32,
+  recovery-kem-key-thumbprint: bstr .size 32,
+  encapsulated-key: bstr .size 32,
+  encrypted-reader-kem-key: bstr .size 48,
+  issued-at: int, root-key-thumbprint: bstr .size 32, []
+]
+
+; Keine Zirkularität: die Freigabe bindet den Hash über den CORE
+; (escrow-core-hash), die Escrow-Nutzlast danach den Objekthash der Freigabe.
+; Höchstdauer expires-at minus issued-at: 300 000 ms.
+reader-key-escrow-approval-core-v1 = [
+  1, authorization-id: bstr .size 16, organization-id: bstr .size 16,
+  registry-version: uint, registry-head-hash: bstr .size 32,
+  authorization-sequence: uint,
+  admin-key-thumbprint: bstr .size 32,
+  admin-certificate-object-hash: bstr .size 32,
+  admin-operator-binding-object-hash: bstr .size 32,
+  escrow-core-hash: bstr .size 32,
+  reader-certificate-object-hash: bstr .size 32,
+  reader-subject-id: bstr .size 16,
+  issued-at: int, expires-at: int, nonce: bstr .size 32, []
+]
+
+; purpose 0 bedeutet Ersatz aller verlorenen Reader-Authenticators; einen
+; breiteren Operationscode gibt es nicht. Höchstdauer: 900 000 ms.
+reader-key-escrow-recovery-authorization-core-v1 = [
+  1, authorization-id: bstr .size 16, organization-id: bstr .size 16,
+  registry-version: uint, registry-head-hash: bstr .size 32,
+  authorization-sequence: uint,
+  escrow-object-hash: bstr .size 32,
+  reader-certificate-object-hash: bstr .size 32,
+  reader-subject-id: bstr .size 16,
+  enrollment-registry-version: uint,
+  enrollment-registry-head-hash: bstr .size 32,
+  target-transport-key-thumbprint: bstr .size 32,
+  purpose: 0,
+  issued-at: int, expires-at: int, nonce: bstr .size 32, []
+]
+
+; Die HPKE-Kontexte nach Profil §4. Sie werden NICHT übertragen, sondern aus
+; dem geprüften Core bzw. der geprüften Autorisierung abgeleitet und in der
+; Hausform hpke_info(cbor) / hpke_aad(cbor) verwendet. Der Familienunterschied
+; steht als Suite-Literal im CBOR; der leere Extension-Slot ist Pflicht.
+reader-key-escrow-hpke-context-v1 = [
+  1, organization-id: bstr .size 16,
+  reader-certificate-object-hash: bstr .size 32,
+  reader-subject-id: bstr .size 16,
+  enrollment-registry-version: uint,
+  enrollment-registry-head-hash: bstr .size 32,
+  recovery-certificate-object-hash: bstr .size 32,
+  recovery-kem-key-thumbprint: bstr .size 32,
+  "EINSATZARCHIV-READER-KEY-ESCROW-1", []
+]
+
+reader-key-escrow-restore-context-v1 = [
+  1, organization-id: bstr .size 16,
+  authorization-object-hash: bstr .size 32,
+  escrow-object-hash: bstr .size 32,
+  reader-certificate-object-hash: bstr .size 32,
+  reader-subject-id: bstr .size 16,
+  target-transport-key-thumbprint: bstr .size 32,
+  "EINSATZARCHIV-READER-KEY-ESCROW-RESTORE-1", []
 ]
 
 authorized-trust-payload-v1<T> = [
