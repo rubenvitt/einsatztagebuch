@@ -584,6 +584,11 @@ pub struct UnlockedVault {
     durable_grant_time_floor: std::cell::Cell<ea_types::UnixMillis>,
     vault_key: SecretBytes<CEK_SIZE>,
     kem_private_key: HpkeRecipientPrivateKey,
+    // Die Rohbytes DESSELBEN KEM, als `SecretBytes` unter `ZeroizeOnDrop`.
+    // Das Escrow der Zeremonie A versiegelt den Schluessel selbst per HPKE,
+    // und `HpkeRecipientPrivateKey` gibt seine Bytes nicht heraus. Sie fallen
+    // mit dem Tresor, also mit jeder Sperre der Sitzung (`ReaderSession::lock`).
+    kem_secret: SecretBytes<32>,
     kem_key_thumbprint: KeyThumbprint,
     audit_signing_key: SecretBytes<32>,
     pinned_anchor: TrustAnchorV1,
@@ -613,6 +618,20 @@ impl UnlockedVault {
     #[must_use]
     pub const fn kem_private_key(&self) -> &HpkeRecipientPrivateKey {
         &self.kem_private_key
+    }
+
+    /// Die Rohbytes des privaten KEM — NUR crate-intern, fuer das Versiegeln
+    /// des Escrows (Profil §5 Schritt 2). Sie verlassen `ea-reader` nie; die
+    /// Bruecke sieht weiterhin nur Kennungen, Abdruecke und Chiffrate.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "der erste Nutzer ist das Escrow-Paket (Scheibe e, E3)"
+        )
+    )]
+    pub(crate) const fn kem_secret(&self) -> &SecretBytes<32> {
+        &self.kem_secret
     }
 
     /// Der Abdruck des KEM-Schluessels.
@@ -888,6 +907,11 @@ impl ReaderVault {
         let contents = opened.with_exposed(VaultContentsV1::from_deterministic_cbor)?;
 
         let pinned_anchor = decode_trust_anchor(&contents.pinned_anchor_exact_bytes)?;
+        // Die Kopie entsteht VOR `from_bytes`, das sein Geheimnis konsumiert —
+        // derselbe `with_exposed`-Weg wie in `ReaderEnrollment::begin`.
+        let kem_secret = contents
+            .kem_private_key
+            .with_exposed(|bytes| SecretBytes::new(*bytes));
         let kem_private_key = HpkeRecipientPrivateKey::from_bytes(contents.kem_private_key)?;
         let kem_key_thumbprint =
             CanonicalPublicCoseKey::x25519(*kem_private_key.public_key().as_bytes())?.thumbprint();
@@ -897,6 +921,7 @@ impl ReaderVault {
             durable_grant_time_floor: std::cell::Cell::new(ea_types::UnixMillis::new(i64::MIN)),
             vault_key,
             kem_private_key,
+            kem_secret,
             kem_key_thumbprint,
             audit_signing_key: contents.audit_private_key,
             pinned_anchor,
@@ -914,4 +939,54 @@ fn random_bytes<const N: usize>() -> Result<[u8; N], ReaderVaultError> {
     let mut bytes = [0_u8; N];
     getrandom::fill(&mut bytes).map_err(|_| ReaderVaultError::Crypto(CryptoError::LocalRng))?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod kem_secret_tests {
+    use super::*;
+
+    const KEM_SEED: [u8; 32] = [0x5a; 32];
+
+    fn unlocked() -> UnlockedVault {
+        let anchor = include_bytes!(
+            "../../../vectors/trust/v1/registry/accepted-bootstrap-and-first-head/anchor.bin"
+        );
+        let contents = VaultContentsV1::new(
+            SecretBytes::new(KEM_SEED),
+            SecretBytes::new([0x5b; 32]),
+            anchor.to_vec(),
+            None,
+        );
+        let authenticator =
+            || AuthenticatorPrfV1::new(vec![0x07; 16], SecretBytes::new([0x5c; 32]));
+        let sealed = ReaderVault::seal(contents, &[authenticator()]).unwrap();
+        ReaderVault::unlock(&sealed, &authenticator()).unwrap()
+    }
+
+    /// Die Kopie des KEM-Geheimnisses ist DERSELBE Schlüssel, den der Tresor
+    /// als `HpkeRecipientPrivateKey` hält: ihr Abdruck ist der des Tresors.
+    #[test]
+    fn the_kem_secret_is_the_vault_kem_and_carries_its_thumbprint() {
+        let vault = unlocked();
+        vault
+            .kem_secret()
+            .with_exposed(|bytes| assert_eq!(bytes, &KEM_SEED));
+        let derived = HpkeRecipientPrivateKey::from_bytes(
+            vault
+                .kem_secret()
+                .with_exposed(|bytes| SecretBytes::new(*bytes)),
+        )
+        .unwrap()
+        .public_key();
+        assert_eq!(
+            derived.as_bytes(),
+            vault.kem_private_key().public_key().as_bytes()
+        );
+        assert!(
+            CanonicalPublicCoseKey::x25519(*derived.as_bytes())
+                .unwrap()
+                .thumbprint()
+                == vault.kem_key_thumbprint()
+        );
+    }
 }
