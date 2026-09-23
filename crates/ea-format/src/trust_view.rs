@@ -13,6 +13,11 @@ use crate::{
         decode_root_core, decode_web_bundle_release, decode_web_bundle_revocation,
         decode_writer_transition, payload_wraps_core,
     },
+    reader_key_escrow::{
+        ReaderKeyEscrowApprovalCoreV1, ReaderKeyEscrowPayloadV1,
+        ReaderKeyEscrowRecoveryAuthorizationCoreV1, decode_reader_key_escrow_approval,
+        decode_reader_key_escrow_payload, decode_reader_key_escrow_recovery_authorization,
+    },
 };
 
 pub struct AuthorizedTrustCoreV1<T> {
@@ -61,6 +66,9 @@ pub enum DecodedTrustPayloadV1 {
     DeletionAttestation(DeletionAttestationFieldsV1),
     WebBundleRelease(WebBundleReleaseCoreV1),
     WebBundleRevocation(WebBundleRevocationCoreV1),
+    ReaderKeyEscrow(ReaderKeyEscrowPayloadV1),
+    ReaderKeyEscrowApproval(ReaderKeyEscrowApprovalCoreV1),
+    ReaderKeyEscrowRecoveryAuthorization(ReaderKeyEscrowRecoveryAuthorizationCoreV1),
 }
 
 impl TrustPayloadV1 {
@@ -169,6 +177,19 @@ fn decode_payload(
         TrustSubtypeV1::WebBundleRevocation => Ok(DecodedTrustPayloadV1::WebBundleRevocation(
             decode_web_bundle_revocation(exact_payload)?,
         )),
+        TrustSubtypeV1::ReaderKeyEscrow => Ok(DecodedTrustPayloadV1::ReaderKeyEscrow(
+            decode_reader_key_escrow_payload(exact_payload)?,
+        )),
+        TrustSubtypeV1::ReaderKeyEscrowApproval => {
+            Ok(DecodedTrustPayloadV1::ReaderKeyEscrowApproval(
+                decode_reader_key_escrow_approval(exact_payload)?,
+            ))
+        }
+        TrustSubtypeV1::ReaderKeyEscrowRecoveryAuthorization => {
+            Ok(DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(
+                decode_reader_key_escrow_recovery_authorization(exact_payload)?,
+            ))
+        }
     }
 }
 

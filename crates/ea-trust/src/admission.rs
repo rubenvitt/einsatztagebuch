@@ -231,11 +231,21 @@ pub fn verify_catalogue_admission(
         // zulaessiges Ziel einer Admin-Autorisierung und deshalb auch kein
         // Gegenstand des Registrierungsabschlusses. Einen Stufe-3-Endpunkt
         // haben sie nicht.
+        //
+        // Die drei Escrow-Familien (v1.1-Profil §3.1) sind aus demselben Grund
+        // vom Registrierungsabschluss ausgenommen. Zur Laufzeit ist dieser Arm
+        // für sie heute unerreichbar: `TrustCatalog::load` weist jedes
+        // Escrow-Objekt vorher mit `TrustError::Source` ab, bis Scheibe (b) die
+        // echte Aufnahme baut. Wie die Aufnahme dann aussieht, entscheidet (b);
+        // dieser Arm hält nur den Compilerzwang und die Ablehnung.
         DecodedTrustPayloadV1::DestructionAuthorization(_)
         | DecodedTrustPayloadV1::DestructionTransition(_)
         | DecodedTrustPayloadV1::DeletionAttestation(_)
         | DecodedTrustPayloadV1::WebBundleRelease(_)
-        | DecodedTrustPayloadV1::WebBundleRevocation(_) => {
+        | DecodedTrustPayloadV1::WebBundleRevocation(_)
+        | DecodedTrustPayloadV1::ReaderKeyEscrow(_)
+        | DecodedTrustPayloadV1::ReaderKeyEscrowApproval(_)
+        | DecodedTrustPayloadV1::ReaderKeyEscrowRecoveryAuthorization(_) => {
             return Err(TrustError::ActionMismatch);
         }
     }

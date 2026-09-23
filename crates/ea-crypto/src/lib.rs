@@ -10,6 +10,7 @@ mod error;
 mod hpke;
 mod os_account;
 mod posture_document;
+mod reader_key_escrow;
 mod secret;
 mod thumbprint;
 
@@ -53,6 +54,11 @@ pub use os_account::{
 };
 pub use posture_document::{
     GO_LIVE_POSTURE_MAX_LIFETIME_MS, GoLivePostureCore, GoLivePostureFields,
+};
+pub use reader_key_escrow::{
+    READER_KEY_ESCROW_APPROVAL_MAX_LIFETIME_MS,
+    READER_KEY_ESCROW_RECOVERY_AUTHORIZATION_MAX_LIFETIME_MS,
+    reader_key_escrow_lifetime_is_admissible,
 };
 pub use secret::{SecretBytes, SecretVec};
 pub use thumbprint::CanonicalPublicCoseKey;
