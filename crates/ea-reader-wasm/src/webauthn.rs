@@ -68,9 +68,10 @@
 // und `cargo clippy --workspace --all-targets --all-features --locked --
 // -D warnings` faellt an einer unbenutzten Einfuhr genauso wie an einem echten
 // Fehler — dieselbe Lage wie im Kopf von [`crate::vault_bridge`].
-#[cfg(target_arch = "wasm32")]
+// Die drei Tabellen und die Tabellenhaelften der Wiederherstellung stehen auf
+// JEDEM Ziel: `tests/escrow_restore_abort.rs` bezeugt auf dem Wirt, dass der
+// Abbruch der Escrow-Zeremonie den wiederhergestellten KEM auch hier erreicht.
 use core::cell::{Cell, RefCell};
-#[cfg(target_arch = "wasm32")]
 use std::collections::BTreeMap;
 
 #[cfg(target_arch = "wasm32")]
@@ -93,9 +94,13 @@ use ea_reader::AuthenticatorTransportProfileV1;
 #[cfg(target_arch = "wasm32")]
 use ea_reader::{
     AttestedAuthenticatorV1, EnrollmentEndpointError, EnrollmentEndpoints,
-    EnrollmentRequestContextV1, EnrollmentRequestV1, FingerprintConfirmationV1, Hash32,
-    MIN_ENROLLED_AUTHENTICATORS_V1, OrganizationId, READER_VAULT_BLOB_KEY_V1, ReaderBlobError,
-    ReaderBlobKey, ReaderEnrollment, SubjectId, VAULT_PRF_SALT_V1, decode_trust_anchor,
+    EnrollmentRequestContextV1, EnrollmentRequestV1, MIN_ENROLLED_AUTHENTICATORS_V1,
+    OrganizationId, READER_VAULT_BLOB_KEY_V1, ReaderBlobError, ReaderBlobKey, SubjectId,
+    decode_trust_anchor,
+};
+use ea_reader::{
+    DeviceTrustStateV1, EnrollmentError, FingerprintConfirmationV1, Hash32, ReaderBlobStore,
+    ReaderEnrollment, VAULT_PRF_SALT_V1,
 };
 #[cfg(target_arch = "wasm32")]
 use js_sys::Uint8Array;
@@ -138,7 +143,6 @@ const PRF_OUTPUT_SIZE: usize = 32;
 /// Eine falsche Argumentform ist ein Fehler des Aufrufers und kein Befund ueber
 /// das Enrollment; sie bekommt deshalb einen eigenen Code und nicht einen der
 /// Enrollment-Codes, die eine Weigerung BEDEUTEN.
-#[cfg(target_arch = "wasm32")]
 const BRIDGE_ARGUMENT_CODE: &str = "EA-READER-ENROLLMENT-BRIDGE-ARGUMENT";
 
 /// Der Code fuer ein `attestationObject`, das die WebAuthn-Form nicht haelt.
@@ -158,9 +162,9 @@ const BRIDGE_ATTESTATION_CODE: &str = "EA-READER-ENROLLMENT-BRIDGE-ATTESTATION";
 /// Ein stiller Rueckfall auf ES256 im Browser liefe deshalb erst spaeter und an
 /// einer Stelle auf, an der niemand die Ursache sucht.
 ///
-/// Dasselbe cfg wie [`canonical_credential_public_key`]: die Umschrift prueft
-/// den Wert gegen die Karte des Browsers, und der Wirtstest bezeugt sie.
-#[cfg(any(target_arch = "wasm32", test))]
+/// Ohne cfg: die Umschrift in [`canonical_credential_public_key`] prueft den
+/// Wert gegen die Karte des Browsers, und [`begin_restored_status`] gibt ihn
+/// auf jedem Ziel heraus.
 const CREDENTIAL_PUBLIC_KEY_ALGORITHM_V1: i32 = -8;
 
 /// Die groesste Verschachtelungstiefe, die der CBOR-Gang mitgeht.
@@ -173,7 +177,6 @@ const CREDENTIAL_PUBLIC_KEY_ALGORITHM_V1: i32 = -8;
 #[cfg(any(target_arch = "wasm32", test))]
 const MAX_CBOR_NESTING_V1: u8 = 16;
 
-#[cfg(target_arch = "wasm32")]
 thread_local! {
     /// Die laufenden Enrollments dieses Workers.
     ///
@@ -201,7 +204,6 @@ thread_local! {
 }
 
 /// Die naechste Enrollment-Kennung, monoton und nie wiederverwendet.
-#[cfg(target_arch = "wasm32")]
 fn next_handle() -> u32 {
     NEXT_HANDLE.with(|counter| {
         let handle = counter.get();
@@ -586,7 +588,6 @@ fn with_enrollment<R>(
 /// Hexadezimal und ein Feld von Zeichenketten, weil das die Schreibweise
 /// dieser Bruecke ist: `prfSalt` reist genauso, und der Hauptthread hat mit
 /// `bytesFromHex` die Umrechnung ohnehin schon.
-#[cfg(target_arch = "wasm32")]
 fn registered_credential_ids_json(enrollment: &ReaderEnrollment) -> String {
     let ids: Vec<String> = enrollment
         .registered_credential_ids()
@@ -786,9 +787,25 @@ pub fn enrollment_register_authenticator(
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = "enrollmentFingerprints")]
 pub fn enrollment_fingerprints(handle: u32) -> Result<String, JsValue> {
-    let (key, bundle) = with_enrollment(handle, |enrollment| {
-        let shown = enrollment.fingerprints();
-        (shown.key_fingerprint_hex(), shown.bundle_fingerprint_hex())
+    enrollment_fingerprints_status(handle).map_err(JsValue::from_str)
+}
+
+/// Die Tabellenhaelfte von [`enrollment_fingerprints`], auf jedem Ziel
+/// uebersetzt: der Wirtszeuge `tests/escrow_restore_abort.rs` liest an ihr ab,
+/// ob ein Enrollment unter einer Kennung noch erreichbar ist.
+///
+/// # Errors
+/// `EA-READER-ENROLLMENT-BRIDGE-ARGUMENT` fuer eine unbekannte Kennung.
+pub fn enrollment_fingerprints_status(handle: u32) -> Result<String, &'static str> {
+    let (key, bundle) = ENROLLMENTS.with(|enrollments| {
+        enrollments
+            .borrow()
+            .get(&handle)
+            .map(|enrollment| {
+                let shown = enrollment.fingerprints();
+                (shown.key_fingerprint_hex(), shown.bundle_fingerprint_hex())
+            })
+            .ok_or(BRIDGE_ARGUMENT_CODE)
     })?;
     Ok(format!(
         "{{\"keyFingerprint\":\"{key}\",\"bundleFingerprint\":\"{bundle}\"}}"
@@ -940,6 +957,8 @@ pub async fn enrollment_begin_restored(
 ) -> Result<String, JsValue> {
     let bundle_fingerprint =
         Hash32::try_from(&bundle_fingerprint[..]).map_err(|_| bridge_argument())?;
+    // Erst pruefen, dann den Vorlauf fahren: eine Kennung ohne KEM soll kein
+    // OPFS-Handle oeffnen.
     if !crate::escrow_bridge::holds_restored(restored) {
         return Err(bridge_argument());
     }
@@ -947,26 +966,55 @@ pub async fn enrollment_begin_restored(
     let store = OpfsBlobStore::open(ENROLLMENT_BLOB_DIRECTORY, std::slice::from_ref(&key))
         .await
         .map_err(|error| blob_failure(&error))?;
-    if ReaderEnrollment::device_state(&store).map_err(|error| JsValue::from_str(error.code()))?
-        == ea_reader::DeviceTrustStateV1::Pinned
+    begin_restored_status(restored, &store, bundle_fingerprint).map_err(JsValue::from_str)
+}
+
+/// Die Tabellenhaelfte von [`enrollment_begin_restored`], auf jedem Ziel
+/// uebersetzt und auf dem Wirt bezeugt (`tests/escrow_restore_abort.rs`).
+///
+/// Geraetetor, Entnahme des KEM, `begin_restored` und Ablage laufen
+/// SYNCHRON hintereinander — zwischen Entnahme und Ablage liegt kein
+/// `await`, in dem ein Abbruch den KEM verfehlen koennte.
+///
+/// # Errors
+/// `EA-READER-ENROLLMENT-VAULT-PRESENT` auf einem Geraet mit Tresor,
+/// `EA-READER-ENROLLMENT-BRIDGE-ARGUMENT` fuer eine Kennung ohne
+/// wiederhergestellten KEM und die Codes des Enrollments.
+pub fn begin_restored_status(
+    restored: u32,
+    store: &dyn ReaderBlobStore,
+    bundle_fingerprint: Hash32,
+) -> Result<String, &'static str> {
+    if ReaderEnrollment::device_state(store).map_err(|error| error.code())?
+        == DeviceTrustStateV1::Pinned
     {
-        return Err(JsValue::from_str(
-            ea_reader::EnrollmentError::VaultAlreadyOnDevice.code(),
-        ));
+        return Err(EnrollmentError::VaultAlreadyOnDevice.code());
     }
-    let kem = crate::escrow_bridge::take_restored(restored).ok_or_else(bridge_argument)?;
-    let enrollment = ReaderEnrollment::begin_restored(&store, bundle_fingerprint, kem)
-        .map_err(|error| JsValue::from_str(error.code()))?;
+    let kem = crate::escrow_bridge::take_restored(restored).ok_or(BRIDGE_ARGUMENT_CODE)?;
+    let enrollment = ReaderEnrollment::begin_restored(store, bundle_fingerprint, kem)
+        .map_err(|error| error.code())?;
 
     let registered_credential_ids = registered_credential_ids_json(&enrollment);
     let handle = next_handle();
     ENROLLMENTS.with(|enrollments| {
         enrollments.borrow_mut().insert(handle, enrollment);
     });
+    crate::escrow_bridge::link_enrollment(restored, handle);
     let salt = hex::encode(VAULT_PRF_SALT_V1);
     Ok(format!(
         "{{\"handle\":{handle},\"prfSalt\":\"{salt}\",\"publicKeyAlgorithms\":[{CREDENTIAL_PUBLIC_KEY_ALGORITHM_V1}],\"registeredCredentialIds\":{registered_credential_ids}}}"
     ))
+}
+
+/// Verwirft ein Enrollment samt Bestaetigung — `ReaderEnrollment` faellt, und
+/// `SecretBytes` nullt den KEM. Gerufen vom Abbruch der Escrow-Zeremonie
+/// ([`crate::escrow_bridge::transport_abort`]); fuer eine abgeschlossene oder
+/// unbekannte Kennung wirkungslos.
+pub(crate) fn discard_enrollment(handle: u32) {
+    let enrollment = ENROLLMENTS.with(|enrollments| enrollments.borrow_mut().remove(&handle));
+    let confirmation =
+        CONFIRMATIONS.with(|confirmations| confirmations.borrow_mut().remove(&handle));
+    drop((enrollment, confirmation));
 }
 
 /// Schliesst ein Enrollment aus [`enrollment_begin_restored`] LOKAL ab:

@@ -92,6 +92,12 @@ ea-types.workspace = true
 ed25519-dalek.workspace = true
 # Der handgeschriebene CBOR-Weg der Trust- und Formatkulisse.
 minicbor.workspace = true
+# Die Escrow-Linie (`crates/ea-trust/tests/escrow_support`), die
+# `tests/escrow_restore_abort.rs` per `#[path]` einbindet, baut ihre Objekte
+# ueber die Testkit-Bauer — dieselbe Zeugenkante wie in `crates/ea-reader`.
+# Die Crate steht auf `WASM32_EXEMPT_CRATES`; die wasm32-Zeile des Gates faehrt
+# ohne `--all-targets` und zieht sie nie in den Lib-Graphen.
+ea-testkit.workspace = true
 # Nur fuer `tests/bridge_boundary.rs`. Dev-Kanten sind hier unbedenklich: die
 # wasm32-Zeile des Gates faehrt ohne `--all-targets` und zieht sie nie in den
 # Graphen.

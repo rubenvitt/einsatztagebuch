@@ -2082,6 +2082,7 @@ dependencies = [
  "ea-index",
  "ea-reader",
  "ea-schema",
+ "ea-testkit",
  "ea-time",
  "ea-trust",
  "ea-types",
