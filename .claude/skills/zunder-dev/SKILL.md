@@ -1,13 +1,13 @@
 ---
-name: clickup-dev
-description: Use when a request names a DRK-### ticket or says "ClickUp dev drk-###", asks to pick up, implement, or close a task from the Einsatztagebuch board, or asks for a ticket "in neuem Worktree mit PR als Ergebnis". Also use when a ClickUp call in this repo returns "Team not authorized" or the session says the ClickUp connector needs authentication.
+name: zunder-dev
+description: Use when a request names a Zunder task (UUID or `zunder.rubeen.dev` link) or an old DRK-### ticket, asks to pick up, implement, or close a task from the Einsatztagebuch board, or asks for a ticket "in neuem Worktree mit PR als Ergebnis".
 ---
 
-# ClickUp Dev (Einsatztagebuch)
+# Zunder Dev (Einsatztagebuch)
 
 ## Überblick
 
-Ein DRK-Ticket wird in einem eigenen Worktree auf dem **neuesten `origin/main`** umgesetzt, mit
+Ein Ticket wird in einem eigenen Worktree auf dem **neuesten `origin/main`** umgesetzt, mit
 Subagents gebaut und geprüft, und endet als PR — nicht als Merge. TDD, Planausführung und Review
 kommen aus den superpowers-Skills; hier steht nur, was Board und Repo zusätzlich verlangen.
 
@@ -15,60 +15,69 @@ kommen aus den superpowers-Skills; hier steht nur, was Board und Repo zusätzlic
 
 | | |
 |---|---|
-| Workspace | `9015920204` |
-| Space | `901510125552` |
-| Liste **Einsatztagebuch** | `901525380889` |
-| Präfix | `DRK-` — den Präfix teilen andere Listen; **die Liste** trennt die Projekte |
+| Bereich | `DRK Bereitschaft` — `f22114c8-7f6d-5b51-8696-0cca72f2e9b9` |
+| Projekt **Einsatztagebuch** (Dev, `rubenvitt/einsatztagebuch`) | `1e51337d-9b35-58eb-aafe-32ccfacc7bfa` |
+| Projektstatus | `completed` — `list_structure` zeigt es nur mit `include_archived: true` |
 | Epics | `[Epic] … Stufe N …` (DRK-249 = Stufe 4); die Beschreibung nennt den Plan unter `docs/superpowers/plans/` |
 | Task-Titel | `S4-T12 — …` = Überschrift `### Task 12:` im Stufe-4-Plan; Ledger-Zeilen (`FR-104`, `WR-082`) stehen am Ende der Beschreibung |
 
-**Der Connector funktioniert.** Die Session-Start-Warnung „ClickUp requires authentication" ist
-falsch; `mcp__claude_ai_ClickUp__*` liest und schreibt. Ein Ticket wird **gelesen**, nie aus
-Branchnamen oder PR-Nummern erschlossen:
+Seit 12.10.2026 liegen die Tickets in **Zunder** (`https://zunder.rubeen.dev`), Connector
+`mcp__claude_ai_Zunder__*`. Ein Ticket wird **gelesen**, nie aus Branchnamen oder PR-Nummern
+erschlossen:
 
 ```
-clickup_get_task(task_id: "DRK-264", workspace_id: "9015920204",
-                 include: ["description"], expand_statuses: true)
+get_task(task_id: "<uuid>")          # Beschreibung und Unteraufgaben-Baum
 ```
 
-Ohne `workspace_id` antwortet die Custom-ID-Auflösung mit `{"error":"Team not authorized"}` —
-ein fehlendes Argument, kein Auth-Problem; im Zweifel `clickup_get_workspace_hierarchy` sondieren.
+## Ticket-IDs
 
-## Status-Spur (exakt so, klein geschrieben)
+Zunder hat keine sprechenden Nummern; eine Aufgabe heißt über ihre UUID.
+
+- **Verweis** (Commit-Body, PR-Body): `Zunder: https://zunder.rubeen.dev/#/aufgabe/<uuid>`
+- **Branch**: die ersten 8 Hex-Zeichen der UUID statt der Nummer, `<8hex>-<slug>`.
+- **Alte Tickets** (`DRK-###` in Commits, Plänen, PRs) bleiben als Historie gültig. Zunder löst die
+  Custom-ID nicht auf; nur die numerische ID aus dem alten ClickUp-Link geht
+  (`get_task(clickup_id: "…")`, Web `https://zunder.rubeen.dev/#/clickup/<clickup_id>`), sonst
+  `search` nach dem Titel.
+
+## Status (exakt diese Codes)
 
 ```
-idee → geplant → aktiv → blockiert → review → erledigt → archiviert
+open → in_progress → review → done        dazu blocked, dropped
 ```
 
-| Moment | `clickup_update_task(task_id, workspace_id, status: …)` |
+| Moment | `update_task(task_id, …)` |
 |---|---|
-| Ticket aufgenommen, Worktree steht | `aktiv` |
-| Harte Sperre, die nur der Mensch lösen kann | `blockiert` + `clickup_create_task_comment` mit dem Grund |
-| PR eröffnet | `review` + `clickup_create_task_comment` mit der PR-URL |
-| Nach dem Merge (Mensch oder spätere Session auf Zuruf) | `erledigt` |
+| Ticket aufgenommen, Worktree steht | `claim_task(task_id, agent)` + `status: "in_progress"`, `branch` |
+| Harte Sperre, die nur der Mensch lösen kann | `blocked` + Grund als `## Notizen` mit Datum in `description` (vorher `get_task`, nichts überschreiben) |
+| PR eröffnet | `review` + `pr_url`, danach `release_task(task_id, agent)` |
+| Nach dem Merge (Mensch oder spätere Session auf Zuruf) | `done` |
+| Bewusst nicht umgesetzt | `dropped` — nie `delete_task` |
 
-Nur vorwärts, nie redundant. Der Epic bleibt `aktiv`, bis seine Subtasks durch sind.
+Nur vorwärts, nie redundant. Der Epic bleibt `in_progress`, bis seine Subtasks durch sind.
+`claim_task` gilt 120 Minuten; erneut aufrufen verlängert. Neue Subtasks: `create_task` mit
+`parent_id`, mehrere auf einmal `decompose_task`.
 
 ## Ablauf
 
-1. **Ticket und Epic lesen.** `clickup_get_task` für das Ticket, danach für `parent`. Der
+1. **Ticket und Epic lesen.** `get_task` für das Ticket, danach für `parent_id`. Der
    Plan-Abschnitt (Task-Nummer aus dem Titel) ist der Vertrag, dazu die Global Constraints des
    Plans; das Ticket ist die Kurzfassung und nennt die Ledger-Zeilen.
-2. **Doppelarbeit ausschließen.** `git branch -a --list 'drk-<nr>-*'` und `git worktree list`
-   prüfen. Gibt es schon einen Branch zu dieser Nummer, **anhalten und melden** (Status bleibt,
-   wie er ist) — nicht mit anderem Slug daneben bauen. Fremde und gelockte Worktrees bleiben
-   unangetastet.
+2. **Doppelarbeit ausschließen.** `git branch -a --list '<8hex>-*'`, `git worktree list` und
+   `claimed_by` im Ticket prüfen. Gibt es schon einen Branch zu dieser Aufgabe, **anhalten und
+   melden** (Status bleibt, wie er ist) — nicht mit anderem Slug daneben bauen. Fremde und
+   gelockte Worktrees bleiben unangetastet.
 3. **Worktree auf `origin/main`.** Erst fetchen, dann branchen — das lokale `main` hängt
    regelmäßig Merges hinterher und wird **nicht** vorgespult:
    ```bash
    git -C ~/dev/einsatztagebuch fetch origin
-   git -C ~/dev/einsatztagebuch worktree add .worktrees/drk-<nr>-<slug> -b drk-<nr>-<slug> origin/main
+   git -C ~/dev/einsatztagebuch worktree add .worktrees/<8hex>-<slug> -b <8hex>-<slug> origin/main
    ```
    Branch und Ordner heißen gleich, ohne Typpräfix, Slug 2–4 englische Wörter
-   (`drk-262-encrypted-index`). Verlangt der Auftrag einen neuen Worktree, gilt das auch, wenn
+   (`de51bfbf-encrypted-index`). Verlangt der Auftrag einen neuen Worktree, gilt das auch, wenn
    die Session bereits in einem Harness-Worktree (`.claude/worktrees/bridge-*`) sitzt.
 4. **Setup:** `pnpm install --frozen-lockfile`, dann `.superpowers/env.sh` aus „Umgebung" anlegen
-   (`.superpowers/` ist ignoriert). Danach Status `aktiv`.
+   (`.superpowers/` ist ignoriert). Danach `claim_task` und Status `in_progress`.
 5. **Plan gegen den Arbeitsbaum messen.** Jeder Task wurde geschrieben, bevor seine Nachbarn
    ausgeliefert haben. Ein Explore-Agent prüft jeden Namen, jede Signatur, jede Datei des
    Abschnitts gegen den Baum und meldet Abweichungen mit `Datei:Zeile`. Ändert sich der
@@ -110,20 +119,22 @@ Nur vorwärts, nie redundant. Der Epic bleibt `aktiv`, bis seine Subtasks durch 
    Exitcode, `passed/failed`, Laufzeit **abschreiben**. Was nicht lief, steht mit Grund als
    „nicht ausgeführt" im PR — kein Gate wird schöngeschrieben.
    **REQUIRED SUB-SKILL:** superpowers:verification-before-completion.
-9. **Push und PR.** `git push -u origin drk-<nr>-<slug>`, dann
-   `gh pr create --base main --title … --body-file …`. Danach Status `review` und PR-URL als
-   Ticketkommentar. **Nicht mergen** — das entscheidet der Mensch nach der CI (25–75 min); die
+9. **Push und PR.** `git push -u origin <8hex>-<slug>`, dann
+   `gh pr create --base main --title … --body-file …`. Danach Status `review`, `pr_url` setzen und
+   `release_task`. **Nicht mergen** — das entscheidet der Mensch nach der CI (25–75 min); die
    Session endet mit der Meldung von PR-URL, Gate-Zahlen und offenen Grenzen.
 
 ## Commit- und PR-Form
 
 Commit-Betreff englisch, Conventional Commits, Scope = Crate-Familie (`reader`, `plan`, `gate`);
-Body deutsch und nennt das Gemessene und die Entscheidung, nicht die Dateiliste.
+Body deutsch und nennt das Gemessene und die Entscheidung, nicht die Dateiliste; letzte Zeile
+`Zunder: https://zunder.rubeen.dev/#/aufgabe/<uuid>`.
 
-PR-Titel: `DRK-<nr>: <Tickettitel>` ohne `S4-Txx` und ohne `(alt N)`. PR-Body deutsch; die
+PR-Titel: `<Tickettitel>` ohne `S4-Txx` und ohne `(alt N)`. PR-Body deutsch; die
 Abschnitte, soweit zutreffend, in dieser Reihenfolge:
 
-1. Eine Zeile: `Stufe-N-Task M (<Planpfad>), ClickUp DRK-<nr>.` plus die Paragraphen der
+1. Eine Zeile: `Stufe-N-Task M (<Planpfad>).` und darunter
+   `Zunder: https://zunder.rubeen.dev/#/aufgabe/<uuid>`, plus die Paragraphen der
    Spec unter `docs/superpowers/specs/`, die der Abschnitt zitiert (`web-reader-design.md` §6.5).
 2. `## Zwei Commits` / `## Drei Commits` — Hash, Typ, ein Halbsatz je Commit.
 3. `## Was <die Sache> zusagt` — die tragenden Entscheidungen als **fette Leitsätze**, je mit
@@ -160,7 +171,7 @@ unset RUSTUP_TOOLCHAIN
 
 ## Rote Flaggen
 
-- „Der ClickUp-Connector ist nicht autorisiert, ich leite das Ticket aus dem Branch ab."
+- „Der Zunder-Connector antwortet nicht, ich leite das Ticket aus dem Branch ab."
 - „Der fremde Worktree hat null Commits, den kann ich entfernen."
 - „Ich spule kurz `main` vor" / „Ich branche vom lokalen `main`."
 - „`stage-gate 4` ging nicht, ich lasse die Zeile weg."
